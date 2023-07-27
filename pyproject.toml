@@ -1,0 +1,90 @@
+# pyproject.toml
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "VAEDecon"
+version = "0.1.0"
+description = "Gene expression deconvolution by single cell generative model"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+authors = [
+    { name = "OnlyBelter", email = "onlybelter@outlook.com" },
+]
+keywords = [
+    "VAE",
+    "scRNA-seq",
+    "RNA-seq",
+    "VAEDecon",
+    "deconvolution",
+]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Typing :: Typed",
+]
+dependencies = [
+    "tensorflow>=2.8.0",
+    "scikit-learn>=1.2.0",
+    "anndata>=0.8.0",
+    "scanpy==1.9.3",
+    "pandas==1.5.3",
+    "numpy",
+    "scipy",
+    "umap-learn==0.5.1",
+    "matplotlib<3.7",
+    "seaborn>=0.11.2",
+    "bbknn==1.5.1",
+    "SciencePlots",
+    "tables>=3.6.1",
+    "build",
+    "sphinx>=6.0",
+    "myst-parser>=0.13.6",
+    "fsspec",
+    "h5py",
+#    "sphinx_book_theme",
+    "jinja2<3.1",
+#    "sphinx_rtd_theme"
+]
+#dynamic = ["version"]
+
+[project.urls]
+#Documentation = "https://deside.readthedocs.io/"
+Homepage = "https://github.com/OnlyBelter/VAEDecon"
+Source = "https://github.com/OnlyBelter/VAEDecon"
+Tracker = "https://github.com/OnlyBelter/VAEDecon/issues"
+
+# https://realpython.com/pypi-publish-python-package/#version-your-package
+[tool.bumpver]
+current_version = "0.1.0"
+version_pattern = "MAJOR.MINOR.PATCH"
+commit_message = "bump version {old_version} -> {new_version}"
+commit = true
+tag = true
+push = false
+
+[tool.bumpver.file_patterns]
+"pyproject.toml" = [
+    'current_version = "{version}"',
+]
+"setup.py" = [
+    "{version}",
+    "{pep440_version}",
+]
+"README.rst" = [
+    "{version}",
+    "{pep440_version}",
+]
+"README.md" = [
+    "{version}",
+    "{pep440_version}",
+]
+
