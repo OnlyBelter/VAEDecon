@@ -15,7 +15,7 @@ warnings.simplefilter(action='ignore', category=UserWarning)
 def tcga_evaluation(marker_gene_file_path, total_result_dir, pred_cell_frac_tcga_dir,
                     cell_types, tcga_data_dir, outlier_file_path=None, pre_trained_model_dir=None,
                     model_name: str = None, signature_score_method: str = 'mean_exp', cancer_types: list = None,
-                    update_figures=False):
+                    update_figures=False, pathway_mask=None):
     """
 
     :param marker_gene_file_path:
@@ -31,6 +31,7 @@ def tcga_evaluation(marker_gene_file_path, total_result_dir, pred_cell_frac_tcga
         gene_signature_score (Combes et al., 2022, Cell 185, 184-203)
     :param cancer_types: a list of cancer types
     :param update_figures: update figures or not
+    :param pathway_mask: genes by pathways, 1 for genes in the pathway, 0 for genes not in the pathway
     :return:
     """
     # marker_gene_file_path = marker_gene_file_path
@@ -120,12 +121,13 @@ def tcga_evaluation(marker_gene_file_path, total_result_dir, pred_cell_frac_tcga
     # outlier_file_path = 'outlier_samples.txt'
     outlier_file_path = outlier_file_path
 
-    cell_types_clustering = [i for i in cell_types if i != 'Cancer Cells']
-    compare_exp_and_cell_fraction(merged_file_path=merged_signature_score_and_cell_frac_file_path,
-                                  clustering_ct=cell_types_clustering, font_scale=1.5,
-                                  cell_types=cell_types, outlier_file_path=outlier_file_path,
-                                  result_dir=result_dir_new, update_figures=update_figures,
-                                  signature_score_method=signature_score_method)
+    if pathway_mask is None:
+        cell_types_clustering = [i for i in cell_types if i != 'Cancer Cells']
+        compare_exp_and_cell_fraction(merged_file_path=merged_signature_score_and_cell_frac_file_path,
+                                      clustering_ct=cell_types_clustering, font_scale=1.5,
+                                      cell_types=cell_types, outlier_file_path=outlier_file_path,
+                                      result_dir=result_dir_new, update_figures=update_figures,
+                                      signature_score_method=signature_score_method)
 
     print('Plot predicted cell proportion across all cancer types...')
     cell_types2max = {'B Cells': 0.1, 'CD4 T': 0.1, 'DC': 0.1, 'CD8 T': 0.1}
@@ -221,7 +223,8 @@ def run_step4(tcga_data_dir, cancer_types, log_file_path, model_dir, marker_gene
                         cell_types=all_cell_types, tcga_data_dir=tcga_data_dir,
                         pre_trained_model_dir=model_dir, model_name=model_name,
                         signature_score_method=signature_score_method, cancer_types=cancer_types,
-                        update_figures=update_figures, outlier_file_path=outlier_file_path)
+                        update_figures=update_figures, outlier_file_path=outlier_file_path,
+                        pathway_mask=pathway_mask)
 
         # calculate the distribution of predicted cell proportions in TCGA
         # model_name = 'DeSide'

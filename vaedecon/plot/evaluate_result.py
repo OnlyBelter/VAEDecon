@@ -712,7 +712,7 @@ def compare_y_y_pred_plot_cpe(y_true: pd.Series, y_pred: pd.Series, inx=tuple(),
 def plot_pred_cell_prop_with_cpe(cpe_file_path, pred_cell_prop_file_path, result_dir, save_metrics: bool = True):
     all_cancer_types = sorted([i for i in cancer_types if i != 'PAAD'])
     fig, axes = plt.subplots(6, 3, sharex='all', sharey='all', figsize=(5, 6))
-    pred_cell_prop = pd.read_csv(pred_cell_prop_file_path, index_col=0)
+    pred_cell_prop = pd.read_csv(pred_cell_prop_file_path, index_col='sample_id')
     cpe = read_cancer_purity(cpe_file_path, sample_names=pred_cell_prop.index)
     pred_cell_prop = pred_cell_prop.merge(cpe['CPE'], left_index=True, right_index=True)
     metrics_value = {}
