@@ -88,12 +88,13 @@ class DeSide(object):
     def train_model(self, training_set_file_path: Union[str, list], hyper_params: dict,
                     cell_types: list = None, scaling_by_sample: bool = True, callback: bool = True,
                     n_epoch: int = 10000, metrics: str = 'mse', n_patience: int = 100, scaling_by_constant=False,
-                    remove_cancer_cell=False, fine_tune=False, one_minus_alpha: bool = False, verbose=1):
+                    remove_cancer_cell=False, fine_tune=False, one_minus_alpha: bool = False, verbose=1,
+                    pathway_mask=None):
         """
         Training DeSide model
 
         :param training_set_file_path: the file path of training set, .h5ad file, log2cpm1p format, samples by genes
-        :param hyper_params: pre-determined hyper-parameters for DeSide model
+        :param hyper_params: pre-determined hyperparameters for DeSide model
         :param cell_types: specific a list of cell types instead of using all cell types in training set
         :param scaling_by_sample: whether to scale the expression values of each sample to [0, 1] by 'min_max'
         :param callback: whether to use callback function when training model
@@ -105,7 +106,8 @@ class DeSide(object):
         :param scaling_by_constant: scaling GEP by dividing a constant in log space, default value is 20,
             to make sure all expression values are in [0, 1) if True
         :param one_minus_alpha: use 1 - alpha for all cell types if True
-        :param verbose: if printing progress during training, 0: silent, 1: progress bar, 2: one line per epoch
+        :param verbose: whether to print progress during training, 0: silent, 1: progress bar, 2: one line per epoch
+        :param pathway_mask: the mask of pathway genes, 1: pathway gene, 0: non-pathway gene, genes by pathways
         """
         self.one_minus_alpha = one_minus_alpha
         if not os.path.exists(self.model_file_path):
@@ -136,9 +138,16 @@ class DeSide(object):
 
             # scaling x
             x_obj = ReadExp(x, exp_type='log_space')
+            del x
             if len(training_set_file_path) >= 2:
-                x_obj.to_tpm()  # if multiple training set, rescale to TPM, in case some genes were removed
+                # if multiple training sets exist, re-normalise to TPM, in case some genes were removed during merging
+                x_obj.to_tpm()
                 x_obj.to_log2cpm1p()
+
+            # get pathway profiles here
+            if pathway_mask is not None:
+                x_obj = self._get_pathway_profiles(x_obj, pathway_mask)
+
             if scaling_by_sample:
                 x_obj.do_scaling()
             if scaling_by_constant:
@@ -211,8 +220,36 @@ class DeSide(object):
         else:
             print(f'Previous model existed: {self.model_file_path}')
 
+    @staticmethod
+    def _get_pathway_profiles(x_obj, pathway_mask: pd.DataFrame):
+        """
+        :param x_obj: input gene expression matrix, a class of ReadExp
+        :param pathway_mask: pathway mask
+        :return: pathway profiles, a class of ReadExp
+        """
+        if x_obj.file_type == 'log_space':
+            x_obj.to_tpm()
+        x = x_obj.get_exp()
+        common_genes = list(set(x.columns) & set(pathway_mask.index))
+        print('common genes between training set and pathway mask:', len(common_genes))
+        genes_only_in_x = list(set(x.columns) - set(pathway_mask.index))
+        # add genes only in x to pathway mask
+        if len(genes_only_in_x) > 0:
+            print('genes only in training set:', len(genes_only_in_x))
+            pathway_mask = pd.concat([pathway_mask,
+                                      pd.DataFrame(np.zeros((len(genes_only_in_x), pathway_mask.shape[1])),
+                                                   index=genes_only_in_x, columns=pathway_mask.columns)])
+        pathway_mask = pathway_mask.loc[x.columns, :]
+        x = x @ pathway_mask  # get pathway profiles by matrix multiplication
+        # log2 transform
+        x = np.log2(x + 1)
+        print('x shape:', x.shape)
+        x_obj = ReadExp(x, exp_type='log_space')
+        return x_obj
+
     def get_x_before_predict(self, input_file, exp_type, transpose: bool = False, print_info: bool = True,
-                             scaling_by_sample: bool = False, scaling_by_constant: bool = True):
+                             scaling_by_sample: bool = False, scaling_by_constant: bool = True,
+                             pathway_mask: pd.DataFrame = None):
         """
         :param input_file: input file path
         :param exp_type: 'log_space' or 'raw_space'
@@ -220,6 +257,7 @@ class DeSide(object):
         :param print_info: if True, print info
         :param scaling_by_sample: if True, scaling by sample
         :param scaling_by_constant: if True, scaling by constant
+        :param pathway_mask: if not None, use pathway mask to get pathway profiles
         :return: x
         """
         if self.gene_list is None:
@@ -236,10 +274,16 @@ class DeSide(object):
             raise Exception(f'The current file path of raw data is {input_file}, '
                             f'only "*_.csv", "*_.txt", "*_.tsv", or "*_.h5ad" is supported, ' 
                             f'please check the file path and try again.')
-        # check gene list
-        read_df_obj.align_with_gene_list(gene_list=self.gene_list, fill_not_exist=True)
-        if exp_type != 'log_space':
-            read_df_obj.to_log2cpm1p()
+
+        if pathway_mask is not None:
+            read_df_obj = self._get_pathway_profiles(read_df_obj, pathway_mask)
+
+        # check gene list / pathway list
+        pathway_list = True if pathway_mask is not None else False
+        read_df_obj.align_with_gene_list(gene_list=self.gene_list, fill_not_exist=True, pathway_list=pathway_list)
+        if pathway_mask is None:
+            if exp_type != 'log_space':
+                read_df_obj.to_log2cpm1p()
         if scaling_by_sample:
             read_df_obj.do_scaling()
         if scaling_by_constant:
@@ -259,9 +303,9 @@ class DeSide(object):
             print(f'   The shape of X is: {x.shape}, (n_sample, n_gene)')
         return x
 
-    def predict(self, input_file, exp_type, output_file_path: str = None,
-                transpose: bool = False, print_info: bool = True, add_cell_type: bool = False,
-                scaling_by_constant=False, scaling_by_sample=True, one_minus_alpha: bool = False):
+    def predict(self, input_file, exp_type, output_file_path: str = None, transpose: bool = False,
+                print_info: bool = True, add_cell_type: bool = False, scaling_by_constant=False,
+                scaling_by_sample=True, one_minus_alpha: bool = False, pathway_mask: pd.DataFrame = None):
         """
         Predicting cell proportions using pre-trained model.
 
@@ -275,6 +319,7 @@ class DeSide(object):
         :param scaling_by_constant: scaling log2(TPM + 1) by dividing 20
         :param scaling_by_sample: scaling by sample, same as Scaden
         :param one_minus_alpha: use 1 - alpha for all cell types if True
+        :param pathway_mask: if not None, use pathway mask to get pathway profiles
         """
         self.one_minus_alpha = one_minus_alpha
         if print_info:
@@ -284,7 +329,8 @@ class DeSide(object):
 
         # load input data
         x = self.get_x_before_predict(input_file, exp_type, transpose=transpose, print_info=print_info,
-                                      scaling_by_constant=scaling_by_constant, scaling_by_sample=scaling_by_sample)
+                                      scaling_by_constant=scaling_by_constant, scaling_by_sample=scaling_by_sample,
+                                      pathway_mask=pathway_mask)
 
         # load pre-trained model
         if self.model is None:
