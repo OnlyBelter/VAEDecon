@@ -221,10 +221,11 @@ class DeSide(object):
             print(f'Previous model existed: {self.model_file_path}')
 
     @staticmethod
-    def _get_pathway_profiles(x_obj, pathway_mask: pd.DataFrame):
+    def _get_pathway_profiles(x_obj, pathway_mask: pd.DataFrame, method='add_to_end'):
         """
         :param x_obj: input gene expression matrix, a class of ReadExp
         :param pathway_mask: pathway mask
+        :param method: 'convert' or 'add_to_end', convert to pathway profiles or add to the end of x
         :return: pathway profiles, a class of ReadExp
         """
         if x_obj.file_type == 'log_space':
@@ -233,14 +234,18 @@ class DeSide(object):
         common_genes = list(set(x.columns) & set(pathway_mask.index))
         print('common genes between training set and pathway mask:', len(common_genes))
         genes_only_in_x = list(set(x.columns) - set(pathway_mask.index))
-        # add genes only in x to pathway mask
+        # add genes only in x to pathway mask as all zeros
         if len(genes_only_in_x) > 0:
             print('genes only in training set:', len(genes_only_in_x))
             pathway_mask = pd.concat([pathway_mask,
                                       pd.DataFrame(np.zeros((len(genes_only_in_x), pathway_mask.shape[1])),
                                                    index=genes_only_in_x, columns=pathway_mask.columns)])
-        pathway_mask = pathway_mask.loc[x.columns, :]
-        x = x @ pathway_mask  # get pathway profiles by matrix multiplication
+        pathway_mask = pathway_mask.loc[x.columns, :]  # genes by pathways
+        if method == 'convert':
+            x = x @ pathway_mask  # get pathway profiles by matrix multiplication
+        elif method == 'add_to_end':
+            x_pathway_profiles = x @ pathway_mask  # (m by n) x  (n by p) = m by p
+            x = pd.concat([x, x_pathway_profiles], axis=1)  # combine x and pathway profiles by column, m x (n + p)
         # log2 transform
         x = np.log2(x + 1)
         print('x shape:', x.shape)
