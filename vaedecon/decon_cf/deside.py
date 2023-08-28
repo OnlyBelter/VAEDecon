@@ -31,6 +31,7 @@ class DeSide(object):
         self.model_file_path = os.path.join(self.model_dir, f'model_{model_name}.h5')
         self.cell_type_file_path = os.path.join(self.model_dir, 'celltypes.txt')
         self.gene_list_file_path = os.path.join(self.model_dir, 'genes.txt')
+        self.gene_list_without_pathway_file_path = os.path.join(self.model_dir, 'genes_without_pathway.txt')
         self.training_set_file_path = None
         self.hyper_params = None
         self.one_minus_alpha = False
@@ -147,6 +148,9 @@ class DeSide(object):
 
             # get pathway profiles here
             if pathway_mask is not None:
+                if method_adding_pathway == 'convert':
+                    gene_list = x_obj.exp.columns.to_list()
+                    pd.DataFrame(gene_list).to_csv(self.gene_list_without_pathway_file_path, sep="\t")
                 x_obj = self._get_pathway_profiles(x_obj, pathway_mask, method=method_adding_pathway)
 
             if scaling_by_sample:
@@ -284,8 +288,15 @@ class DeSide(object):
 
         if pathway_mask is not None:
             # get gene list without pathways
-            gene_list_without_pathways = list(set(self.gene_list) - set(pathway_mask.columns))
-            read_df_obj.align_with_gene_list(gene_list=gene_list_without_pathways, fill_not_exist=True)
+            if method_adding_pathway == 'add_to_end':
+                gene_list_without_pathways = list(set(self.gene_list) - set(pathway_mask.columns))
+            elif method_adding_pathway == 'convert':
+                gene_list_without_pathways = self.get_gene_list_without_pathway()
+            else:
+                raise ValueError(f'method_adding_pathway should be "add_to_end" or "convert", '
+                                 f'"{method_adding_pathway}" is invalid.')
+            if len(gene_list_without_pathways) > 0:
+                read_df_obj.align_with_gene_list(gene_list=gene_list_without_pathways, fill_not_exist=True)
             print(f'   {read_df_obj.exp.shape[1]} genes will be used to construct the pathway profiles.')
             read_df_obj = self._get_pathway_profiles(read_df_obj, pathway_mask, method=method_adding_pathway)
 
@@ -416,6 +427,13 @@ class DeSide(object):
         if (self.gene_list is None) and os.path.exists(self.gene_list_file_path):
             self.gene_list = list(pd.read_csv(self.gene_list_file_path, sep='\t', index_col=0)['0'])
         return self.gene_list
+
+    def get_gene_list_without_pathway(self) -> list:
+        gene_list_without_pathway = []
+        if os.path.exists(self.gene_list_without_pathway_file_path):
+            gene_list_without_pathway = list(pd.read_csv(self.gene_list_without_pathway_file_path,
+                                                         sep='\t', index_col=0)['0'])
+        return gene_list_without_pathway
 
     def get_cell_type(self) -> list:
         if (self.cell_types is None) and os.path.exists(self.cell_type_file_path):
