@@ -284,7 +284,7 @@ class DeSide(object):
             # get gene list without pathways
             gene_list_without_pathways = list(set(self.gene_list) - set(pathway_mask.columns))
             read_df_obj.align_with_gene_list(gene_list=gene_list_without_pathways, fill_not_exist=True)
-            print(f'   {read_df_obj.exp.shape[1]} genes will be used to construct the model.')
+            print(f'   {read_df_obj.exp.shape[1]} genes will be used to construct the pathway profiles.')
             read_df_obj = self._get_pathway_profiles(read_df_obj, pathway_mask)
 
         # check gene list / pathway list

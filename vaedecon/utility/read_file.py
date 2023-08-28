@@ -176,10 +176,10 @@ class ReadExp(object):
         common_genes = [i for i in gene_list if i in self.exp.columns]
         not_exist_in_exp = [i for i in gene_list if i not in common_genes]
         removed_genes = [i for i in self.exp.columns if i not in common_genes]
-        print(f'{len(common_genes)} common genes will be used, {len(removed_genes)} genes will be removed.')
+        print(f'   {len(common_genes)} common genes will be used, {len(removed_genes)} genes will be removed.')
         self.exp = self.exp.loc[:, common_genes].copy()
         if fill_not_exist and (len(not_exist_in_exp) != 0):
-            print(f'{len(not_exist_in_exp)} genes are not in current dataset, 0 will be filled')
+            print(f'   {len(not_exist_in_exp)} genes are not in current dataset, 0 will be filled')
             _not_exist_exp = pd.DataFrame(np.zeros((self.exp.shape[0], len(not_exist_in_exp))), index=self.exp.index,
                                           columns=not_exist_in_exp)
             self.exp = pd.concat([self.exp, _not_exist_exp], axis=1)
