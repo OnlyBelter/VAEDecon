@@ -142,7 +142,18 @@ def tcga_evaluation(marker_gene_file_path, total_result_dir, pred_cell_frac_tcga
 
 
 def run_step3(evaluation_dataset2path, log_file_path, result_dir, model_dir,
-              all_cell_types, one_minus_alpha=False, pathway_mask=None):
+              all_cell_types, one_minus_alpha=False, pathway_mask=None, method_adding_pathway='add_to_end'):
+    """
+    Step3: Predicting cell fractions of test set and evaluation
+    :param evaluation_dataset2path: dict, key: dataset name, value: file path
+    :param log_file_path: str, log file path
+    :param result_dir: str, result directory
+    :param model_dir: str, model directory
+    :param all_cell_types: list, all cell types
+    :param one_minus_alpha: bool, whether to use 1-alpha as the predicted cell fraction for all cell types
+    :param pathway_mask: dataframe, pathway mask, genes by pathways
+    :param method_adding_pathway: str, method for adding pathway, 'add_to_end' or 'convert'
+    """
     # Step3, evaluation on test set
     print_msg('Step3: Predicting cell fractions of test set and evaluation...',
               log_file_path=log_file_path)
@@ -166,7 +177,8 @@ def run_step3(evaluation_dataset2path, log_file_path, result_dir, model_dir,
             deside_model.predict(input_file=generated_bulk_gep_fp,
                                  output_file_path=predicted_cell_frac_file_path,
                                  exp_type='log_space', scaling_by_sample=False,
-                                 scaling_by_constant=True, one_minus_alpha=one_minus_alpha, pathway_mask=pathway_mask)
+                                 scaling_by_constant=True, one_minus_alpha=one_minus_alpha,
+                                 pathway_mask=pathway_mask, method_adding_pathway=method_adding_pathway)
         print('   > Comparing cell frac between y_true and y_pred...')
         for cell_type in generated_cell_frac.columns.to_list():
             s_plot = ScatterPlot(x=predicted_cell_frac_file_path,
@@ -186,10 +198,31 @@ def run_step3(evaluation_dataset2path, log_file_path, result_dir, model_dir,
                               y_label=f'y_pred')
 
 
-def run_step4(tcga_data_dir, cancer_types, log_file_path, model_dir, marker_gene_file_path,
-              result_dir, pred_cell_frac_tcga_dir, cancer_purity_file_path, all_cell_types,
-              model_names, signature_score_method, one_minus_alpha=False,
-              update_figures=False, outlier_file_path=None, pathway_mask=None):
+def run_step4(tcga_data_dir: str, cancer_types: list, log_file_path: str, model_dir: str,
+              marker_gene_file_path: str, result_dir: str, pred_cell_frac_tcga_dir: str,
+              cancer_purity_file_path: str, all_cell_types: list, model_names: list,
+              signature_score_method: str, one_minus_alpha: bool = False,
+              update_figures: bool = False, outlier_file_path: str = None, pathway_mask: pd.DataFrame = None,
+              method_adding_pathway: str = 'add_to_end'):
+    """
+    Step4: Predicting cell fractions of TCGA
+    :param tcga_data_dir: str, TCGA data directory
+    :param cancer_types: list, cancer types
+    :param log_file_path: str, log file path
+    :param model_dir: str, model directory
+    :param marker_gene_file_path: str, marker gene file path
+    :param result_dir: str, result directory
+    :param pred_cell_frac_tcga_dir: str, predicted cell fraction of TCGA directory
+    :param cancer_purity_file_path: str, cancer purity file path
+    :param all_cell_types: list, all cell types
+    :param model_names: list, model names
+    :param signature_score_method: str, signature score method
+    :param one_minus_alpha: bool, whether to use 1-alpha as the predicted cell fraction for all cell types
+    :param update_figures: bool, whether to update figures
+    :param outlier_file_path: str, outlier file path
+    :param pathway_mask: dataframe, pathway mask, genes by pathways
+    :param method_adding_pathway: str, method for adding pathway, 'add_to_end' or 'convert'
+    """
     # TCGA
     print_msg("Step 4: Predict cell fraction of TCGA...", log_file_path=log_file_path)
     # model_name = 'DeSide'
@@ -209,7 +242,7 @@ def run_step4(tcga_data_dir, cancer_types, log_file_path, model_dir, marker_gene
                 deside_model.predict(input_file=current_bulk_tpm, output_file_path=y_pred_file_path,
                                      exp_type='TPM', scaling_by_constant=True,
                                      scaling_by_sample=False, one_minus_alpha=one_minus_alpha,
-                                     pathway_mask=pathway_mask)
+                                     pathway_mask=pathway_mask, method_adding_pathway=method_adding_pathway)
             else:
                 print(f'   Previous result existed: {y_pred_file_path}')
             print(f'   Plot and compare predicted result...')

@@ -89,7 +89,7 @@ class DeSide(object):
                     cell_types: list = None, scaling_by_sample: bool = True, callback: bool = True,
                     n_epoch: int = 10000, metrics: str = 'mse', n_patience: int = 100, scaling_by_constant=False,
                     remove_cancer_cell=False, fine_tune=False, one_minus_alpha: bool = False, verbose=1,
-                    pathway_mask=None):
+                    pathway_mask=None, method_adding_pathway='add_to_end'):
         """
         Training DeSide model
 
@@ -108,6 +108,7 @@ class DeSide(object):
         :param one_minus_alpha: use 1 - alpha for all cell types if True
         :param verbose: whether to print progress during training, 0: silent, 1: progress bar, 2: one line per epoch
         :param pathway_mask: the mask of pathway genes, 1: pathway gene, 0: non-pathway gene, genes by pathways
+        :param method_adding_pathway: the method to use pathway profiles, 'add_to_end' or 'convert'
         """
         self.one_minus_alpha = one_minus_alpha
         if not os.path.exists(self.model_file_path):
@@ -146,7 +147,7 @@ class DeSide(object):
 
             # get pathway profiles here
             if pathway_mask is not None:
-                x_obj = self._get_pathway_profiles(x_obj, pathway_mask)
+                x_obj = self._get_pathway_profiles(x_obj, pathway_mask, method=method_adding_pathway)
 
             if scaling_by_sample:
                 x_obj.do_scaling()
@@ -254,7 +255,7 @@ class DeSide(object):
 
     def get_x_before_predict(self, input_file, exp_type, transpose: bool = False, print_info: bool = True,
                              scaling_by_sample: bool = False, scaling_by_constant: bool = True,
-                             pathway_mask: pd.DataFrame = None):
+                             pathway_mask: pd.DataFrame = None, method_adding_pathway: str = 'add_to_end'):
         """
         :param input_file: input file path
         :param exp_type: 'log_space' or 'raw_space'
@@ -263,6 +264,7 @@ class DeSide(object):
         :param scaling_by_sample: if True, scaling by sample
         :param scaling_by_constant: if True, scaling by constant
         :param pathway_mask: if not None, use pathway mask to get pathway profiles
+        :param method_adding_pathway: 'add_to_end' or 'convert'
         :return: x
         """
         if self.gene_list is None:
@@ -285,7 +287,7 @@ class DeSide(object):
             gene_list_without_pathways = list(set(self.gene_list) - set(pathway_mask.columns))
             read_df_obj.align_with_gene_list(gene_list=gene_list_without_pathways, fill_not_exist=True)
             print(f'   {read_df_obj.exp.shape[1]} genes will be used to construct the pathway profiles.')
-            read_df_obj = self._get_pathway_profiles(read_df_obj, pathway_mask)
+            read_df_obj = self._get_pathway_profiles(read_df_obj, pathway_mask, method=method_adding_pathway)
 
         # check gene list / pathway list
         pathway_list = True if pathway_mask is not None else False
@@ -314,7 +316,8 @@ class DeSide(object):
 
     def predict(self, input_file, exp_type, output_file_path: str = None, transpose: bool = False,
                 print_info: bool = True, add_cell_type: bool = False, scaling_by_constant=False,
-                scaling_by_sample=True, one_minus_alpha: bool = False, pathway_mask: pd.DataFrame = None):
+                scaling_by_sample=True, one_minus_alpha: bool = False, pathway_mask: pd.DataFrame = None,
+                method_adding_pathway: str = 'add_to_end'):
         """
         Predicting cell proportions using pre-trained model.
 
@@ -329,6 +332,7 @@ class DeSide(object):
         :param scaling_by_sample: scaling by sample, same as Scaden
         :param one_minus_alpha: use 1 - alpha for all cell types if True
         :param pathway_mask: if not None, use pathway mask to get pathway profiles
+        :param method_adding_pathway: 'add_to_end' or 'convert'
         """
         self.one_minus_alpha = one_minus_alpha
         if print_info:
@@ -339,7 +343,7 @@ class DeSide(object):
         # load input data
         x = self.get_x_before_predict(input_file, exp_type, transpose=transpose, print_info=print_info,
                                       scaling_by_constant=scaling_by_constant, scaling_by_sample=scaling_by_sample,
-                                      pathway_mask=pathway_mask)
+                                      pathway_mask=pathway_mask, method_adding_pathway=method_adding_pathway)
 
         # load pre-trained model
         if self.model is None:
