@@ -30,7 +30,7 @@ class DeSide(object):
         self.min_cell_fraction = 0.0001  # set to 0 if less than this value in predicted cell fractions
         self.model_file_path = os.path.join(self.model_dir, f'model_{model_name}.h5')
         self.cell_type_file_path = os.path.join(self.model_dir, 'celltypes.txt')
-        self.gene_list_file_path = os.path.join(self.model_dir, 'genes.txt')
+        self.gene_list_file_path = os.path.join(self.model_dir, 'genes.txt')  # the gene list used as input of model
         self.gene_list_without_pathway_file_path = os.path.join(self.model_dir, 'genes_without_pathway.txt')
         self.training_set_file_path = None
         self.hyper_params = None
@@ -90,7 +90,7 @@ class DeSide(object):
                     cell_types: list = None, scaling_by_sample: bool = True, callback: bool = True,
                     n_epoch: int = 10000, metrics: str = 'mse', n_patience: int = 100, scaling_by_constant=False,
                     remove_cancer_cell=False, fine_tune=False, one_minus_alpha: bool = False, verbose=1,
-                    pathway_mask=None, method_adding_pathway='add_to_end'):
+                    pathway_mask=None, method_adding_pathway='add_to_end', filtered_gene_list: list = None):
         """
         Training DeSide model
 
@@ -110,6 +110,7 @@ class DeSide(object):
         :param verbose: whether to print progress during training, 0: silent, 1: progress bar, 2: one line per epoch
         :param pathway_mask: the mask of pathway genes, 1: pathway gene, 0: non-pathway gene, genes by pathways
         :param method_adding_pathway: the method to use pathway profiles, 'add_to_end' or 'convert'
+        :param filtered_gene_list: the list of genes to use as input, if None, use all genes in training set
         """
         self.one_minus_alpha = one_minus_alpha
         if not os.path.exists(self.model_file_path):
@@ -151,7 +152,8 @@ class DeSide(object):
                 if method_adding_pathway == 'convert':
                     gene_list = x_obj.exp.columns.to_list()
                     pd.DataFrame(gene_list).to_csv(self.gene_list_without_pathway_file_path, sep="\t")
-                x_obj = self._get_pathway_profiles(x_obj, pathway_mask, method=method_adding_pathway)
+                x_obj = self._get_pathway_profiles(x_obj, pathway_mask,
+                                                   method=method_adding_pathway, filtered_gene_list=filtered_gene_list)
 
             if scaling_by_sample:
                 x_obj.do_scaling()
@@ -226,11 +228,13 @@ class DeSide(object):
             print(f'Previous model existed: {self.model_file_path}')
 
     @staticmethod
-    def _get_pathway_profiles(x_obj, pathway_mask: pd.DataFrame, method='add_to_end'):
+    def _get_pathway_profiles(x_obj, pathway_mask: pd.DataFrame, method='add_to_end', filtered_gene_list=None):
         """
         :param x_obj: input gene expression matrix, a class of ReadExp
         :param pathway_mask: pathway mask
         :param method: 'convert' or 'add_to_end', convert to pathway profiles or add to the end of x
+        :param filtered_gene_list: if not None, genes will be filtered by this list and normalised to TPM
+            after getting pathway profiles
         :return: pathway profiles, a class of ReadExp
         """
         if x_obj.file_type == 'log_space':
@@ -250,6 +254,9 @@ class DeSide(object):
             x = x @ pathway_mask  # get pathway profiles by matrix multiplication
         elif method == 'add_to_end':
             x_pathway_profiles = x @ pathway_mask  # (m by n) x  (n by p) = m by p
+            if filtered_gene_list is not None:  # filter genes and normalise to TPM after getting pathway profiles
+                x_obj.align_with_gene_list(gene_list=filtered_gene_list, fill_not_exist=True)
+                x = x_obj.get_exp()
             x = pd.concat([x, x_pathway_profiles], axis=1)  # combine x and pathway profiles by column, m x (n + p)
         # log2 transform
         x = np.log2(x + 1)
@@ -259,7 +266,8 @@ class DeSide(object):
 
     def get_x_before_predict(self, input_file, exp_type, transpose: bool = False, print_info: bool = True,
                              scaling_by_sample: bool = False, scaling_by_constant: bool = True,
-                             pathway_mask: pd.DataFrame = None, method_adding_pathway: str = 'add_to_end'):
+                             pathway_mask: pd.DataFrame = None, method_adding_pathway: str = 'add_to_end',
+                             filtered_gene_list: list = None):
         """
         :param input_file: input file path
         :param exp_type: 'log_space' or 'raw_space'
@@ -269,6 +277,7 @@ class DeSide(object):
         :param scaling_by_constant: if True, scaling by constant
         :param pathway_mask: if not None, use pathway mask to get pathway profiles
         :param method_adding_pathway: 'add_to_end' or 'convert'
+        :param filtered_gene_list: if not None, use filtered gene list as the input gene list
         :return: x
         """
         if self.gene_list is None:
@@ -298,7 +307,8 @@ class DeSide(object):
             if len(gene_list_without_pathways) > 0:
                 read_df_obj.align_with_gene_list(gene_list=gene_list_without_pathways, fill_not_exist=True)
             print(f'   {read_df_obj.exp.shape[1]} genes will be used to construct the pathway profiles.')
-            read_df_obj = self._get_pathway_profiles(read_df_obj, pathway_mask, method=method_adding_pathway)
+            read_df_obj = self._get_pathway_profiles(read_df_obj, pathway_mask, method=method_adding_pathway,
+                                                     filtered_gene_list=filtered_gene_list)
 
         # check gene list / pathway list
         pathway_list = True if pathway_mask is not None else False
@@ -328,7 +338,7 @@ class DeSide(object):
     def predict(self, input_file, exp_type, output_file_path: str = None, transpose: bool = False,
                 print_info: bool = True, add_cell_type: bool = False, scaling_by_constant=False,
                 scaling_by_sample=True, one_minus_alpha: bool = False, pathway_mask: pd.DataFrame = None,
-                method_adding_pathway: str = 'add_to_end'):
+                method_adding_pathway: str = 'add_to_end', filtered_gene_list: list = None):
         """
         Predicting cell proportions using pre-trained model.
 
@@ -344,6 +354,7 @@ class DeSide(object):
         :param one_minus_alpha: use 1 - alpha for all cell types if True
         :param pathway_mask: if not None, use pathway mask to get pathway profiles
         :param method_adding_pathway: 'add_to_end' or 'convert'
+        :param filtered_gene_list: if not None, use filtered gene list as input
         """
         self.one_minus_alpha = one_minus_alpha
         if print_info:
@@ -354,7 +365,8 @@ class DeSide(object):
         # load input data
         x = self.get_x_before_predict(input_file, exp_type, transpose=transpose, print_info=print_info,
                                       scaling_by_constant=scaling_by_constant, scaling_by_sample=scaling_by_sample,
-                                      pathway_mask=pathway_mask, method_adding_pathway=method_adding_pathway)
+                                      pathway_mask=pathway_mask, method_adding_pathway=method_adding_pathway,
+                                      filtered_gene_list=filtered_gene_list)
 
         # load pre-trained model
         if self.model is None:

@@ -171,17 +171,17 @@ class ReadExp(object):
         Align the expression matrix with a gene list
 
         :param gene_list: gene list
-        :param fill_not_exist: fill 0 if gene not exist in the expression matrix when True
+        :param fill_not_exist: fill 0 if gene not exist in the provided gene_list when True
         """
         common_genes = [i for i in gene_list if i in self.exp.columns]
-        not_exist_in_exp = [i for i in gene_list if i not in common_genes]
+        not_exist_in_gene_list = [i for i in gene_list if i not in common_genes]
         removed_genes = [i for i in self.exp.columns if i not in common_genes]
         print(f'   {len(common_genes)} common genes will be used, {len(removed_genes)} genes will be removed.')
         self.exp = self.exp.loc[:, common_genes].copy()
-        if fill_not_exist and (len(not_exist_in_exp) != 0):
-            print(f'   {len(not_exist_in_exp)} genes are not in current dataset, 0 will be filled')
-            _not_exist_exp = pd.DataFrame(np.zeros((self.exp.shape[0], len(not_exist_in_exp))), index=self.exp.index,
-                                          columns=not_exist_in_exp)
+        if fill_not_exist and (len(not_exist_in_gene_list) != 0):
+            print(f'   {len(not_exist_in_gene_list)} genes are not in current dataset, 0 will be filled')
+            _not_exist_exp = pd.DataFrame(np.zeros((self.exp.shape[0], len(not_exist_in_gene_list))), index=self.exp.index,
+                                          columns=not_exist_in_gene_list)
             self.exp = pd.concat([self.exp, _not_exist_exp], axis=1)
             self.exp = self.exp.loc[:, gene_list].copy()
         if not pathway_list:
