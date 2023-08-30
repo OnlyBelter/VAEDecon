@@ -40,17 +40,19 @@ class DeSide(object):
         self.log_file_path = log_file_path
         check_dir(self.model_dir)
 
-    def _build_model(self, input_shape, output_shape, hyper_params):
+    def _build_model(self, input_shape, output_shape, hyper_params, n_pathway: int = 0):
         """
         :param input_shape: the number of features (genes)
         :param output_shape: the dimension of output (number of cell types to predict cell fraction)
         :param hyper_params: pre-determined hyper-parameters for DeSide model
+        :param n_pathway: the number of pathways
         """
         self.hyper_params = hyper_params
         hidden_units = hyper_params['architecture'][0]
         dropout_rates = hyper_params['architecture'][1]
         using_batch_normalization = hyper_params['batch_normalization']
         last_layer_activation_function = hyper_params['last_layer_activation']
+        pathway_network = hyper_params['pathway_network']
         if last_layer_activation_function == 'hard_sigmoid':
             last_layer_activation_function = keras.activations.hard_sigmoid
 
@@ -60,7 +62,7 @@ class DeSide(object):
         activation = functools.partial(keras.layers.Activation, activation='relu')  # activate after BatchNormalization
 
         if using_batch_normalization:
-            gep = keras.Input(shape=(input_shape,), name='input')
+            gep = keras.Input(shape=(input_shape,), name='gep')
             gep_normalized = batch_normalization()(gep)
             features = dense(units=hidden_units[0])(gep_normalized)  # the first dense layer
             features = batch_normalization()(features)
@@ -73,7 +75,7 @@ class DeSide(object):
             y_pred = dense(units=output_shape, use_bias=True, activation=last_layer_activation_function)(features)
             model = keras.Model(inputs=gep, outputs=y_pred, name='DeSide')
         else:
-            gep = keras.Input(shape=(input_shape,), name='input')
+            gep = keras.Input(shape=(input_shape,), name='gep')
             features = dense(units=hidden_units[0], use_bias=True, activation='relu')(gep)  # the first dense layer
             if dropout_rates[0] > 0:
                 features = keras.layers.Dropout(dropout_rates[0])(features)
@@ -82,8 +84,16 @@ class DeSide(object):
                 features = dense(units=n_units, use_bias=True, activation='relu')(features)
                 if dropout_rate > 0:
                     features = keras.layers.Dropout(dropout_rate)(features)
-            y_pred = dense(units=output_shape, use_bias=True, activation=last_layer_activation_function)(features)
-            model = keras.Model(inputs=gep, outputs=y_pred, name='DeSide')
+            if pathway_network:
+                pathway_profile = keras.Input(shape=(n_pathway,), name='pathway_profile')
+                p_features = dense(units=hidden_units[-1], use_bias=True, activation='relu')(pathway_profile)
+                # Merge all available features into a single large vector via concatenation
+                x = keras.layers.concatenate([features, p_features])
+                y_pred = dense(units=output_shape, use_bias=True, activation=last_layer_activation_function)(x)
+                model = keras.Model(inputs=[gep, pathway_profile], outputs=y_pred, name='DeSide')
+            else:
+                y_pred = dense(units=output_shape, use_bias=True, activation=last_layer_activation_function)(features)
+                model = keras.Model(inputs=gep, outputs=y_pred, name='DeSide')
         self.model = model
 
     def train_model(self, training_set_file_path: Union[str, list], hyper_params: dict,
@@ -160,7 +170,7 @@ class DeSide(object):
             if scaling_by_constant:
                 # file_obj = ReadExp(_x, exp_type='log_space')
                 x_obj.do_scaling_by_constant()
-            x = x_obj.get_exp()
+            x = x_obj.get_exp()  # a dataframe, samples by genes
 
             self.gene_list = x.columns.to_list()  # a list of all gene names
 
@@ -171,7 +181,7 @@ class DeSide(object):
                 self.cell_types = cell_types
             if remove_cancer_cell:
                 self.cell_types = [i for i in self.cell_types if i != 'Cancer Cells']
-            y = y.loc[:, y.columns.isin(self.cell_types)]
+            y = y.loc[:, y.columns.isin(self.cell_types)]  # a dataframe, samples by cell types
 
             # Save features and cell types
             pd.DataFrame(self.cell_types).to_csv(self.cell_type_file_path, sep="\t")
@@ -181,8 +191,10 @@ class DeSide(object):
             print(f'   The shape of X is: {x.shape}, (n_sample, n_gene)')
             print(f'   The shape of y is: {y.shape}, (n_sample, n_cell_type)')
             if not fine_tune:
-                self._build_model(input_shape=len(self.gene_list), output_shape=len(self.cell_types),
-                                  hyper_params=hyper_params)
+                n_pathway = pathway_mask.shape[1] if pathway_mask is not None else 0
+                n_gene = len(self.gene_list) - n_pathway
+                self._build_model(input_shape=n_gene, output_shape=len(self.cell_types),
+                                  hyper_params=hyper_params, n_pathway=n_pathway)
             if self.model is None:
                 raise FileNotFoundError('pre-trained model should be assigned to self.model')
             opt = keras.optimizers.Adam(learning_rate=learning_rate)
@@ -195,6 +207,14 @@ class DeSide(object):
             print(self.model.summary())
 
             # training model
+            pathway_network = hyper_params['pathway_network']
+            if pathway_network:
+                pathways = pathway_mask.columns.to_list()
+                x_gep = x.loc[:, ~x.columns.isin(pathways)].copy()
+                x_pathway = x.loc[:, x.columns.isin(pathways)].copy()
+                x = {'gep': x_gep.values, 'pathway_profile': x_pathway.values}
+            else:
+                x = x.values
             if callback:
                 # Stop training when a monitored metric has stopped improving.
                 # https://www.tensorflow.org/api_docs/python/tf/keras/callbacks/EarlyStopping
@@ -204,14 +224,13 @@ class DeSide(object):
                     monitor='val_loss',
                     mode='min',
                     restore_best_weights=True)
-                history = self.model.fit(x.values, y.values, epochs=n_epoch,
+                history = self.model.fit(x, y.values, epochs=n_epoch,
                                          batch_size=batch_size, verbose=verbose, validation_split=0.2,
                                          callbacks=[early_stopping_callback])
                 # history = self.model.fit(x.values, y.values, epochs=n_epoch,
                 #                          batch_size=batch_size, verbose=2)
-
             else:
-                history = self.model.fit(x.values, y.values, epochs=n_epoch,
+                history = self.model.fit(x, y.values, epochs=n_epoch,
                                          batch_size=batch_size, verbose=verbose, validation_split=0.2)
 
             hist = pd.DataFrame(history.history)
