@@ -192,8 +192,11 @@ class DeSide(object):
             print(f'   The shape of y is: {y.shape}, (n_sample, n_cell_type)')
             if not fine_tune:
                 n_pathway = pathway_mask.shape[1] if pathway_mask is not None else 0
+                input_shape = len(self.gene_list)
                 n_gene = len(self.gene_list) - n_pathway
-                self._build_model(input_shape=n_gene, output_shape=len(self.cell_types),
+                if hyper_params['pathway_network']:
+                    input_shape = n_gene
+                self._build_model(input_shape=input_shape, output_shape=len(self.cell_types),
                                   hyper_params=hyper_params, n_pathway=n_pathway)
             if self.model is None:
                 raise FileNotFoundError('pre-trained model should be assigned to self.model')
