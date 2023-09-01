@@ -904,5 +904,22 @@ def get_ccc(x, y):
     return 2*cov_xy / (vx + vy + (mx-my)**2)
 
 
+def get_x_by_pathway_network(x: pd.DataFrame, pathway_network: bool, pathway_mask: pd.DataFrame = None):
+    """
+    :param x: the input gene expression profile
+    :param pathway_network: the pathway network
+    :param pathway_mask: the mask of pathway network
+    :return: the input gene expression profile with pathway network
+    """
+    if pathway_network:
+        pathways = pathway_mask.columns.to_list()
+        x_gep = x.loc[:, ~x.columns.isin(pathways)].copy()
+        x_pathway = x.loc[:, x.columns.isin(pathways)].copy()
+        x = {'gep': x_gep.values, 'pathway_profile': x_pathway.values}
+    else:
+        x = x.values
+    return x
+
+
 if __name__ == '__main__':
     pass

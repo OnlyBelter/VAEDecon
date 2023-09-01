@@ -7,7 +7,7 @@ from typing import Union
 import tensorflow as tf
 from tensorflow import keras
 from ..utility.read_file import ReadH5AD, ReadExp
-from ..utility import check_dir, print_msg
+from ..utility import check_dir, print_msg, get_x_by_pathway_network
 from ..plot import plot_loss
 
 
@@ -95,23 +95,6 @@ class DeSide(object):
                 y_pred = dense(units=output_shape, use_bias=True, activation=last_layer_activation_function)(features)
                 model = keras.Model(inputs=gep, outputs=y_pred, name='DeSide')
         self.model = model
-
-    @staticmethod
-    def get_x_by_pathway_network(x: pd.DataFrame, pathway_network: bool, pathway_mask: pd.DataFrame = None):
-        """
-        :param x: the input gene expression profile
-        :param pathway_network: the pathway network
-        :param pathway_mask: the mask of pathway network
-        :return: the input gene expression profile with pathway network
-        """
-        if pathway_network:
-            pathways = pathway_mask.columns.to_list()
-            x_gep = x.loc[:, ~x.columns.isin(pathways)].copy()
-            x_pathway = x.loc[:, x.columns.isin(pathways)].copy()
-            x = {'gep': x_gep.values, 'pathway_profile': x_pathway.values}
-        else:
-            x = x.values
-        return x
 
     def train_model(self, training_set_file_path: Union[str, list], hyper_params: dict,
                     cell_types: list = None, scaling_by_sample: bool = True, callback: bool = True,
@@ -225,7 +208,7 @@ class DeSide(object):
 
             # training model
             pathway_network = hyper_params['pathway_network']
-            x = self.get_x_by_pathway_network(x, pathway_network=pathway_network, pathway_mask=pathway_mask)
+            x = get_x_by_pathway_network(x, pathway_network=pathway_network, pathway_mask=pathway_mask)
             if callback:
                 # Stop training when a monitored metric has stopped improving.
                 # https://www.tensorflow.org/api_docs/python/tf/keras/callbacks/EarlyStopping
@@ -410,7 +393,7 @@ class DeSide(object):
                 print(f'   Pre-trained model loaded from {self.model_file_path}.')
         pathway_network = hyper_params['pathway_network']
         x_index = x.index.copy()
-        x = self.get_x_by_pathway_network(x, pathway_network=pathway_network, pathway_mask=pathway_mask)
+        x = get_x_by_pathway_network(x, pathway_network=pathway_network, pathway_mask=pathway_mask)
         # predict using loaded model
         pred_result = self.model.predict(x)
         pred_df = pd.DataFrame(pred_result, index=x_index, columns=self.cell_types)
