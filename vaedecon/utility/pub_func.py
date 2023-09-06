@@ -242,7 +242,7 @@ def read_cancer_purity(cancer_purity_file_path, sample_names: list):
     cancer_purity = cancer_purity.loc[~cancer_purity['CPE'].isnull()].copy()
     # print_df(cancer_purity)
     sample_name_mapping = {i[0:16]: i for i in sample_names}
-    common_sample = set(list(sample_name_mapping.keys())) & set(cancer_purity.index)
+    common_sample = list(set(list(sample_name_mapping.keys())) & set(cancer_purity.index))
     cancer_purity = cancer_purity.loc[common_sample, :].copy()
     cancer_purity.index = cancer_purity.index.map(sample_name_mapping)
     return cancer_purity
