@@ -104,7 +104,7 @@ class DeSide(object):
                     cell_types: list = None, scaling_by_sample: bool = True, callback: bool = True,
                     n_epoch: int = 10000, metrics: str = 'mse', n_patience: int = 100, scaling_by_constant=False,
                     remove_cancer_cell=False, fine_tune=False, one_minus_alpha: bool = False, verbose=1,
-                    pathway_mask=None, method_adding_pathway='add_to_end', filtered_gene_list: list = None):
+                    pathway_mask=None, method_adding_pathway='add_to_end', gene_list_type: str = None):
         """
         Training DeSide model
 
@@ -124,7 +124,8 @@ class DeSide(object):
         :param verbose: whether to print progress during training, 0: silent, 1: progress bar, 2: one line per epoch
         :param pathway_mask: the mask of pathway genes, 1: pathway gene, 0: non-pathway gene, genes by pathways
         :param method_adding_pathway: the method to use pathway profiles, 'add_to_end' or 'convert'
-        :param filtered_gene_list: the list of genes to use as input, if None, use all genes in training set
+        :param gene_list_type: the gene list used as input, if None, use all genes in training set
+            "intersection_with_pathway_genes": use the intersection of genes in training set and genes in pathways
         """
         self.one_minus_alpha = one_minus_alpha
         if not os.path.exists(self.model_file_path):
@@ -163,11 +164,16 @@ class DeSide(object):
 
             # get pathway profiles here
             if pathway_mask is not None:
+                if gene_list_type == "intersection_with_pathway_genes":
+                    _gene_list = [i for i in x_obj.exp.columns.to_list() if i in pathway_mask.index.to_list()]
+                else:
+                    _gene_list = x_obj.exp.columns.to_list()
                 if method_adding_pathway == 'convert':
-                    gene_list = x_obj.exp.columns.to_list()
-                    pd.DataFrame(gene_list).to_csv(self.gene_list_without_pathway_file_path, sep="\t")
+                    # _gene_list = x_obj.exp.columns.to_list()
+                    pd.DataFrame(_gene_list).to_csv(self.gene_list_without_pathway_file_path, sep="\t")
+
                 x_obj = self._get_pathway_profiles(x_obj, pathway_mask,
-                                                   method=method_adding_pathway, filtered_gene_list=filtered_gene_list)
+                                                   method=method_adding_pathway, filtered_gene_list=_gene_list)
 
             if scaling_by_sample:
                 x_obj.do_scaling()
