@@ -104,7 +104,8 @@ class DeSide(object):
                     cell_types: list = None, scaling_by_sample: bool = True, callback: bool = True,
                     n_epoch: int = 10000, metrics: str = 'mse', n_patience: int = 100, scaling_by_constant=False,
                     remove_cancer_cell=False, fine_tune=False, one_minus_alpha: bool = False, verbose=1,
-                    pathway_mask=None, method_adding_pathway='add_to_end', gene_list_type: str = None):
+                    pathway_mask=None, method_adding_pathway='add_to_end', input_gene_list: str = None,
+                    filtered_gene_list: list = None):
         """
         Training DeSide model
 
@@ -124,8 +125,11 @@ class DeSide(object):
         :param verbose: whether to print progress during training, 0: silent, 1: progress bar, 2: one line per epoch
         :param pathway_mask: the mask of pathway genes, 1: pathway gene, 0: non-pathway gene, genes by pathways
         :param method_adding_pathway: the method to use pathway profiles, 'add_to_end' or 'convert'
-        :param gene_list_type: the gene list used as input, if None, use all genes in training set
-            "intersection_with_pathway_genes": use the intersection of genes in training set and genes in pathways
+        :param input_gene_list: the gene list used as input,
+            if None: use all genes in training set;
+            if "intersection_with_pathway_genes": use the intersection of genes in training set and genes in pathways;
+            if "filtered_genes": use the genes in filtered_gene_list.
+        :param filtered_gene_list: the list of genes used as input, if None, use all genes in training set
         """
         self.one_minus_alpha = one_minus_alpha
         if not os.path.exists(self.model_file_path):
@@ -164,8 +168,11 @@ class DeSide(object):
 
             # get pathway profiles here
             if pathway_mask is not None:
-                if gene_list_type == "intersection_with_pathway_genes":
+                if input_gene_list == "intersection_with_pathway_genes":
                     _gene_list = [i for i in x_obj.exp.columns.to_list() if i in pathway_mask.index.to_list()]
+                elif input_gene_list == 'filtered_genes':
+                    assert filtered_gene_list is not None, 'filtered_gene_list should not be None'
+                    _gene_list = filtered_gene_list.copy()
                 else:
                     _gene_list = x_obj.exp.columns.to_list()
                 if method_adding_pathway == 'convert':
@@ -281,8 +288,10 @@ class DeSide(object):
         elif method == 'add_to_end':
             x_pathway_profiles = x @ pathway_mask  # (m by n) x  (n by p) = m by p
             if filtered_gene_list is not None:  # filter genes and normalise to TPM after getting pathway profiles
-                x_obj.align_with_gene_list(gene_list=filtered_gene_list, fill_not_exist=True)
-                x = x_obj.get_exp()
+                intersect_genes = list(set(x.columns) & set(filtered_gene_list))
+                if len(intersect_genes) != len(x.columns) or len(intersect_genes) != len(filtered_gene_list):
+                    x_obj.align_with_gene_list(gene_list=filtered_gene_list, fill_not_exist=True)
+                    x = x_obj.get_exp()
             x = pd.concat([x, x_pathway_profiles], axis=1)  # combine x and pathway profiles by column, m x (n + p)
         # log2 transform
         x = np.log2(x + 1)
