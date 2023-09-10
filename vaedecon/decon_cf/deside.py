@@ -31,7 +31,9 @@ class DeSide(object):
         self.model_file_path = os.path.join(self.model_dir, f'model_{model_name}.h5')
         self.cell_type_file_path = os.path.join(self.model_dir, 'celltypes.txt')
         self.gene_list_file_path = os.path.join(self.model_dir, 'genes.txt')  # the gene list used as input of model
-        self.gene_list_without_pathway_file_path = os.path.join(self.model_dir, 'genes_without_pathway.txt')
+        self.gene_list_for_gep_file_path = os.path.join(self.model_dir, 'genes_for_gep.txt')
+        # the gene list used to construct pathway profiles with pathway mask (not the genes in pathway mask)
+        self.gene_list_for_pathway_profile_file_path = os.path.join(self.model_dir, 'genes_for_pathway_profile.txt')
         self.training_set_file_path = None
         self.hyper_params = None
         self.one_minus_alpha = False
@@ -169,18 +171,20 @@ class DeSide(object):
             # get pathway profiles here
             if pathway_mask is not None:
                 if input_gene_list == "intersection_with_pathway_genes":
-                    _gene_list = [i for i in x_obj.exp.columns.to_list() if i in pathway_mask.index.to_list()]
+                    gep_gene_list = [i for i in x_obj.exp.columns.to_list() if i in pathway_mask.index.to_list()]
                 elif input_gene_list == 'filtered_genes':
                     assert filtered_gene_list is not None, 'filtered_gene_list should not be None'
-                    _gene_list = filtered_gene_list.copy()
+                    gep_gene_list = filtered_gene_list.copy()
                 else:
-                    _gene_list = x_obj.exp.columns.to_list()
-                if method_adding_pathway == 'convert':
+                    gep_gene_list = x_obj.exp.columns.to_list()
+                pathway_profile_gene_list = x_obj.exp.columns.to_list()
+                if method_adding_pathway == 'add_to_end':
                     # _gene_list = x_obj.exp.columns.to_list()
-                    pd.DataFrame(_gene_list).to_csv(self.gene_list_without_pathway_file_path, sep="\t")
+                    pd.DataFrame(gep_gene_list).to_csv(self.gene_list_for_gep_file_path, sep="\t")
+                pd.DataFrame(pathway_profile_gene_list).to_csv(self.gene_list_for_pathway_profile_file_path, sep="\t")
 
                 x_obj = self._get_pathway_profiles(x_obj, pathway_mask,
-                                                   method=method_adding_pathway, filtered_gene_list=_gene_list)
+                                                   method=method_adding_pathway, filtered_gene_list=gep_gene_list)
 
             if scaling_by_sample:
                 x_obj.do_scaling()
@@ -301,8 +305,7 @@ class DeSide(object):
 
     def get_x_before_predict(self, input_file, exp_type, transpose: bool = False, print_info: bool = True,
                              scaling_by_sample: bool = False, scaling_by_constant: bool = True,
-                             pathway_mask: pd.DataFrame = None, method_adding_pathway: str = 'add_to_end',
-                             filtered_gene_list: list = None):
+                             pathway_mask: pd.DataFrame = None, method_adding_pathway: str = 'add_to_end'):
         """
         :param input_file: input file path
         :param exp_type: 'log_space' or 'raw_space'
@@ -312,7 +315,6 @@ class DeSide(object):
         :param scaling_by_constant: if True, scaling by constant
         :param pathway_mask: if not None, use pathway mask to get pathway profiles
         :param method_adding_pathway: 'add_to_end' or 'convert'
-        :param filtered_gene_list: if not None, use filtered gene list as the input gene list
         :return: x
         """
         if self.gene_list is None:
@@ -331,19 +333,19 @@ class DeSide(object):
                             f'please check the file path and try again.')
 
         if pathway_mask is not None:
-            # get gene list without pathways
+            # get gene list for constructing pathway profiles
+            gene_list_for_pathway_profile = self.get_gene_list_for_pathway_profile()
+            gene_list_for_gep = None
             if method_adding_pathway == 'add_to_end':
-                gene_list_without_pathways = list(set(self.gene_list) - set(pathway_mask.columns))
-            elif method_adding_pathway == 'convert':
-                gene_list_without_pathways = self.get_gene_list_without_pathway()
-            else:
-                raise ValueError(f'method_adding_pathway should be "add_to_end" or "convert", '
-                                 f'"{method_adding_pathway}" is invalid.')
-            if len(gene_list_without_pathways) > 0:
-                read_df_obj.align_with_gene_list(gene_list=gene_list_without_pathways, fill_not_exist=True)
+                gene_list_for_gep = self.get_gene_list_for_gep()
+            # check whether gene list for pathway profile is the same as the gene list in current input file
+            intersection_genes = list(set(gene_list_for_pathway_profile) & set(read_df_obj.exp.columns.to_list()))
+            if len(intersection_genes) != len(gene_list_for_pathway_profile) or \
+                    len(intersection_genes) != len(read_df_obj.exp.columns.to_list()):
+                read_df_obj.align_with_gene_list(gene_list=gene_list_for_pathway_profile, fill_not_exist=True)
             print(f'   {read_df_obj.exp.shape[1]} genes will be used to construct the pathway profiles.')
             read_df_obj = self._get_pathway_profiles(read_df_obj, pathway_mask, method=method_adding_pathway,
-                                                     filtered_gene_list=filtered_gene_list)
+                                                     filtered_gene_list=gene_list_for_gep)
 
         # check gene list / pathway list
         pathway_list = True if pathway_mask is not None else False
@@ -373,7 +375,7 @@ class DeSide(object):
     def predict(self, input_file, exp_type, output_file_path: str = None, transpose: bool = False,
                 print_info: bool = True, add_cell_type: bool = False, scaling_by_constant=False,
                 scaling_by_sample=True, one_minus_alpha: bool = False, pathway_mask: pd.DataFrame = None,
-                method_adding_pathway: str = 'add_to_end', filtered_gene_list: list = None, hyper_params: dict = None):
+                method_adding_pathway: str = 'add_to_end', hyper_params: dict = None):
         """
         Predicting cell proportions using pre-trained model.
 
@@ -389,7 +391,6 @@ class DeSide(object):
         :param one_minus_alpha: use 1 - alpha for all cell types if True
         :param pathway_mask: if not None, use pathway mask to get pathway profiles
         :param method_adding_pathway: 'add_to_end' or 'convert'
-        :param filtered_gene_list: if not None, use filtered gene list as input
         :param hyper_params: hyper parameters for DNN model
         """
         self.one_minus_alpha = one_minus_alpha
@@ -401,8 +402,7 @@ class DeSide(object):
         # load input data
         x = self.get_x_before_predict(input_file, exp_type, transpose=transpose, print_info=print_info,
                                       scaling_by_constant=scaling_by_constant, scaling_by_sample=scaling_by_sample,
-                                      pathway_mask=pathway_mask, method_adding_pathway=method_adding_pathway,
-                                      filtered_gene_list=filtered_gene_list)
+                                      pathway_mask=pathway_mask, method_adding_pathway=method_adding_pathway)
 
         # load pre-trained model
         if self.model is None:
@@ -479,12 +479,19 @@ class DeSide(object):
             self.gene_list = list(pd.read_csv(self.gene_list_file_path, sep='\t', index_col=0)['0'])
         return self.gene_list
 
-    def get_gene_list_without_pathway(self) -> list:
-        gene_list_without_pathway = []
-        if os.path.exists(self.gene_list_without_pathway_file_path):
-            gene_list_without_pathway = list(pd.read_csv(self.gene_list_without_pathway_file_path,
-                                                         sep='\t', index_col=0)['0'])
-        return gene_list_without_pathway
+    def get_gene_list_for_gep(self) -> list:
+        gene_list_for_gep = []
+        if os.path.exists(self.gene_list_for_gep_file_path):
+            gene_list_for_gep = list(pd.read_csv(self.gene_list_for_gep_file_path,
+                                                 sep='\t', index_col=0)['0'])
+        return gene_list_for_gep
+    
+    def get_gene_list_for_pathway_profile(self) -> list:
+        gene_list_for_pathway_profile = []
+        if os.path.exists(self.gene_list_for_pathway_profile_file_path):
+            gene_list_for_pathway_profile = list(pd.read_csv(self.gene_list_for_pathway_profile_file_path,
+                                                 sep='\t', index_col=0)['0'])
+        return gene_list_for_pathway_profile
 
     def get_cell_type(self) -> list:
         if (self.cell_types is None) and os.path.exists(self.cell_type_file_path):
