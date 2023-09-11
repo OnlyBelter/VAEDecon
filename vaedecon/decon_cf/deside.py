@@ -172,8 +172,9 @@ class DeSide(object):
             if pathway_mask is not None:
                 if input_gene_list == "intersection_with_pathway_genes":
                     gep_gene_list = [i for i in x_obj.exp.columns.to_list() if i in pathway_mask.index.to_list()]
+                    # normalize to TPM when using intersection genes with pathways
+                    x_obj.align_with_gene_list(gene_list=gep_gene_list, fill_not_exist=True)
                 elif input_gene_list == 'filtered_genes' and filtered_gene_list is not None:
-                    # assert filtered_gene_list is not None, 'filtered_gene_list should not be None'
                     gep_gene_list = filtered_gene_list.copy()
                 else:
                     gep_gene_list = x_obj.exp.columns.to_list()

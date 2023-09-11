@@ -172,6 +172,7 @@ class ReadExp(object):
 
         :param gene_list: gene list
         :param fill_not_exist: fill 0 if gene not exist in the provided gene_list when True
+        :param pathway_list: gene list contains pathway names, so TPM normalization is not suitable
         """
         common_genes = [i for i in gene_list if i in self.exp.columns]
         not_exist_in_gene_list = [i for i in gene_list if i not in common_genes]
