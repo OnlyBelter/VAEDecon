@@ -87,17 +87,19 @@ class DeSide(object):
                 if dropout_rate > 0:
                     features = keras.layers.Dropout(dropout_rate)(features)
             if pathway_network:
+                assert 'architecture_for_pathway_network' in hyper_params, \
+                    'architecture_for_pathway_network is required when using pathway network.'
+                p_hidden_units = hyper_params['architecture_for_pathway_network'][0]
+                p_dropout_rates = hyper_params['architecture_for_pathway_network'][1]
                 pathway_profile = keras.Input(shape=(n_pathway,), name='pathway_profile')
-                p_features = dense(units=int(hidden_units[0] / 2), use_bias=True, activation='relu')(pathway_profile)
-                if dropout_rates[0] > 0:
-                    p_features = keras.layers.Dropout(dropout_rates[0])(p_features)
-                for n_units, dropout_rate in hid_dropout[1:-1]:
-                    p_features = dense(units=int(n_units / 2), use_bias=True, activation='relu')(p_features)
+                p_features = dense(units=p_hidden_units[0], use_bias=True, activation='relu')(pathway_profile)
+                if p_dropout_rates[0] > 0:
+                    p_features = keras.layers.Dropout(p_dropout_rates[0])(p_features)
+                p_hid_dropout = list(zip(p_hidden_units[1:], p_dropout_rates[1:]))
+                for n_units, dropout_rate in p_hid_dropout:
+                    p_features = dense(units=n_units, use_bias=True, activation='relu')(p_features)
                     if dropout_rate > 0:
                         p_features = keras.layers.Dropout(dropout_rate)(p_features)
-                p_features = dense(units=hidden_units[-1], use_bias=True, activation='relu')(p_features)
-                if dropout_rates[-1] > 0:
-                    p_features = keras.layers.Dropout(dropout_rates[-1])(p_features)
 
                 # Merge all available features into a single large vector via concatenation
                 x = keras.layers.concatenate([features, p_features])
