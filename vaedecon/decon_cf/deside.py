@@ -89,9 +89,16 @@ class DeSide(object):
             if pathway_network:
                 pathway_profile = keras.Input(shape=(n_pathway,), name='pathway_profile')
                 p_features = dense(units=int(hidden_units[0] / 2), use_bias=True, activation='relu')(pathway_profile)
-                for n_units in hidden_units[1:-1]:
+                if dropout_rates[0] > 0:
+                    p_features = keras.layers.Dropout(dropout_rates[0])(p_features)
+                for n_units, dropout_rate in hid_dropout[1:-1]:
                     p_features = dense(units=int(n_units / 2), use_bias=True, activation='relu')(p_features)
+                    if dropout_rate > 0:
+                        p_features = keras.layers.Dropout(dropout_rate)(p_features)
                 p_features = dense(units=hidden_units[-1], use_bias=True, activation='relu')(p_features)
+                if dropout_rates[-1] > 0:
+                    p_features = keras.layers.Dropout(dropout_rates[-1])(p_features)
+
                 # Merge all available features into a single large vector via concatenation
                 x = keras.layers.concatenate([features, p_features])
                 x = dense(units=hidden_units[-1], use_bias=True, activation='relu')(x)
