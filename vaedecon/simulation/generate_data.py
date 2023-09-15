@@ -1028,7 +1028,7 @@ class BulkGEPGenerator(object):
 
 class SingleCellTypeGEPGenerator(BulkGEPGenerator):
     """
-    Generating single cell GEPs (scGEPs)
+    Generating single cell type GEPs (sctGEPs)
 
     :param simu_bulk_dir: the directory to save simulated bulk cell GEPs
     :param merged_sc_dataset_file_path: the file path of pre-merged single cell datasets
