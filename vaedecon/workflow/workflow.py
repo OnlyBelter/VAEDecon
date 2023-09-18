@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import warnings
 from ..decon_cf import DeSide
-from ..utility import check_dir, print_msg, set_fig_style
+from ..utility import check_dir, print_msg
 from ..utility.read_file import ReadH5AD
 from ..utility.compare import mean_exp_of_marker_gene, read_and_merge_result, cal_gene_signature_score
 from ..plot import (compare_exp_and_cell_fraction, plot_predicted_result,
@@ -50,7 +50,6 @@ def tcga_evaluation(marker_gene_file_path, total_result_dir, pred_cell_frac_tcga
     signature_score_result_dir = os.path.join(pred_cell_frac_dir_current_model, 'signature_score')
     check_dir(signature_score_result_dir)
     all_signature_score_file_path = os.path.join(signature_score_result_dir, 'all_cancer_type_signature_score.csv')
-    # cell_types = cell_types
     if 'DeSide' in model_name:
         if os.path.exists(os.path.join(pre_trained_model_dir, model_name, model_name, 'genes.txt')):
             gene_list_in_model_fp = os.path.join(pre_trained_model_dir, model_name, model_name, 'genes.txt')
@@ -96,10 +95,6 @@ def tcga_evaluation(marker_gene_file_path, total_result_dir, pred_cell_frac_tcga
     # combine all predicted cell fraction for each cancer type together
     if not os.path.exists(all_pred_cell_frac_file_path):
         print(f'   Merge all predicted result by {model_name}...')
-        # if 'DeSide' in model:
-        #     _cell_types = cell_types + ['1-others']
-        # else:
-        #     _cell_types = cell_types
         _cell_type_name_mapping = dict(zip(cell_types, cell_types))
         read_and_merge_result(raw_result_dir=pred_cell_frac_dir_current_model,
                               cell_type_name_mapping=_cell_type_name_mapping,

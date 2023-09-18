@@ -268,7 +268,8 @@ def read_single_cell_type_dataset(sct_dataset_file_path: str, latent_z_nn_info_f
     """
     sct_dataset_obj = ReadH5AD(sct_dataset_file_path)
     sct_dataset_df = sct_dataset_obj.get_df(convert_to_tpm=True)
-    inx2cell_type = get_inx2cell_type()
+    cell_type_list = sct_dataset_obj.get_h5ad().obs.columns.tolist()
+    inx2cell_type = get_inx2cell_type(cell_type_list=cell_type_list)
     if (latent_z_nn_info_file is not None) and os.path.exists(latent_z_nn_info_file):
         latent_z_nn_info = read_df(latent_z_nn_info_file)
         latent_z_nn_info = \

@@ -39,8 +39,10 @@ sorted_cell_types = ['B Cells', 'CD4 T', 'CD8 T', 'Cancer Cells', 'DC', 'Endothe
                      'Fibroblasts', 'Macrophages', 'Mast Cells', 'NK', 'Neutrophils']
 
 
-def get_inx2cell_type() -> dict:
-    inx2cell_type = {_i: ct for _i, ct in enumerate(sorted_cell_types)}
+def get_inx2cell_type(cell_type_list: list = None) -> dict:
+    if cell_type_list is None:
+        cell_type_list = sorted_cell_types
+    inx2cell_type = {_i: ct for _i, ct in enumerate(cell_type_list)}
     inx2cell_type[-1] = 'Neg'
     return inx2cell_type
 
@@ -653,7 +655,9 @@ def save_key_params(all_vars: dict, save_to_file_path=None):
         hyper_params = all_vars['deside_parameters']
         other_params = ['all_cell_types', 'dataset2parameters', 'cd4_high_in_cd8', 'n_base',
                         'total_cell_number', 'removed_cell_types', 'merge_t_cell', 'filter_simulated_bulk_cell',
-                        'remove_cancer_cell_when_training', 'one_minus_alpha', 'remove_cancer_cell']
+                        'remove_cancer_cell_when_training', 'one_minus_alpha', 'remove_cancer_cell',
+                        'alpha_total_rna_coefficient', 'cell_type2subtypes', 'all_pathway_files', 'cell_type_col',
+                        'cell_subtype_col']
         key_paths_dict = {k: all_vars[k] for k in key_paths if k in all_vars}
         other_params_dict = {k: all_vars[k] for k in other_params if k in all_vars}
 
