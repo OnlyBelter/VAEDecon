@@ -1127,7 +1127,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
     def generate_samples(self, n_sample_each_cell_type: int = 10000,
                          n_base_for_positive_samples: int = 100,
                          sample_type: str = 'positive', sep_by_patient=False,
-                         simu_method='ave', subgroup_by: list = None):
+                         simu_method='ave'):
         """
         :param n_sample_each_cell_type: the number of samples to generate for each cell type
 
@@ -1140,14 +1140,13 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         :param simu_method: `ave`: averaging all GEPs, or `scale_by_mGEP`: scaling by the mean GEP of all samples in the TCGA dataset
             or `random_replacement`: replacing the gene expression value (<1) by another value within the same cell type selected randomly
 
-        :param subgroup_by: a list of column names in the merged single cell dataset, used to group samples
         """
         if not os.path.exists(self.generated_bulk_gep_fp):
             self.n_samples = n_sample_each_cell_type * (len(self.cell_type_used) + len(self.cell_subtype_used))
             if not os.path.exists(self.generated_cell_fraction_fp):
                 print(f'   Generate cell proportions for single cell type (SCT) samples in {self.bulk_dataset_name}')
                 generated_cell_frac = self.generate_frac_sc(
-                    sample_type=sample_type, sample_prefix=f'sct_{self.bulk_dataset_name}_{sample_type[:3]}'
+                    sample_type=sample_type, sample_prefix=f'{self.bulk_dataset_name}_{sample_type[:3]}'
                 )
                 generated_cell_frac.to_csv(self.generated_cell_fraction_fp, float_format='%g')
             else:
@@ -1214,11 +1213,11 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             sample_prefix = f's_sc_{sample_type}'
         n_cell_types = len(self.cell_type_used) + len(self.cell_subtype_used)
         cols = self.cell_type_used + self.cell_subtype_used
-        generated_frac_df = pd.DataFrame(index=[f'{sample_prefix}_{i}' for i in range(self.n_samples)],
-                                         columns=cols,
-                                         data=np.zeros((self.n_samples, n_cell_types)))
+        n_for_each_cell_type = int(self.n_samples / n_cell_types)
+        generated_frac_df = \
+            pd.DataFrame(index=[f'{sample_prefix}_{i}_{j}' for i in cols for j in range(n_for_each_cell_type)],
+                         columns=cols, data=np.zeros((self.n_samples, n_cell_types)))
         if sample_type == 'positive':
-            n_for_each_cell_type = int(self.n_samples / n_cell_types)
             for i, cell_type in enumerate(cols):
                 inx_start = i * n_for_each_cell_type
                 inx_end = min((i+1) * n_for_each_cell_type, self.n_samples)
