@@ -52,7 +52,7 @@ dependencies = [
     "h5py",
 #    "sphinx_book_theme",
     "jinja2<3.1",
-    'tensorrt',
+#    'tensorrt',
 #    "sphinx_rtd_theme"
 ]
 #dynamic = ["version"]
