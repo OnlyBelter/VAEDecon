@@ -30,7 +30,7 @@ def plot_sample_distribution(re_sampled_df, marker_ratio_tcga, marker_ratio_simu
     else:
         fig, ax = plt.subplots(2, 1, sharex='col', figsize=(10, 10))
         ax[0].hist(marker_ratio_tcga[cell_type], bins=bins, density=density, label='TCGA')
-        # ax[1].hist(marker_ratio_simu_bulk[cell_type], bins=bins, density=density, label='Before sampling')
+        # ax[1].hist(marker_ratio_simu_bulk[cell_prop], bins=bins, density=density, label='Before sampling')
         ax[1].hist(re_sampled_df[cell_type], bins=bins, density=density, label='After sampling')
         for j in range(2):
             ax[j].legend(loc='upper right')

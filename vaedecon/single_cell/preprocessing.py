@@ -151,9 +151,9 @@ def get_sample_id(obs_df, n, cell_type, n_base, class_by='leiden', sep_by_patien
     select sample id by random sampling
     :param obs_df: adata.obs in .h5ad file
     :param n: the number of cells to be generated
-    :param cell_type: sampling only within this cell types (cell_type) or sub cell types (leiden)
+    :param cell_type: sampling only within this cell types (cell_prop) or sub cell types (leiden)
     :param n_base: the number of single cells to average
-    :param class_by: leiden or cell_type, the column name of cell type (or subtype) in .h5ad file
+    :param class_by: leiden or cell_prop, the column name of cell type (or subtype) in .h5ad file
     :param sep_by_patient: only sampling from one patient in original dataset if True
     :return: a tuple of tuples  (('s1', 's2'), ('s3', 's5')), each tuple contains n_base ids for a single sample
     """
@@ -182,24 +182,24 @@ def get_sample_id(obs_df, n, cell_type, n_base, class_by='leiden', sep_by_patien
     return tuple(selected_samples.keys())  # return a tuple of tuples  (('s1', 's2'), ('s3', 's5'))
 
 
-# def generate_sc(adata, n, cell_type, n_base=3, log_base=2, group_by='leiden',
+# def generate_sc(adata, n, cell_prop, n_base=3, log_base=2, group_by='leiden',
 #                 return_cell_id=False, filtering: bool = False, marker_genes=None,
 #                 cell_type_scope: list = None):
 #     """
-#     Generate single cell expression data by averaging `n_base` cells from a specific `cell_type`
+#     Generate single cell expression data by averaging `n_base` cells from a specific `cell_prop`
 #
 #     :param adata: AnnData object which contains multiple merged single cell datasets, GEPs stored by log2(CPM + 1),
 #         CPM means counts per million, similar to TPM.
 #
 #     :param n: the number of cells to be generated
 #
-#     :param cell_type: sampling only within this cell types or sub cell types
+#     :param cell_prop: sampling only within this cell types or sub cell types
 #
 #     :param n_base: the number of single cells to average
 #
 #     :param log_base: if None, don't do log transform
 #
-#     :param group_by: `leiden` (sub cell type) or `cell_type`, the column name of cell type in .h5ad file
+#     :param group_by: `leiden` (sub cell type) or `cell_prop`, the column name of cell type in .h5ad file
 #
 #     :param return_cell_id: if return selected sample id directly without GEP
 #
@@ -217,7 +217,7 @@ def get_sample_id(obs_df, n, cell_type, n_base, class_by='leiden', sep_by_patien
 #         marker_genes = default_core_marker_genes
 #     round_counter = 0
 #     # only keep current cell type
-#     adata = adata[adata.obs[group_by] == cell_type, :].copy()
+#     adata = adata[adata.obs[group_by] == cell_prop, :].copy()
 #     adata_df = pd.DataFrame(adata.X.A, index=adata.obs.index, columns=adata.var.index)
 #     adata_df = log_exp2cpm(adata_df)  # convert to CPM
 #     g_sample2exp = {}
@@ -225,24 +225,24 @@ def get_sample_id(obs_df, n, cell_type, n_base, class_by='leiden', sep_by_patien
 #     while len(g_sample2exp) < n:
 #         # get sample_id for 100 samples each time
 #         _selected_samples = get_sample_id(obs_df=adata.obs, n=100, n_base=n_base,
-#                                           cell_type=cell_type, class_by=group_by)
+#                                           cell_prop=cell_prop, class_by=group_by)
 #         for i, _s in enumerate(_selected_samples):
 #             keep_this_exp = True
 #             unique_inx = i + round_counter * 100
 #             # expression profile of one generated single cell expression
 #             exp_sc = adata_df.loc[_s, :].mean(axis=0)
 #             # cell_type_abbr = ''
-#             if cell_type in subcell_type2abbr:
-#                 cell_type_abbr = subcell_type2abbr[cell_type]
-#             elif cell_type in cell_type2abbr:
-#                 cell_type_abbr = cell_type2abbr[cell_type]
+#             if cell_prop in subcell_type2abbr:
+#                 cell_type_abbr = subcell_type2abbr[cell_prop]
+#             elif cell_prop in cell_type2abbr:
+#                 cell_type_abbr = cell_type2abbr[cell_prop]
 #             else:
 #                 raise KeyError('Unknown cell type')
 #             gen_id = 'gen_' + cell_type_abbr + '_' + str(unique_inx)
 #             if group_by == 'leiden':
-#                 par_ct_name = cell_type_mapping[cell_type]  # the name of parent cell type
+#                 par_ct_name = cell_type_mapping[cell_prop]  # the name of parent cell type
 #             else:
-#                 par_ct_name = cell_type
+#                 par_ct_name = cell_prop
 #             if filtering:
 #                 exp_sc_df = exp_sc.to_frame(name=gen_id).T
 #                 t_marker_mean_cpm = cal_exp_by_gene_list(exp_sc_df, gene_list=marker_genes['T Cells'], min_exp_value=1)
@@ -276,7 +276,7 @@ def get_sample_id(obs_df, n, cell_type, n_base, class_by='leiden', sep_by_patien
 #                 g_sample2exp[gen_id] = exp_sc
 #                 g_sample2id[gen_id] = _s
 #         round_counter += 1
-#     # selected_samples = get_sample_id(obs_df=adata.obs, n=n, n_base=n_base, cell_type=cell_type, class_by=group_by)
+#     # selected_samples = get_sample_id(obs_df=adata.obs, n=n, n_base=n_base, cell_prop=cell_prop, class_by=group_by)
 #     if return_cell_id:
 #         return tuple(list(g_sample2id.values())[:n])
 #
@@ -287,11 +287,11 @@ def get_sample_id(obs_df, n, cell_type, n_base, class_by='leiden', sep_by_patien
 #     if adata.shape[0] > 1:
 #         adata.X = csr_matrix(adata.X)
 #     adata.obs['dataset_id'] = 'generated'
-#     adata.obs[group_by] = cell_type
+#     adata.obs[group_by] = cell_prop
 #     g_sample2id = {i: ','.join(j) for i, j in g_sample2id.items()}
 #     adata.obs['original_sample_ids'] = adata.obs.index.map(g_sample2id)
 #     if group_by == 'leiden':
-#         adata.obs['cell_type'] = cell_type_mapping.get(cell_type)
+#         adata.obs['cell_prop'] = cell_type_mapping.get(cell_prop)
 #     sc.pp.log1p(adata, base=log_base)
 #     return adata
 
@@ -349,7 +349,7 @@ def filter_cells_by_marker_gene(single_cell_dataset, cell_types: list = None, ce
                                 index=current_part_data.obs.index)
         gene_exp = log_exp2cpm(gene_exp)  # convert the expression values from log2(CPM + 1) to CPM
 
-        cell_type_marker_exp = pd.DataFrame(index=gene_exp.index, columns=cell_types)  # sample by cell_type
+        cell_type_marker_exp = pd.DataFrame(index=gene_exp.index, columns=cell_types)  # sample by cell_prop
         cell_type_quantile = pd.DataFrame(index=['q_10', 'q_25', 'q_50', 'q_75', 'q_90', 'q_95'],
                                           columns=cell_types)
 
@@ -560,7 +560,7 @@ def filter_cd4_cd8(removed_cells: dict = None, cell_type: str = '', exp_range: t
     """
     # q50 = cell_type_quantile.loc['q_50', 'CD4 T']
     # filter_upper = min(q50, exp_range[1])
-    # removed_cells = update_removed_cells(removed_cells=removed_cells, cell_type='CD4 T',
+    # removed_cells = update_removed_cells(removed_cells=removed_cells, cell_prop='CD4 T',
     #                                      cell_type_marker_exp=cell_type_marker_exp,
     #                                      filter_upper=filter_upper)
     _removed = []

@@ -278,12 +278,12 @@ def read_single_cell_type_dataset(sct_dataset_file_path: str, latent_z_nn_info_f
                 (latent_z_nn_info['n_neighbor_class'] == 1) &  # all neighbors belong to the same cell type
                 (latent_z_nn_info['class'] == latent_z_nn_info['pred_class']),  # predicted class is same as true class
                 ['class']].copy()
-        latent_z_nn_info['cell_type'] = latent_z_nn_info['class'].map(lambda x: inx2cell_type[x])
+        latent_z_nn_info['cell_prop'] = latent_z_nn_info['class'].map(lambda x: inx2cell_type[x])
         sct_dataset_obs = latent_z_nn_info.copy()
     else:
         sct_dataset_obs = sct_dataset_obj.get_cell_fraction()
         sct_dataset_obs['class'] = sct_dataset_obs.values.argmax(axis=1)
-        sct_dataset_obs['cell_type'] = sct_dataset_obs['class'].map(lambda x: inx2cell_type[x])
+        sct_dataset_obs['cell_prop'] = sct_dataset_obs['class'].map(lambda x: inx2cell_type[x])
     return sct_dataset_obs, sct_dataset_df
 
 

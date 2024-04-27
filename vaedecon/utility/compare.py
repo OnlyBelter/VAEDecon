@@ -269,4 +269,4 @@ if __name__ == '__main__':
     # for algo, m_fp in algo2merged_file_path.items():
     #     print(f'Merge the results of {algo}...')
     #     read_and_merge_result(raw_result_dir=algo2raw_result_dir[algo], algo=algo,
-    #                           cell_type=algo2cell_types[algo])
+    #                           cell_prop=algo2cell_types[algo])

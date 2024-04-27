@@ -599,14 +599,14 @@ def read_marker_gene(marker_gene_file_path: str, include_t_cell: bool = False,
         else:
             marker_gene = marker_gene.loc[marker_gene['core_marker'] == 1, :].copy()
         if not include_cd8_nk_marker:
-            marker_gene = marker_gene.loc[marker_gene['cell_type'] != 'CD8 T / NK', :].copy()
-    cell_types = sorted(marker_gene['cell_type'].unique())
+            marker_gene = marker_gene.loc[marker_gene['cell_prop'] != 'CD8 T / NK', :].copy()
+    cell_types = sorted(marker_gene['cell_prop'].unique())
     for ct in cell_types:
         if include_t_cell:
-            cell_type2marker[ct] = list(marker_gene.loc[marker_gene['cell_type'] == ct, 'marker_gene'].unique())
+            cell_type2marker[ct] = list(marker_gene.loc[marker_gene['cell_prop'] == ct, 'marker_gene'].unique())
         else:
             if ct != 'T Cells':
-                cell_type2marker[ct] = list(marker_gene.loc[marker_gene['cell_type'] == ct, 'marker_gene'].unique())
+                cell_type2marker[ct] = list(marker_gene.loc[marker_gene['cell_prop'] == ct, 'marker_gene'].unique())
     if include_cd8_nk_marker and cell_type2marker.get('CD8 T / NK', ''):
         cell_type2marker['NK'] += cell_type2marker['CD8 T / NK']
         cell_type2marker['CD8 T'] += cell_type2marker['CD8 T / NK']

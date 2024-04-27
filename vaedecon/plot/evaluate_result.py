@@ -86,9 +86,9 @@ class ScatterPlot(object):
                 self.fit_reg_model(ax=ax, order=order)
         else:
             show_columns = [i for i in show_columns if i in self.y.columns]
-            # for cell_type in show_columns:
-            #     if cell_type not in y_true.columns:
-            #         y_true[cell_type] = 0
+            # for cell_prop in show_columns:
+            #     if cell_prop not in y_true.columns:
+            #         y_true[cell_prop] = 0
             show_columns_str = ', '.join(show_columns)
             assert np.all([i in self.x.columns for i in show_columns]), \
                 f'All of elements in show_columns ({show_columns_str}) should exist in ' \
@@ -252,9 +252,9 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
         y_true['T Cells'] = y_true.loc[:, ['CD4 T', 'CD8 T']].sum(axis=1)
     # less cell type than show_columns for this dataset
     show_columns = [i for i in show_columns if i in y_true.columns]
-    # for cell_type in show_columns:
-    #     if cell_type not in y_true.columns:
-    #         y_true[cell_type] = 0
+    # for cell_prop in show_columns:
+    #     if cell_prop not in y_true.columns:
+    #         y_true[cell_prop] = 0
     show_columns_str = ', '.join(show_columns)
     assert np.all([i in y_true.columns for i in show_columns]) and \
            np.all([i in y_pred.columns for i in show_columns]), \
@@ -353,7 +353,7 @@ def compare_exp_and_cell_fraction(merged_file_path, result_dir,
             if cancer_type not in cancer_type2corr:
                 cancer_type2corr[cancer_type] = {}
             for cell_type in cell_types:
-                # if cell_type != 'Cancer Cells':
+                # if cell_prop != 'Cancer Cells':
                 if signature_score_method == 'mean_exp':
                     method = 'marker_mean'
                     if cell_type in ['B Cells'] and np.any(['max' in i for i in current_df.columns]):
@@ -600,7 +600,7 @@ def compare_mean_exp_with_cell_frac_across_algo(cancer_type: str, algo2merged_fp
     if outliers_fp is not None and os.path.exists(outliers_fp):
         outliers = pd.read_csv(outliers_fp, index_col=0)
         mean_exp = mean_exp.loc[~mean_exp.index.isin(outliers.index), :].copy()
-    # mean_exp = mean_exp.loc[mean_exp['cancer_type'] == cancer_type, [f'{cell_type}_marker_mean']].copy()
+    # mean_exp = mean_exp.loc[mean_exp['cancer_type'] == cancer_type, [f'{cell_prop}_marker_mean']].copy()
 
     corr_list = [None] * len(inx2plot)
     max_cell_frac = 0

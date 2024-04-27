@@ -248,9 +248,9 @@ def plot_marker_gene_in_cell_type(n3000_dataset, cell_type_exp: str = '', cell_t
     else:
         raise KeyError(f'Cell type {cell_type_marker} in "cell_type_marker" do not exist in "cell_type2marker_genes"')
     current_ds = None
-    cell_types_in_n3000 = list(n3000_dataset.obs.cell_type.unique())
+    cell_types_in_n3000 = list(n3000_dataset.obs.cell_prop.unique())
     if cell_type_exp in cell_types_in_n3000:
-        current_ds = n3000_dataset[n3000_dataset.obs.cell_type == cell_type_exp, :].copy()
+        current_ds = n3000_dataset[n3000_dataset.obs.cell_prop == cell_type_exp, :].copy()
     print(current_ds)
     current_ds_df = pd.DataFrame(data=current_ds.X.A, index=current_ds.obs.index, columns=current_ds.var.index)
     current_ds_cpm = log_exp2cpm(current_ds_df)
@@ -303,7 +303,7 @@ def plot_marker_exp(dataset_id: str = '', single_cell_dataset: an.AnnData = None
     plot the boxplot of marker genes for each cell type (12 cell types) of each sub-cluster (leiden) in a sc dataset
     :param dataset_id: the index of current dataset
     :param single_cell_dataset: single cell dataset in .h5ad format
-    :param cell_type2markers: {cell_type: [marker genes]}
+    :param cell_type2markers: {cell_prop: [marker genes]}
     :param cell_types: 12 sorted cell types
     :param max_exp: max expression to plot
     :param exp_range: (low_exp_threshold, middle_exp_threshold)
@@ -464,7 +464,7 @@ def plot_marker_exp(dataset_id: str = '', single_cell_dataset: an.AnnData = None
 
         current_dataset_quantile_df = pd.concat(current_dataset_quantile)
         current_dataset_quantile_df['dataset_id'] = dataset_id
-        current_dataset_quantile_df.to_csv(quantile_file_path, index_label='cell_type')
+        current_dataset_quantile_df.to_csv(quantile_file_path, index_label='cell_prop')
     else:
         print(f'   Using previous result: {quantile_file_path}')
         current_dataset_quantile_df = pd.read_csv(quantile_file_path, index_col=0)

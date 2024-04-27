@@ -232,7 +232,7 @@ def plot_paras(paras_file_path, vae_cla_model, latent_z_pos,
             raise FileNotFoundError('sampled_sc_id_file should be provided with sample_id to plot this sample')
         sampled_sc_id_file = read_df(sampled_sc_id_file)
         current_sc_ids = sampled_sc_id_file.loc[sample_id, :].copy()
-        sc_ids = dict(zip(current_sc_ids['cell_type'], current_sc_ids['selected_cell_id']))
+        sc_ids = dict(zip(current_sc_ids['cell_prop'], current_sc_ids['selected_cell_id']))
         sc_id_list = [sc_ids[_] for _ in current_cell_types]
         plt.scatter(latent_z_pos.loc[sc_id_list, 'z1'], latent_z_pos.loc[sc_id_list, 'z2'], marker='x', color='red')
     plt.scatter(latent_z_paras[:, 0], latent_z_paras[:, 1], marker='*', color='green')
@@ -271,7 +271,7 @@ def plot_paras_all_cell_types(latent_z_paras_file, latent_z_pos_file, current_ce
             sampled_sc_id_file = pd.read_csv(sampled_sc_id_file, index_col=[0, 1])
         # sample_inx = list(zip([sample_id] * len(current_cell_types), current_cell_types))
         current_sc_ids = sampled_sc_id_file.loc[sample_inx, 'selected_cell_id'].to_list()
-        # sc_ids = dict(zip(current_sc_ids['cell_type'], current_sc_ids['selected_cell_id']))
+        # sc_ids = dict(zip(current_sc_ids['cell_prop'], current_sc_ids['selected_cell_id']))
         # sc_id_list = [sc_ids[_] for _ in current_cell_types]
         plt.scatter(latent_z_pos_file.loc[current_sc_ids, col_names[0]],
                     latent_z_pos_file.loc[current_sc_ids, col_names[1]],

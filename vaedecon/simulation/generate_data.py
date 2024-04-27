@@ -35,7 +35,7 @@ def segment_generation_fraction(n_samples: int = None, max_value: int = 10000,
 
     :param sample_prefix: only for naming
 
-    :param cell_prop_prior: the prior range of cell proportion for each cell type, {'cell_type': (0, 0.1), '': (0, 0.2), ...}
+    :param cell_prop_prior: the prior range of cell proportion for each cell type, {'cell_prop': (0, 0.1), '': (0, 0.2), ...}
 
     :return: generated cell fraction, sample by cell type
     """
@@ -172,7 +172,7 @@ def _create_fractions(n_cell_types, fixed_range: dict = None):
     """
     generate (pure) random fractions
     :param n_cell_types: number of fractions to create
-    :param fixed_range: the range of cell fraction for each cell type, {'cell_type': (0, 100), '': (), ...}
+    :param fixed_range: the range of cell fraction for each cell type, {'cell_prop': (0, 100), '': (), ...}
     :return: list of random fracs with the length n_cell_types
     """
     if (fixed_range is None) or (len(fixed_range) < n_cell_types):
@@ -199,7 +199,7 @@ def random_generation_fraction(n_samples: int = 100, cell_types: list = (),
 
     :param sample_prefix: prefix of sample names
 
-    :param fixed_range: the range of cell fraction for each cell type, {'cell_type': (0, 100), '': (), ...}
+    :param fixed_range: the range of cell fraction for each cell type, {'cell_prop': (0, 100), '': (), ...}
 
     :return:  generated cell fraction, sample by cell type
     """
@@ -219,7 +219,7 @@ def map_cell_id2exp(sc_exp, selected_cell_id):
     """
 
     :param sc_exp: a AnnData object, log2(CPM + 1), samples by genes
-    :param selected_cell_id: a dataFrame which contains cell_type, n_cell, selected_cell_id
+    :param selected_cell_id: a dataFrame which contains cell_prop, n_cell, selected_cell_id
     :return: a DataFrame, log2(CPM + 1), samples by genes
     """
     # sc_exp = an.read_h5ad(sc_exp)
@@ -288,14 +288,14 @@ def map_cell_id2exp(sc_exp, selected_cell_id):
 #             # continue
 #             current_part = cell_num.iloc[inx * step_size: (inx + 1) * step_size, :]
 #         current_part_flatten = []
-#         for cell_type in current_part.columns:
+#         for cell_prop in current_part.columns:
 #             _part = pd.DataFrame(index=current_part.index)
-#             _part['cell_type'] = cell_type
-#             _part['n_cell'] = current_part[cell_type]
+#             _part['cell_prop'] = cell_prop
+#             _part['n_cell'] = current_part[cell_prop]
 #             current_part_flatten.append(_part)
 #         current_part_flatten = pd.concat(current_part_flatten)
 #         # contains all cell types for each single simulated bulk expression
-#         paras = [(obs_df, 1, row['cell_type'], row['n_cell'], 'cell_type')
+#         paras = [(obs_df, 1, row['cell_prop'], row['n_cell'], 'cell_prop')
 #                  for i, row in current_part_flatten.iterrows()]
 #         # https://pythonspeed.com/articles/python-multiprocessing/
 #         with multiprocessing.get_context('spawn').Pool(n_threads) as p:
@@ -332,7 +332,7 @@ class BulkGEPGenerator(object):
     :param simu_bulk_dir: the directory to save simulated bulk cell GEPs
     :param merged_sc_dataset_file_path: the file path of pre-merged single cell datasets
     :param sct_dataset_file_path: the file path of single cell datasets (scGEP, dataset `S1`)
-    :param cell_type2subtype: cell types used when generating bulk GEPs, {'cell_type': ['subtype1', 'subtype2', ...], ...}'
+    :param cell_type2subtype: cell types used when generating bulk GEPs, {'cell_prop': ['subtype1', 'subtype2', ...], ...}'
     :param sc_dataset_ids: single cell dataset id used when generating bulk GEPs
     :param bulk_dataset_name: the name of generated bulk dataset, only for naming
     :param check_basic_info: whether to check basic information of single cell datasets
@@ -816,7 +816,7 @@ class BulkGEPGenerator(object):
         # always removing this part: marker genes of CD4 T cells expressed high in CD8 T cells
         if 'm_cd4/m_cd8 group' in self.merged_sc_dataset_obs.columns:
             self.merged_sc_dataset_obs = \
-                self.merged_sc_dataset_obs.loc[~((self.merged_sc_dataset_obs['cell_type'] == 'CD8 T')
+                self.merged_sc_dataset_obs.loc[~((self.merged_sc_dataset_obs['cell_prop'] == 'CD8 T')
                                                  & (self.merged_sc_dataset_obs['m_cd4/m_cd8 group'] == 'high')),
                                                :].copy()
 
@@ -870,20 +870,20 @@ class BulkGEPGenerator(object):
         # n_samples = cell_frac.shape[0]
         for cell_type in cell_num.columns:
             _part = pd.DataFrame(index=cell_num.index)
-            _part['cell_type'] = cell_type
+            _part['cell_prop'] = cell_type
             _part['n_cell'] = cell_num[cell_type]
             _part['class_by'] = self.cell_type_col_name
             if cell_type in self.cell_subtype_used:
                 _part['class_by'] = self.subtype_col_name
             # if all_cell_num_is_one:
-            #     _selected_cell_ids = self.obs_df.loc[self.obs_df['cell_type'] == cell_type,
+            #     _selected_cell_ids = self.obs_df.loc[self.obs_df['cell_prop'] == cell_prop,
             #                                          :].sample(n=n_samples).index.to_list()
             #     _part['selected_cell_id'] = _selected_cell_ids
             cell_num_flatten.append(_part)
         sampled_cell_ids = pd.concat(cell_num_flatten)
         # contains all cell types for each single simulated bulk expression profile
         # if not all_cell_num_is_one:
-        paras = [(obs_df, 1, row['cell_type'], row['n_cell'], row['class_by'], sep_by_patient)
+        paras = [(obs_df, 1, row['cell_prop'], row['n_cell'], row['class_by'], sep_by_patient)
                  for i, row in sampled_cell_ids.iterrows()]
         n_threads = min(multiprocessing.cpu_count()-2, n_threads)
         # https://pythonspeed.com/articles/python-multiprocessing/
@@ -893,7 +893,7 @@ class BulkGEPGenerator(object):
         results_str = [';'.join(i) for i in results]
         sampled_cell_ids['selected_cell_id'] = results_str
         sampled_cell_ids.index.name = 'sample_id'
-        sampled_cell_ids.sort_values(by=['sample_id', 'cell_type'], inplace=True)
+        sampled_cell_ids.sort_values(by=['sample_id', 'cell_prop'], inplace=True)
 
         return sampled_cell_ids
 
@@ -915,7 +915,7 @@ class BulkGEPGenerator(object):
                          gep_type='MCT', add_noise: bool = False, noise_params: tuple = ()) -> pd.DataFrame:
         """
         mapping sampled cell_ids to the corresponding GEPs
-        :param selected_cell_id: a dataFrame which contains cell_type, n_cell, selected_cell_id
+        :param selected_cell_id: a dataFrame which contains cell_prop, n_cell, selected_cell_id
         :param sc_dataset: merged_sc_dataset, generated_sc_dataset or sct_dataset
         :param simu_method: ave (average all selected single cell GEPs), mul (multiple GEP by cell fractions)
         :param gep_type: MCT means multiple cell types (bulk GEP), SCT means single cell type
@@ -932,7 +932,7 @@ class BulkGEPGenerator(object):
             selected_cell_id = selected_cell_id.loc[selected_cell_id['n_cell'] > 1, :].copy()
             # n_non_zero = 1000
             n_genes = sc_ds_df.shape[1]
-            for cell_type, group in selected_cell_id.groupby('cell_type'):
+            for cell_type, group in selected_cell_id.groupby('cell_prop'):
                 for sample_id, row in group.iterrows():
                     cell_ids = row['selected_cell_id'].split(';')
                     # simulated_exp[sample_id] = sc_ds_df.loc[cell_ids, :].mean(axis=0)  # average
@@ -952,7 +952,7 @@ class BulkGEPGenerator(object):
             ct2rna_coefficient = {}
             if self.total_rna_coefficient is not None:
                 # consider the total RNA amount of each cell type
-                all_cell_types = selected_cell_id['cell_type'].unique()
+                all_cell_types = selected_cell_id['cell_prop'].unique()
                 for cell_type in all_cell_types:
                     if cell_type in self.total_rna_coefficient:
                         ct2rna_coefficient[cell_type] = self.total_rna_coefficient[cell_type]
@@ -970,7 +970,7 @@ class BulkGEPGenerator(object):
                 # using merged single cell dataset directly
 
                 # sort by cell types to make sure the correction of matrix multiplication
-                _cell_types = group['cell_type'].to_list()
+                _cell_types = group['cell_prop'].to_list()
                 current_cell_frac = cell_frac.loc[sample_id, _cell_types].copy().to_frame()
                 # TODO check here
                 if self.total_rna_coefficient is not None:
@@ -1106,7 +1106,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
     :param simu_bulk_dir: the directory to save simulated bulk cell GEPs
     :param merged_sc_dataset_file_path: the file path of pre-merged single cell datasets
     :param cell_type2subtype: cell types used when generating bulk GEPs,
-        {cell_type: [sub_cell_type1, sub_cell_type2, ...], ...}
+        {cell_prop: [sub_cell_type1, sub_cell_type2, ...], ...}
     :param sc_dataset_ids: single cell dataset id used when generating bulk GEPs
     :param bulk_dataset_name: the name of generated bulk dataset, only for naming
     :param zero_ratio_threshold: the threshold of zero ratio of genes in single cell GEPs,
@@ -1116,7 +1116,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
     def __init__(self, merged_sc_dataset_file_path, cell_type2subtype, sc_dataset_ids,
                  simu_bulk_dir, bulk_dataset_name, zero_ratio_threshold: float = 0.97,
                  sc_dataset_gep_type: str = 'log_space', subtype_col_name: str = None,
-                 cell_type_col_name: str = 'cell_type'):
+                 cell_type_col_name: str = 'cell_prop'):
         super().__init__(merged_sc_dataset_file_path=merged_sc_dataset_file_path, simu_bulk_dir=simu_bulk_dir,
                          cell_type2subtype=cell_type2subtype, sc_dataset_ids=sc_dataset_ids,
                          bulk_dataset_name=bulk_dataset_name,
