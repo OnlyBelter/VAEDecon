@@ -45,7 +45,7 @@ class Encoder_MLP(BaseEncoder):
             nn.Softmax(dim=1)
         )
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor = None,
+    def forward(self, x: torch.Tensor, y: torch.Tensor | None = None,
                 output_layer_levels: List[int] = None) -> ModelOutput:
         """Forward method
 
@@ -89,21 +89,24 @@ class Encoder_MLP(BaseEncoder):
             if i + 1 == self.depth:
                 # output["embedding"] = self.embedding(out.reshape(x.shape[0], -1))
                 # using the proposed structure of latent space
-                embedding_cell_type = self.embedding(out)
-                embedding_cell_type = embedding_cell_type.reshape((-1, self.latent_dim, self.n_cell_types))
+                embedding_all_types = self.embedding(out)  # (batch_size, latent_dim, n_cell_types)
+                embedding_all_types = embedding_all_types.reshape((-1, self.latent_dim, self.n_cell_types))
                 output["cell_prop"] = self.cell_prop(out).reshape((-1, self.n_cell_types, 1))
-                # print(embedding_cell_type.shape, output["cell_prop"].shape)
+                # print(embedding_all_types.shape, output["cell_prop"].shape)
                 if y is not None:
                     y = y.reshape((-1, self.n_cell_types, 1))
-                    embedding = torch.matmul(embedding_cell_type, y)
+                    embedding = torch.matmul(embedding_all_types, y)  # bulk mode embedding
                     cell_type_existed = (y > 0.01).type(torch.int8).type(torch.float32)
                 else:
-                    embedding = torch.matmul(embedding_cell_type, output["cell_prop"])
-                    cell_type_existed = (output["cell_prop"] > 0.01).dtype(torch.int8).type(torch.float32)
+                    embedding = torch.matmul(embedding_all_types, output["cell_prop"])
+                    cell_type_existed = (output["cell_prop"] > 0.01).type(torch.int8).type(torch.float32)
                 # print(cell_type_existed)
+                # (latent_dim, n_cell_types) x (batch_size, n_cell_types, 1) -> (batch_size, latent_dim, 1)
                 position_encoding_cell_type = torch.matmul(self.position_encoding, cell_type_existed)
                 output["embedding"] = embedding + position_encoding_cell_type
                 output["log_var"] = self.log_var(out).reshape((-1, self.latent_dim, 1))
+                output['embedding_all_types'] = embedding_all_types
+                output['cell_type_existed'] = cell_type_existed
 
         return output
 

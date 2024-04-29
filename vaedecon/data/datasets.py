@@ -15,7 +15,7 @@ from torch.utils.data._utils.collate import default_collate
 
 class DatasetOutput(OrderedDict):
     """Base DatasetOutput class fixing the output type from the dataset. This class is inspired from
-    the ``ModelOutput`` class from hugginface transformers library"""
+    the ``ModelOutput`` class from huggingface transformers library"""
 
     def __getitem__(self, k):
         if isinstance(k, str):

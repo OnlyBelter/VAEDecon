@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from vaedecon.data.datasets import BaseDataset, GEPDataset
+from vaedecon.data.datasets import BaseDataset, GEPDataset, DatasetOutput
 from ...models.base.base_utils import ModelOutput
 
 from ...models.base import BaseAE
@@ -65,12 +65,12 @@ class VAE(BaseAE):
 
         self.set_encoder(encoder)
 
-    def forward(self, inputs: GEPDataset, **kwargs):
+    def forward(self, inputs: DatasetOutput, **kwargs):
         """
         The VAE model
 
         Args:
-            inputs (GEPDataset): The training dataset with labels
+            inputs (DatasetOutput): The training dataset with labels
 
         Returns:
             ModelOutput: An instance of ModelOutput containing all the relevant parameters
@@ -83,14 +83,33 @@ class VAE(BaseAE):
         encoder_output = self.encoder(x=x, y=y)
 
         mu, log_var, pred_cell_prop = encoder_output.embedding, encoder_output.log_var, encoder_output.cell_prop
+        mu_deconv = encoder_output.embedding_all_types  # (batch_size, latent_dim, n_cell_types)
+        # cell_type_existed = encoder_output.cell_type_existed  # (batch_size, n_cell_types, 1)
+        n_cell_types = mu_deconv.shape[2]
+        # get all reconstructed GEPs first, then select the one based on cell_type_existed
 
         std = torch.exp(0.5 * log_var)
         # print('std.shape', std.shape, 'mu.shape', mu.shape)
         z, eps = self._sample_gauss(mu, std)
         # print('z.shape', z.shape)
-        recon_x = self.decoder(z)["reconstruction"]
-
-        loss, recon_loss, kld, cell_prop_loss = self.loss_function(recon_x, x, mu, log_var, y, pred_cell_prop)
+        recon_x = self.decoder(z)["reconstruction"]  # bulk mode
+        recon_x = recon_x.reshape(x.shape)  # (batch_size, n_genes)
+        # reconstructing GEPs for all cell types
+        recon_x_all_types = torch.zeros([x.shape[0], x.shape[1], n_cell_types], dtype=torch.float32)
+        for i in range(n_cell_types):
+            mu_specific_type = mu_deconv[:, :, i]
+            mu_specific_type = mu_specific_type.reshape(mu.shape)
+            z_specific_type, _ = self._sample_gauss(mu_specific_type, std)  # same std for all cell types
+            recon_x_all_types[:, :, i] = self.decoder(z_specific_type)["reconstruction"].reshape(x.shape)
+        if y is not None:
+            recon_x_conv = torch.matmul(recon_x_all_types, y.reshape(-1, n_cell_types, 1))
+        else:
+            recon_x_conv = torch.matmul(recon_x_all_types, pred_cell_prop)
+        recon_x_conv = recon_x_conv.reshape(x.shape)
+        loss, recon_loss, kld, cell_prop_loss, recon_loss_conv = self.loss_function(
+            recon_x=recon_x, x=x, mu=mu, log_var=log_var, y=y,
+            pred_cell_prop=pred_cell_prop, recon_x_conv=recon_x_conv
+        )
 
         output = ModelOutput(
             recon_loss=recon_loss,
@@ -102,27 +121,55 @@ class VAE(BaseAE):
             log_var=log_var,
             cell_prop_loss=cell_prop_loss,
             kld=kld,
+            pred_cell_prop=pred_cell_prop,
+            recon_x_conv=recon_x_conv,
+            recon_loss_conv=recon_loss_conv,
+            recon_x_all_types=recon_x_all_types,
         )
 
         return output
 
-    def loss_function(self, recon_x, x, mu, log_var, y, pred_cell_prop):
+    def loss_function(self, recon_x, x, mu, log_var, y: torch.Tensor | None = None,
+                      pred_cell_prop: torch.Tensor = None, recon_x_conv: torch.Tensor = None):
         """
         The loss function of the VAE model
+
+        - params:
+        recon_x: reconstructed data from the decoder using a bulk embedding (multiply in the latent space)
+        x: input data
+        mu: mean of the latent space
+        log_var: log variance of the latent space
+        y: cell proportions of the input data
+        pred_cell_prop: predicted cell proportions
+        recon_x_conv: reconstructed data from the GEPs of all cell types (multiply the output of the decoder)
 
         """
         # print('recon_x.shape', recon_x.shape, 'x.shape', x.shape, 'mu.shape', mu.shape,
         #       'log_var.shape', log_var.shape, 'y.shape', y.shape, 'pred_cell_prop.shape', pred_cell_prop.shape)
+        # recon_x_by_decoder = recon_x
+        # recon_x_by_conv = recon_x_conv
         if self.model_config.reconstruction_loss == "mse":
-            recon_loss = F.mse_loss(
+            recon_loss_by_decoder = F.mse_loss(
                 recon_x.reshape(x.shape[0], -1),  # batch_size x features (gene expression values)
                 x.reshape(x.shape[0], -1),
                 reduction="none",
             ).sum(dim=-1)
 
+            recon_loss_by_conv = F.mse_loss(
+                recon_x_conv.reshape(x.shape[0], -1),  # batch_size x features (gene expression values)
+                x.reshape(x.shape[0], -1),
+                reduction="none",
+            ).sum(dim=-1)
+
         elif self.model_config.reconstruction_loss == "bce":
-            recon_loss = F.binary_cross_entropy(
+            recon_loss_by_decoder = F.binary_cross_entropy(
                 recon_x.reshape(x.shape[0], -1),
+                x.reshape(x.shape[0], -1),
+                reduction="none",
+            ).sum(dim=-1)
+
+            recon_loss_by_conv = F.binary_cross_entropy(
+                recon_x_conv.reshape(x.shape[0], -1),
                 x.reshape(x.shape[0], -1),
                 reduction="none",
             ).sum(dim=-1)
@@ -136,16 +183,20 @@ class VAE(BaseAE):
         KLD = - torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
 
         # cell proportion loss
-        cell_prop_loss = F.mse_loss(
-            pred_cell_prop.reshape(y.shape[0], -1),  # batch_size x features (cell proportions)
-            y.reshape(y.shape[0], -1),
-            reduction="none"
-        ).sum(dim=-1)
-        # print('recon_loss.shape', recon_loss.shape, 'KLD.shape', KLD.shape,
+        if y is not None:
+            cell_prop_loss = F.cross_entropy(
+                pred_cell_prop.reshape(y.shape[0], -1),  # batch_size x features (cell proportions)
+                y.reshape(y.shape[0], -1),
+                reduction="none"
+            ).sum(dim=-1)
+        else:
+            cell_prop_loss = torch.zeros_like(KLD)
+        # print('recon_loss_by_decoder.shape', recon_loss_by_decoder.shape, 'KLD.shape', KLD.shape,
         #       'cell_prop_loss.shape', cell_prop_loss.shape)
 
-        return ((0.5*recon_loss + 0.2*KLD + 0.3*cell_prop_loss).mean(dim=0),
-                recon_loss.mean(dim=0), KLD.mean(dim=0), cell_prop_loss.mean(dim=0))
+        return ((0.2*recon_loss_by_decoder + 0.3*recon_loss_by_conv + 0.2*KLD + 0.3*cell_prop_loss).mean(dim=0),
+                recon_loss_by_decoder.mean(dim=0), KLD.mean(dim=0), cell_prop_loss.mean(dim=0),
+                recon_loss_by_conv.mean(dim=0))
 
     def _sample_gauss(self, mu, std):
         # Reparametrization trick
