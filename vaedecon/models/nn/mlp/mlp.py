@@ -44,7 +44,7 @@ class Encoder_MLP(BaseEncoder):
             nn.Linear(512, self.n_cell_types),
             nn.Softmax(dim=1)
         )
-        self.position_encoding = self.position_encoding.to(self.embedding.weight.device)
+        # self.position_encoding = self.position_encoding.to(self.embedding.weight.device)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor | None = None,
                 output_layer_levels: List[int] = None) -> ModelOutput:
@@ -101,6 +101,7 @@ class Encoder_MLP(BaseEncoder):
                 else:
                     embedding = torch.matmul(embedding_all_types, output["cell_prop"])
                     cell_type_existed = (output["cell_prop"] > 0.01).type(torch.int8).type(torch.float32)
+                cell_type_existed = cell_type_existed.to(embedding.device)
                 # print(cell_type_existed)
                 # (latent_dim, n_cell_types) x (batch_size, n_cell_types, 1) -> (batch_size, latent_dim, 1)
                 position_encoding_cell_type = torch.matmul(self.position_encoding, cell_type_existed)
