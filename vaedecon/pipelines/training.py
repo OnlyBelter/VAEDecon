@@ -155,7 +155,7 @@ class TrainingPipeline(Pipeline):
                 logger.info("Checking eval dataset...")
                 self._check_dataset(eval_dataset)
 
-        elif isinstance(self.training_config, BaseTrainerConfig):
+        if isinstance(self.training_config, BaseTrainerConfig):
             logger.info("Using Base Trainer\n")
             trainer = BaseTrainer(
                 model=self.model,
