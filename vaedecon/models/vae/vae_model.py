@@ -95,7 +95,7 @@ class VAE(BaseAE):
         recon_x = self.decoder(z)["reconstruction"]  # bulk mode
         recon_x = recon_x.reshape(x.shape)  # (batch_size, n_genes)
         # reconstructing GEPs for all cell types
-        recon_x_all_types = torch.zeros([x.shape[0], x.shape[1], n_cell_types], dtype=torch.float32)
+        recon_x_all_types = torch.zeros([x.shape[0], x.shape[1], n_cell_types], dtype=torch.float32, device=x.device)
         for i in range(n_cell_types):
             mu_specific_type = mu_deconv[:, :, i]
             mu_specific_type = mu_specific_type.reshape(mu.shape)
