@@ -97,13 +97,13 @@ class GEPDataset(Dataset):
         """
         self.file_path = file_path
         self.gep_data = anndata.read_h5ad(file_path, backed='r')  # read the data in log2(TPM + 1) format
-        cell_prop = self.gep_data.obs.values.copy()
+        self.data = self.gep_data.X[()]  # get the data in numpy format
+        self.data = torch.from_numpy(self.data)
+        if scaling_by_constant:
+            self.data = self.data / 20.0
         # cell_types = gep_data.obs.columns.to_list()
+        cell_prop = self.gep_data.obs.values.copy()
         self.labels = torch.tensor(cell_prop, dtype=torch.float32)
-        self.scaling_by_constant = scaling_by_constant
-
-        # self.labels = labels.type(torch.float)
-        # self.data = data.type(torch.float)
 
     def __len__(self):
         return self.gep_data.shape[0]
@@ -119,10 +119,7 @@ class GEPDataset(Dataset):
             torch.Tensor
         """
         # Select sample
-        X = self.gep_data.X[index]
-        X = torch.tensor(X, dtype=torch.float32)
+        x = self.data[index]
         y = self.labels[index]
-        if self.scaling_by_constant:
-            X = X / 20.0
 
-        return DatasetOutput(data=X, labels=y)
+        return DatasetOutput(data=x, labels=y)
