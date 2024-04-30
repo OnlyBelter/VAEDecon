@@ -54,6 +54,9 @@ dependencies = [
     "huggingface_hub",
 #    "sphinx_book_theme",
     "jinja2<3.1",
+    "pydantic",
+    "cloudpickle",
+    "pythae",
 #    'tensorrt',
 #    "sphinx_rtd_theme"
 ]

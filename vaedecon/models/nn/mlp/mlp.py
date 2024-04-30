@@ -44,6 +44,7 @@ class Encoder_MLP(BaseEncoder):
             nn.Linear(512, self.n_cell_types),
             nn.Softmax(dim=1)
         )
+        self.position_encoding = self.position_encoding.to(self.embedding.weight.device)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor | None = None,
                 output_layer_levels: List[int] = None) -> ModelOutput:
