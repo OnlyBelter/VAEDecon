@@ -64,6 +64,7 @@ class Encoder_MLP(BaseEncoder):
         output = ModelOutput()
 
         max_depth = self.depth
+        self.position_encoding = self.position_encoding.to(x.device)
 
         if output_layer_levels is not None:
             assert all(
@@ -101,7 +102,7 @@ class Encoder_MLP(BaseEncoder):
                 else:
                     embedding = torch.matmul(embedding_all_types, output["cell_prop"])
                     cell_type_existed = (output["cell_prop"] > 0.01).type(torch.int8).type(torch.float32)
-                cell_type_existed = cell_type_existed.to(embedding.device)
+                # cell_type_existed = cell_type_existed.to(embedding.device)
                 print(embedding.device, cell_type_existed.device, self.position_encoding.device,
                       self.embedding.weight.device)
                 # print(cell_type_existed)
