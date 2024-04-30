@@ -102,6 +102,8 @@ class Encoder_MLP(BaseEncoder):
                     embedding = torch.matmul(embedding_all_types, output["cell_prop"])
                     cell_type_existed = (output["cell_prop"] > 0.01).type(torch.int8).type(torch.float32)
                 cell_type_existed = cell_type_existed.to(embedding.device)
+                print(embedding.device, cell_type_existed.device, self.position_encoding.device,
+                      self.embedding.weight.device)
                 # print(cell_type_existed)
                 # (latent_dim, n_cell_types) x (batch_size, n_cell_types, 1) -> (batch_size, latent_dim, 1)
                 position_encoding_cell_type = torch.matmul(self.position_encoding, cell_type_existed)
