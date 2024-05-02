@@ -17,6 +17,7 @@ class ReadH5AD(object):
     :param file_path: the file path of .h5ad file, samples by genes, log2cpm1p format
     :param show_info: whether to show the information of the dataset after reading
     """
+
     def __init__(self, file_path: str, show_info: bool = False):
         """
         """
@@ -34,7 +35,7 @@ class ReadH5AD(object):
         :param scaling_by_sample: whether to scale the expression values of each sample to [0, 1] by 'min_max'
         """
         if type(self.dataset.X) == csr_matrix:
-            x_data = self.dataset.X.A.astype(np.float32)  # convert sparse matrix to dense matrix
+            x_data = self.dataset.X.toarray().astype(np.float32)  # convert sparse matrix to dense matrix
         else:
             x_data = self.dataset.X.astype(np.float32)
 
@@ -89,6 +90,7 @@ class ReadExp(object):
     :param exp_type: TPM / CPM, log_space, non_log
     :param transpose: transpose if exp_file formed as genes (index) by samples (columns)
     """
+
     def __init__(self, exp_file, exp_type='TPM', transpose: bool = False):
         """
         """
@@ -181,7 +183,8 @@ class ReadExp(object):
         self.exp = self.exp.loc[:, common_genes].copy()
         if fill_not_exist and (len(not_exist_in_gene_list) != 0):
             print(f'   {len(not_exist_in_gene_list)} genes are not in current dataset, 0 will be filled')
-            _not_exist_exp = pd.DataFrame(np.zeros((self.exp.shape[0], len(not_exist_in_gene_list))), index=self.exp.index,
+            _not_exist_exp = pd.DataFrame(np.zeros((self.exp.shape[0], len(not_exist_in_gene_list))),
+                                          index=self.exp.index,
                                           columns=not_exist_in_gene_list)
             self.exp = pd.concat([self.exp, _not_exist_exp], axis=1)
             self.exp = self.exp.loc[:, gene_list].copy()
@@ -240,8 +243,8 @@ class TrainingDatasetLoader(object):
             train_cell_prop = self.cell_prop_pos.iloc[selected_inds, :].copy()
         else:
             # selected_pos_inds = tfp.distributions.Multinomial(total_count=n//2, logits=self.pos_train_inds, )
-            selected_pos_inds = np.random.choice(self.pos_train_inds, size=n//2, replace=False, p=p_pos)
-            selected_neg_inds = np.random.choice(self.neg_train_inds, size=n//2, replace=False, p=p_neg)
+            selected_pos_inds = np.random.choice(self.pos_train_inds, size=n // 2, replace=False, p=p_pos)
+            selected_neg_inds = np.random.choice(self.neg_train_inds, size=n // 2, replace=False, p=p_neg)
             t_gep1 = self.gep_pos.iloc[selected_pos_inds, :].copy()
             t_cell_prop1 = self.cell_prop_pos.iloc[selected_pos_inds, :].copy()
             t_gep2 = self.gep_neg.iloc[selected_neg_inds, :].copy()
