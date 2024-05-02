@@ -25,7 +25,11 @@ class Encoder_MLP(BaseEncoder):
         self.input_dim = args.input_dim
         self.latent_dim = args.latent_dim
         self.n_cell_types = args.n_cell_types
-        self.position_encoding = position_encoding()
+        self.using_positional_encoding = args.using_positional_encoding
+        if self.using_positional_encoding:
+            self.position_encoding = position_encoding()
+        else:
+            self.position_encoding = None
         # self.n_channels = 1
 
         layers = nn.ModuleList()
@@ -64,7 +68,8 @@ class Encoder_MLP(BaseEncoder):
         output = ModelOutput()
 
         max_depth = self.depth
-        self.position_encoding = self.position_encoding.to(x.device)
+        if self.position_encoding is not None:
+            self.position_encoding = self.position_encoding.to(x.device)
 
         if output_layer_levels is not None:
             assert all(
@@ -104,8 +109,11 @@ class Encoder_MLP(BaseEncoder):
                     cell_type_existed = (output["cell_prop"] > 0.01).type(torch.int8).type(torch.float32)
 
                 # (latent_dim, n_cell_types) x (batch_size, n_cell_types, 1) -> (batch_size, latent_dim, 1)
-                position_encoding_cell_type = torch.matmul(self.position_encoding, cell_type_existed)
-                output["embedding"] = embedding + position_encoding_cell_type
+                if self.position_encoding is not None:
+                    position_encoding_cell_type = torch.matmul(self.position_encoding, cell_type_existed)
+                    output["embedding"] = embedding + position_encoding_cell_type
+                else:
+                    output["embedding"] = embedding
                 output["log_var"] = self.log_var(out).reshape((-1, self.latent_dim, 1))
                 output['embedding_all_types'] = embedding_all_types
                 output['cell_type_existed'] = cell_type_existed

@@ -88,15 +88,21 @@ class GEPDataset(Dataset):
     This Class should be used for any new data sets.
     """
 
-    def __init__(self, file_path, scaling_by_constant=True):
+    def __init__(self, file_path: list[str], scaling_by_constant=True):
         """
         Args:
-            file_path (str): The path to the file containing the data
+            file_path (str): a list of file path containing the data
+
             scaling_by_constant (bool): If True, the data is scaled by a constant factor,
-            so that the data is in the range [0, 1].
+              so that the data is in the range [0, 1].
         """
-        self.file_path = file_path
-        self.gep_data = anndata.read_h5ad(file_path, backed='r')  # read the data in log2(TPM + 1) format
+        # self.file_path = file_path
+        all_data = []
+        for path in file_path:
+            gep_data = anndata.read_h5ad(path, backed='r')  # read the data in log2(TPM + 1) format
+            all_data.append(gep_data)
+        self.gep_data = anndata.concat(all_data)
+        # self.gep_data = anndata.read_h5ad(file_path, backed='r')  # read the data in log2(TPM + 1) format
         self.data = self.gep_data.X[()]  # get the data in numpy format
         self.data = torch.from_numpy(self.data)
         if scaling_by_constant:
