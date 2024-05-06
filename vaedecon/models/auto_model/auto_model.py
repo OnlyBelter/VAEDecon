@@ -57,12 +57,12 @@ class AutoModel(nn.Module):
     def load_from_hf_hub(
         cls, hf_hub_path: str, allow_pickle: bool = False
     ):  # pragma: no cover
-        """Class method to be used to load a automaticaly a pretrained model from the Hugging Face
+        """Class method to be used to automatically load a pretrained model from the Hugging Face
         hub
 
         Args:
-            hf_hub_path (str): The path where the model should have been be saved on the
-                hugginface hub.
+            hf_hub_path (str): The path where the model should have been saved on the
+                huggingface hub.
 
         .. note::
             This function requires the folder to contain:

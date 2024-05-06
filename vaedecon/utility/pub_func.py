@@ -297,9 +297,9 @@ def calculate_r2(y_true, y_pred):
     return r2_score(y_true=y_true, y_pred=y_pred, multioutput='raw_values')
 
 
-def check_dir(path):
+def check_dir(path: Path):
     """
-    check if a path exist, create if not exist
+    check if a path exists, create if not exist
     :param path:
     :return:
     """

@@ -55,6 +55,7 @@ class TrainingPipeline(Pipeline):
         self.data_processor = DataProcessor()
         self.model = model
         self.training_config = training_config
+        self.final_output_dir = None
 
     def _check_dataset(self, dataset: BaseDataset):
         try:
@@ -168,4 +169,4 @@ class TrainingPipeline(Pipeline):
             raise ValueError("The provided training config is not supported.")
 
         self.trainer = trainer
-        trainer.train()
+        self.final_output_dir = trainer.train()

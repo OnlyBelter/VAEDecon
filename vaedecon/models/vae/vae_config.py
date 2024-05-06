@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from typing_extensions import Literal
+from pathlib import Path
 
 from vaedecon.models.base.base_config import BaseModelConfig
 
@@ -19,3 +20,4 @@ class VAEConfig(BaseModelConfig):
 
     # reconstruction_loss: Literal["bce", "mse"] = "mse"
     using_positional_encoding: bool = True
+    input_gene_list: str = None  # file name

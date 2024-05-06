@@ -533,6 +533,7 @@ class BaseTrainer:
             dist.destroy_process_group()
 
         self.callback_handler.on_train_end(self.training_config)
+        return final_dir
 
     def eval_step(self, epoch: int):
         """Perform an evaluation step
