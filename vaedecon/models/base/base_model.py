@@ -14,8 +14,8 @@ import torch
 import torch.nn as nn
 
 from ...customexception import BadInheritanceError
-from pythae.data.datasets import BaseDataset, DatasetOutput
-from pythae.models.auto_model import AutoConfig
+from ...data.datasets import BaseDataset, DatasetOutput
+from ...models.auto_model import AutoConfig
 from ..nn import BaseDecoder, BaseEncoder
 from ..nn.default_architectures import Decoder_AE_MLP
 from .base_config import BaseModelConfig, EnvironmentConfig
@@ -201,14 +201,14 @@ class BaseAE(nn.Module):
         """
 
     def save(self, dir_path: str):
-        """Method to save the model at a specific location. It saves, the model weights as a
+        """Method to save the model at a specific location. It saves the model weights as a
         ``models.pt`` file along with the model config as a ``model_config.json`` file. If the
         model to save used custom encoder (resp. decoder) provided by the user, these are also
         saved as ``decoder.pkl`` (resp. ``decoder.pkl``).
 
         Args:
             dir_path (str): The path where the model should be saved. If the path
-                path does not exist a folder will be created at the provided location.
+                does not exist, a folder will be created at the provided location.
         """
 
         env_spec = EnvironmentConfig(

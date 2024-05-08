@@ -12,6 +12,7 @@ from ...models.base import BaseAE
 from ...models.nn import BaseDecoder, BaseEncoder
 from ...models.nn import Encoder_MLP
 from ...models.base.base_config import BaseModelConfig
+from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor
 # from .vae_config import VAEConfig
 # from pythae.models.vae.vae_model import VAE
 
@@ -101,10 +102,18 @@ class VAE(BaseAE):
             mu_specific_type = mu_specific_type.reshape(mu.shape)
             z_specific_type, _ = self._sample_gauss(mu_specific_type, std)  # same std for all cell types
             recon_x_all_types[:, :, i] = self.decoder(z_specific_type)["reconstruction"].reshape(x.shape)
+        # recon_x_all_types should be recovered to CPM format before doing the matrix multiplication
+        if self.model_config.scaling_by_constant:
+            recon_x_all_types = recon_x_all_types * 20.0
+        recon_x_all_types = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
         if y is not None:
             recon_x_conv = torch.matmul(recon_x_all_types, y.reshape(-1, n_cell_types, 1))
         else:
-            recon_x_conv = torch.matmul(recon_x_all_types, pred_cell_prop)
+            recon_x_conv = torch.matmul(recon_x_all_types, pred_cell_prop.reshape(-1, n_cell_types, 1))
+        # convert recon_x_conv to log2(TPM + 1) format
+        recon_x_conv = non_log2log_cpm_tensor(recon_x_conv, transpose=True)
+        if self.model_config.scaling_by_constant:
+            recon_x_conv = recon_x_conv / 20.0
         recon_x_conv = recon_x_conv.reshape(x.shape)
         loss, recon_loss, kld, cell_prop_loss, recon_loss_conv = self.loss_function(
             recon_x=recon_x, x=x, mu=mu, log_var=log_var, y=y,

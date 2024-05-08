@@ -139,7 +139,7 @@ class Decoder_MLP(BaseDecoder):
                 nn.Linear(self.latent_dim, 512),
                 nn.ReLU(),
                 nn.Linear(512, np.prod(self.input_dim)),
-                nn.Sigmoid(),
+                nn.Sigmoid(),  # to ensure the output is in the range [0, 1]
             )
         )
 

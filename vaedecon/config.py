@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class BaseConfig(BaseModel):
-    """This is the BaseConfig class which defines all the useful loading and saving methods
+    """This is the BaseConfig class that defines all the useful loading and saving methods
     of the configs"""
 
     name: str = field(init=False)
@@ -19,13 +19,13 @@ class BaseConfig(BaseModel):
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> "BaseConfig":
-        """Creates a :class:`~pythae.config.BaseConfig` instance from a dictionnary
+        """Creates a: class:`~pythae.config.BaseConfig` instance from a dictionary
 
         Args:
-            config_dict (dict): The Python dictionnary containing all the parameters
+            config_dict (dict): The Python dictionary containing all the parameters
 
         Returns:
-            :class:`BaseConfig`: The created instance
+            class:`BaseConfig`: The created instance
         """
         try:
             config = cls(**config_dict)
@@ -54,17 +54,17 @@ class BaseConfig(BaseModel):
 
     @classmethod
     def from_json_file(cls, json_path: str) -> "BaseConfig":
-        """Creates a :class:`~pythae.config.BaseConfig` instance from a JSON config file
+        """Creates a: class:`~pythae.config.BaseConfig` instance from a JSON config file
 
         Args:
             json_path (str): The path to the json file containing all the parameters
 
         Returns:
-            :class:`BaseConfig`: The created instance
+            class:`BaseConfig`: The created instance
         """
         config_dict = cls._dict_from_json(json_path)
 
-        config_name = config_dict.pop("name")
+        config_name = config_dict["name"]
 
         if cls.__name__ != config_name:
             warnings.warn(
@@ -76,14 +76,14 @@ class BaseConfig(BaseModel):
         return cls.from_dict(config_dict)
 
     def to_dict(self) -> dict:
-        """Transforms object into a Python dictionary
+        """Transforms an object into a Python dictionary
 
         Returns:
             (dict): The dictionary containing all the parameters"""
         return self.dict()
 
     def to_json_string(self):
-        """Transforms object into a JSON string
+        """Transforms an object into a JSON string
 
         Returns:
             (str): The JSON str containing all the parameters"""

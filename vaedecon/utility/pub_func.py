@@ -7,6 +7,7 @@ from typing import Union
 import numpy as np
 import pandas as pd
 # import anndata as an
+import torch
 import seaborn as sns
 import matplotlib as mpl
 from pathlib import Path
@@ -20,7 +21,6 @@ from sklearn.metrics import mean_squared_error, r2_score
 import gzip
 import shutil
 
-
 default_core_marker_genes = {'Cancer Cells': ['KRT19', 'KRT18', 'KRT8', 'EPCAM'],
                              'CD4 T': ['BATF', 'ICOS', 'CD4', 'IL7R', 'FOXP3', 'TIGIT'],
                              'CD8 T': ['CD8A', 'CD8B'],
@@ -33,7 +33,6 @@ default_core_marker_genes = {'Cancer Cells': ['KRT19', 'KRT18', 'KRT8', 'EPCAM']
                              'Mast Cells': ['CPA3', 'HPGDS', 'GATA2'],
                              'NK': ['GNLY', 'NKG7', 'KLRD1'],
                              'Neutrophils': ['CSF3R', 'CXCR2', 'FPR1', 'SLC25A37']}
-
 
 sorted_cell_types = ['B Cells', 'CD4 T', 'CD8 T', 'Cancer Cells', 'DC', 'Endothelial Cells',
                      'Fibroblasts', 'Macrophages', 'Mast Cells', 'NK', 'Neutrophils']
@@ -491,7 +490,31 @@ def log_exp2cpm(exp_df: Union[pd.DataFrame, np.array], log_base=2, correct=1) ->
     return cpm
 
 
-def non_log2log_cpm(input_file_path: Union[str, pd.DataFrame], result_file_path: str = None,
+def log_exp2cpm_tensor(exp: torch.Tensor, log_base=2, correct=1, transpose: bool = False) -> torch.Tensor:
+    """
+    Convert log2(CPM + 1) to non-log space values (CPM / TPM)
+
+    :param exp: samples by genes
+
+    :param log_base: the base of log transform
+
+    :param correct: plus 1 for avoiding log transform 0
+
+    :return: counts per million (CPM) or transcript per million (TPM)
+    """
+    if transpose:
+        exp = torch.transpose(exp, 1, 2)  # transpose to n_cell_types by n_genes
+    exp = torch.pow(log_base, exp) - correct
+    # batch_size, n_cell_type, n_gene = exp.shape
+    # exp = exp.astype(np.float64)
+    cpm = non_log2cpm_tensor(exp, sum_exp=1e6)
+    # cpm = cpm.astype(np.float32)
+    if transpose:
+        cpm = torch.transpose(cpm, 1, 2)  # transpose back to genes by n_cell_types
+    return cpm
+
+
+def non_log2log_cpm(input_file_path: Union[str, pd.DataFrame, torch.Tensor], result_file_path: str = None,
                     transpose: bool = True, correct: int = 1):
     """
     Convert non-log expression data to log2(CPM + 1) or log2(TPM + 1)
@@ -523,6 +546,35 @@ def non_log2log_cpm(input_file_path: Union[str, pd.DataFrame], result_file_path:
         return bulk_exp.round(3)
 
 
+def non_log2log_cpm_tensor(exp: torch.Tensor, result_file_path: str = None,
+                           transpose: bool = True, correct: int = 1):
+    """
+    Convert non-log expression data to log2(CPM + 1) or log2(TPM + 1)
+
+    :param exp: non-log space expression file, genes by samples
+
+    :param result_file_path: file path, samples by genes
+
+    :param transpose: if input file is samples by genes, set to False, otherwise set to True
+
+    :param correct: plus 1 for avoiding log transform 0
+
+    :return: log2(CPM + 1) or save the result to file, samples by genes if transpose is True, otherwise genes by samples
+    """
+
+    if transpose:
+        exp = torch.transpose(exp, 1, 2)  # transpose to samples by genes
+    exp = non_log2cpm_tensor(exp)  # CPM/TPM
+    exp = torch.log2(exp + correct)
+    # exp = torch.round(exp, decimals=3)
+    if transpose:
+        exp = torch.transpose(exp, 1, 2)  # transpose back to genes by samples
+    if result_file_path is not None:
+        torch.save(exp, result_file_path)
+    else:
+        return exp
+
+
 def non_log2cpm(exp_df, sum_exp=1e6) -> pd.DataFrame:
     """
     Normalize gene expression to CPM / TPM for non-log space
@@ -534,6 +586,20 @@ def non_log2cpm(exp_df, sum_exp=1e6) -> pd.DataFrame:
     :return: counts per million (CPM) or transcript per million (TPM)
     """
     return exp_df / np.vstack(exp_df.sum(axis=1)) * sum_exp
+
+
+def non_log2cpm_tensor(exp: torch.Tensor, sum_exp=1e6) -> torch.Tensor:
+    """
+    Normalize gene expression to CPM / TPM for non-log space
+
+    :param exp: gene expression profile in non-log space, sample by gene
+
+    :param sum_exp: sum of gene expression for each sample, default is 1e6
+
+    :return: counts per million (CPM) or transcript per million (TPM)
+    """
+    batch_size, n_cell_type, n_gene = exp.shape
+    return exp / torch.sum(exp, -1).reshape((batch_size, n_cell_type, 1)) * sum_exp
 
 
 def get_corr(df_col1, df_col2, return_p_value=False) -> Union[float, tuple]:
@@ -735,7 +801,7 @@ def cal_corr_gene_exp_with_cell_frac(gene_exp: pd.DataFrame, cell_frac: pd.DataF
         corr_df[f'n_at_least_one'] = np.sum(corr_df > 0, axis=1)
     if (filtered_by_corr is not None) or (filter_by_num is not None):
         corr_df_filtered = corr_df.loc[corr_df[f'n_at_least_one'] >= 1,
-                                       [i for i in corr_df.columns if i != 'n_at_least_one']].copy()
+        [i for i in corr_df.columns if i != 'n_at_least_one']].copy()
         corr_df_filtered.to_csv(result_file_path, float_format='%g')
         return corr_df_filtered
     else:
@@ -905,7 +971,7 @@ def get_ccc(x, y):
     # Concordance Correlation Coefficient(CCC), https://en.wikipedia.org/wiki/Concordance_correlation_coefficient
     vx, cov_xy, cov_xy, vy = np.cov(x, y, bias=True).flatten()
     mx, my = x.mean(), y.mean()
-    return 2*cov_xy / (vx + vy + (mx-my)**2)
+    return 2 * cov_xy / (vx + vy + (mx - my) ** 2)
 
 
 def get_x_by_pathway_network(x: pd.DataFrame, pathway_network: bool, pathway_mask: pd.DataFrame = None):

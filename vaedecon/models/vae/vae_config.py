@@ -21,3 +21,4 @@ class VAEConfig(BaseModelConfig):
     # reconstruction_loss: Literal["bce", "mse"] = "mse"
     using_positional_encoding: bool = True
     input_gene_list: str = None  # file name
+    scaling_by_constant: bool = True  # whether to scale the input GEP data by a constant factor (20 by default)
