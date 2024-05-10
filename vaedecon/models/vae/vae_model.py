@@ -92,7 +92,7 @@ class VAE(BaseAE):
         std = torch.exp(0.5 * log_var)
         # print('std.shape', std.shape, 'mu.shape', mu.shape)
         z, eps = self._sample_gauss(mu, std)
-        # print('z.shape', z.shape)
+        # reconstructing GEPs for the bulk mode by decoder directly
         recon_x = self.decoder(z)["reconstruction"]  # bulk mode
         recon_x = recon_x.reshape(x.shape)  # (batch_size, n_genes)
         # reconstructing GEPs for all cell types
@@ -202,8 +202,11 @@ class VAE(BaseAE):
             cell_prop_loss = torch.zeros_like(KLD)
         # print('recon_loss_by_decoder.shape', recon_loss_by_decoder.shape, 'KLD.shape', KLD.shape,
         #       'cell_prop_loss.shape', cell_prop_loss.shape)
+        lo = self.model_config.loss_coefficient
 
-        return ((0.2*recon_loss_by_decoder + 0.3*recon_loss_by_conv + 0.2*KLD + 0.3*cell_prop_loss).mean(dim=0),
+        return ((lo['recon_decoder']*recon_loss_by_decoder +
+                 lo['recon_convolution']*recon_loss_by_conv +
+                 lo['kld']*KLD + lo['cell_prop']*cell_prop_loss).mean(dim=0),
                 recon_loss_by_decoder.mean(dim=0), KLD.mean(dim=0), cell_prop_loss.mean(dim=0),
                 recon_loss_by_conv.mean(dim=0))
 

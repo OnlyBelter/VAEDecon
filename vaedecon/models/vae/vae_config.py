@@ -22,3 +22,9 @@ class VAEConfig(BaseModelConfig):
     using_positional_encoding: bool = True
     input_gene_list: str = None  # file name
     scaling_by_constant: bool = True  # whether to scale the input GEP data by a constant factor (20 by default)
+    loss_coefficient: dict = {
+        "recon_decoder": 0.2,  # coefficient for the reconstruction loss of the decoder
+        "recon_convolution": 0.3,  # coefficient for the reconstruction loss by convolution after decoding
+        "kld": 0.2,  # coefficient for the KL divergence loss
+        "cell_prop": 0.3,  # coefficient for the prediction loss of cell type proportions
+    }  # coefficient for each term in the total loss function
