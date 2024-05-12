@@ -141,9 +141,10 @@ class GEPDataset(Dataset):
         self.data = torch.from_numpy(self.data)
         if scaling_by_constant:
             self.data = self.data / 20.0
-        # cell_types = gep_data.obs.columns.to_list()
-        cell_prop = pd.concat(all_cell_prop, axis=0).values
-        self.labels = torch.tensor(cell_prop, dtype=torch.float32)
+        self.cell_prop = pd.concat(all_cell_prop, axis=0)
+        self.cell_types = self.cell_prop.columns.to_list()
+        self.gene_list = self.gep_data.columns.to_list()
+        self.labels = torch.tensor(self.cell_prop.values, dtype=torch.float32)
 
     def __len__(self):
         return self.gep_data.shape[0]
@@ -165,9 +166,24 @@ class GEPDataset(Dataset):
         return DatasetOutput(data=x, labels=y)
 
     def save_gene_list(self, file_path: Path):
-        gene_list = self.gep_data.columns.to_list()
         check_dir(Path(file_path).parent)
         with open(file_path, 'w') as f:
-            for gene in gene_list:
+            for gene in self.gene_list:
                 f.write(f"{gene}\n")
         logger.info(f"Gene list is saved to {file_path}")
+
+    def save_cell_types(self, file_path: Path):
+        check_dir(Path(file_path).parent)
+        with open(file_path, 'w') as f:
+            for cell_type in self.cell_types:
+                f.write(f"{cell_type}\n")
+        logger.info(f"Cell types are saved to {file_path}")
+
+    def get_gene_list(self):
+        return self.gene_list
+
+    def get_cell_types(self):
+        return self.cell_types
+
+    def get_cell_prop(self) -> pd.DataFrame:
+        return self.cell_prop

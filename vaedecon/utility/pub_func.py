@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from scipy.sparse import csr_matrix
 from sklearn.decomposition import PCA
 from anndata import AnnData, read_h5ad
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error, r2_score, root_mean_squared_error
 import gzip
 import shutil
 
@@ -272,7 +272,7 @@ def cal_relative_error(y_true, y_pred, max_error=None, min_error=None):
 def calculate_rmse(y_true: pd.DataFrame, y_pred: pd.DataFrame):
     """
     https://scikit-learn.org/stable/modules/generated/sklearn.metrics.mean_squared_error.html
-    calculate the RMSE of each cell types by columns
+    calculate the RMSE of each cell type by columns
     :param y_true: a dataFrame
         shape: number of samples x number of cell types
     :param y_pred: a dataFrame
@@ -282,7 +282,7 @@ def calculate_rmse(y_true: pd.DataFrame, y_pred: pd.DataFrame):
         multioutput = 'uniform_average'
     else:  # multiple cell types
         multioutput = 'raw_values'
-    return mean_squared_error(y_true=y_true, y_pred=y_pred, multioutput=multioutput, squared=False)
+    return root_mean_squared_error(y_true=y_true, y_pred=y_pred, multioutput=multioutput)
 
 
 def calculate_r2(y_true, y_pred):

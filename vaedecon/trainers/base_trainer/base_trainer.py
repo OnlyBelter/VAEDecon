@@ -593,7 +593,7 @@ class BaseTrainer:
         return epoch_loss
 
     def train_step(self, epoch: int):
-        """The trainer performs training loop over the train_loader.
+        """The trainer performs a training loop over the train_loader.
 
         Parameters:
             epoch (int): The current epoch number

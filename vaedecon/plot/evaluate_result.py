@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import gc
 
+
 # set_fig_style()
 # sns.set(font_scale=1.5)
 # sns.set_style('white')
@@ -24,8 +25,8 @@ class ScatterPlot(object):
     def __init__(self, x: Union[str, pd.DataFrame], y: Union[str, pd.DataFrame],
                  postfix: str = None, group_info: pd.DataFrame = None):
         """
-        :param x:
-        :param y:
+        :param x: could be a file path or a DataFrame
+        :param y: could be a file path or a DataFrame
         :param postfix: only for naming
         """
         self.x = read_xy(x)
@@ -56,9 +57,9 @@ class ScatterPlot(object):
         :param show_rmse:
         :param show_mae: media absolute error
         :param show_diag:
-        :param pred_by: algorithm name, will be showed in ylabel
+        :param pred_by: algorithm name will be shown in y_label
         :param fig_size:
-        :param group_by: one of the column name in self.group_info
+        :param group_by: one of the column names in self.group_info
         :param show_reg_line: fit regression model
         :param s:
         :param legend_loc:
@@ -72,18 +73,18 @@ class ScatterPlot(object):
         all_y = []
         self.show_columns = show_columns
         if type(show_columns) == dict:
-            self.x = self.x[show_columns['x']]
-            self.y = self.y[show_columns['y']]
-            all_x.append(self.x)
-            all_y.append(self.y)
+            current_x = self.x[show_columns['x']]
+            current_y = self.y[show_columns['y']]
+            all_x.append(current_x)
+            all_y.append(current_y)
             if (self.group_info is not None) and (group_by in self.group_info.columns):
                 inx = self.group_info[group_by] == 1
-                plt.scatter(self.x[~inx], self.y[~inx], s=1, label='others')
-                plt.scatter(self.x[inx], self.y[inx], s=5, label=group_by, marker='x')
+                plt.scatter(current_x[~inx], current_y[~inx], s=1, label='others')
+                plt.scatter(current_x[inx], current_y[inx], s=5, label=group_by, marker='x')
             else:
-                plt.scatter(self.x, self.y, s=s, label=show_columns['x'], alpha=.4)  # only 1 vs 1 column
+                plt.scatter(current_x, current_y, s=s, label=show_columns['x'], alpha=.4)  # only 1 vs 1 column
             if show_reg_line:
-                self.fit_reg_model(ax=ax, order=order)
+                self.fit_reg_model(ax=ax, order=order, x=current_x, y=current_y)
         else:
             show_columns = [i for i in show_columns if i in self.y.columns]
             # for cell_prop in show_columns:
@@ -144,28 +145,30 @@ class ScatterPlot(object):
             #                          'x_vs_y_{}.svg'.format(self.postfix)), dpi=300)
         plt.close()
 
-    def fit_reg_model(self, ax, alpha_ci=0.05, order=1):
+    def fit_reg_model(self, ax, x, y, alpha_ci=0.05, order=1):
         """
         only used 1vs1 comparing, show_columns should be a dict
         :param ax
+        :param x: DataFrame, x which is used to fit regression model
+        :param y: DataFrame, y which is used to fit regression model
         :param alpha_ci: 1 - alpha_ci confidence interval
         :param order: 1 for linear regression; 2 for Polynomial Regressions, y = alpha + beta1*x + beta2*x^2
         """
 
-        if type(self.x) == pd.Series:
-            self.x = self.x.to_frame()
-        self.x['intercept'] = 1  # add 1 as intercept column to fit `intercept`
+        if type(x) == pd.Series:
+            x = x.to_frame()
+        x['intercept'] = 1  # add 1 as intercept column to fit `intercept`
         x_col = self.show_columns['x']  # column name, a str
         x_col_square = f'{x_col}^2'
         if order == 2:
-            self.x[x_col_square] = self.x[x_col] ** 2
-            mod = sm.OLS(self.y, self.x.loc[:, ['intercept', x_col, x_col_square]])
+            x[x_col_square] = x[x_col] ** 2
+            mod = sm.OLS(y, x.loc[:, ['intercept', x_col, x_col_square]])
         else:  # order == 1
-            mod = sm.OLS(self.y, self.x.loc[:, ['intercept', x_col]])
+            mod = sm.OLS(y, x.loc[:, ['intercept', x_col]])
         res = mod.fit()
         # print(res.summary())
         ci = res.conf_int(alpha_ci)  # 95%, +/- 2*SD
-        x_lin = np.linspace(self.x[x_col].min(), self.x[x_col].max(), 20)
+        x_lin = np.linspace(x[x_col].min(), x[x_col].max(), 20)
         beta1 = res.params[x_col]
         alpha = res.params['intercept']
         beta2 = 0
@@ -174,15 +177,15 @@ class ScatterPlot(object):
         y_reg_line = x_lin * beta1 + alpha + np.power(x_lin, 2) * beta2
         if order == 2:
             y_lower_bound = x_lin * ci.loc[x_col, 0] + ci.loc['intercept', 0] + \
-                np.power(x_lin, 2) * ci.loc[x_col_square, 0]
+                            np.power(x_lin, 2) * ci.loc[x_col_square, 0]
             y_upper_bound = x_lin * ci.loc[x_col, 1] + ci.loc['intercept', 1] + \
-                np.power(x_lin, 2) * ci.loc[x_col_square, 1]
+                            np.power(x_lin, 2) * ci.loc[x_col_square, 1]
         else:
             y_lower_bound = x_lin * ci.loc[x_col, 0] + ci.loc['intercept', 0]
             y_upper_bound = x_lin * ci.loc[x_col, 1] + ci.loc['intercept', 1]
-        xy = self.x.copy()
-        xy['y_pred'] = self.x[x_col]
-        xy['y_true'] = self.y
+        xy = x.copy()
+        xy['y_pred'] = x[x_col]
+        xy['y_true'] = y
         sns.regplot(x='y_pred', y='y_true', data=xy, ax=ax, order=order,
                     x_estimator=np.mean,
                     scatter_kws={"s": 5}, color='tab:grey', x_bins=50,
@@ -258,8 +261,8 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
     show_columns_str = ', '.join(show_columns)
     assert np.all([i in y_true.columns for i in show_columns]) and \
            np.all([i in y_pred.columns for i in show_columns]), \
-           f'All of elements in show_columns ({show_columns_str}) should exist in ' \
-           f'the columns of both y_true ({y_true.columns}) and y_pred ({y_pred.columns})'
+        f'All of elements in show_columns ({show_columns_str}) should exist in ' \
+        f'the columns of both y_true ({y_true.columns}) and y_pred ({y_pred.columns})'
     common_inx = [i for i in y_true.index if i in y_pred.index]
 
     y_true = y_true.loc[common_inx, show_columns]
@@ -347,7 +350,7 @@ def compare_exp_and_cell_fraction(merged_file_path, result_dir,
             print(f'   Deal with cancer type: {cancer_type}...')
             current_df = merged_df.loc[merged_df['cancer_type'] == cancer_type, :]
             # print(current_df)
-            # plot predicted cell fraction against corresponding mean expression value of marker genes
+            # plot predicted cell fractions against corresponding mean expression value of marker genes
             current_result_dir = os.path.join(result_dir, cancer_type)
             # current_result_dir_scaled = os.path.join(result_dir_scaled, cancer_type)
             if cancer_type not in cancer_type2corr:
@@ -413,7 +416,7 @@ def compare_cell_fraction_across_cancer_type(merged_cell_fraction: pd.DataFrame,
 
     :param cell_type: current cell type to plot
 
-    :param result_dir: where to save result
+    :param result_dir: where to save the result
 
     :param xlabel: x label
 
@@ -726,7 +729,8 @@ def plot_pred_cell_prop_with_cpe(cpe_file_path, pred_cell_prop_file_path, result
             current_cancer_type = all_cancer_types[i + j * 6]
             current_data = pred_cell_prop.loc[pred_cell_prop['cancer_type'] == current_cancer_type, :]
             corr, rmse, ccc = compare_y_y_pred_plot_cpe(y_pred=current_data['Cancer Cells'], y_true=current_data['CPE'],
-                                                        show_metrics=True, ax=axes[i, j], cancer_type=current_cancer_type,
+                                                        show_metrics=True, ax=axes[i, j],
+                                                        cancer_type=current_cancer_type,
                                                         inx=(i, j))
             metrics_value[current_cancer_type] = {'corr': corr, 'rmse': rmse, 'ccc': ccc}
 

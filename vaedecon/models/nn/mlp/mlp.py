@@ -35,7 +35,14 @@ class Encoder_MLP(BaseEncoder):
         layers = nn.ModuleList()
         layers.append(
             nn.Sequential(
-                nn.Linear(np.prod(args.input_dim), 512),
+                nn.Linear(np.prod(args.input_dim), 1024),
+                nn.LayerNorm(1024),
+                nn.ReLU(),
+                nn.Linear(1024, 512),
+                nn.LayerNorm(512),
+                nn.ReLU(),
+                nn.Linear(512, 512),
+                nn.LayerNorm(512),
                 nn.ReLU())
         )
 
@@ -137,8 +144,15 @@ class Decoder_MLP(BaseDecoder):
         layers.append(
             nn.Sequential(
                 nn.Linear(self.latent_dim, 512),
+                nn.LayerNorm(512),
                 nn.ReLU(),
-                nn.Linear(512, np.prod(self.input_dim)),
+                nn.Linear(512, 512),
+                nn.LayerNorm(512),
+                nn.ReLU(),
+                nn.Linear(512, 1024),
+                nn.LayerNorm(1024),
+                nn.ReLU(),
+                nn.Linear(1024, np.prod(self.input_dim)),
                 nn.Sigmoid(),  # to ensure the output is in the range [0, 1]
             )
         )
