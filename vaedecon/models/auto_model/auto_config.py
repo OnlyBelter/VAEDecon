@@ -3,7 +3,7 @@ from pydantic.dataclasses import dataclass
 from vaedecon.config import BaseConfig
 
 
-@dataclass
+# @dataclass
 class AutoConfig(BaseConfig):
     @classmethod
     def from_json_file(cls, json_path):
