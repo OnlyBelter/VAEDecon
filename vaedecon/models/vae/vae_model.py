@@ -193,7 +193,7 @@ class VAE(BaseAE):
 
         # cell proportion loss
         if y is not None:
-            cell_prop_loss = F.cross_entropy(
+            cell_prop_loss = F.mse_loss(
                 pred_cell_prop.reshape(y.shape[0], -1),  # batch_size x features (cell proportions)
                 y.reshape(y.shape[0], -1),
                 reduction="none"

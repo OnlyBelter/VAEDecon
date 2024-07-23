@@ -19,7 +19,7 @@ class Encoder_MLP(BaseEncoder):
 
     """
 
-    def __init__(self, args: BaseModelConfig, position_encoding: PositionalEncoding):
+    def __init__(self, args: BaseModelConfig, position_encoding: PositionalEncoding = None):
         BaseEncoder.__init__(self)
 
         self.input_dim = args.input_dim

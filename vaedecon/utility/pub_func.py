@@ -57,6 +57,10 @@ def set_fig_style(font_family=None, font_size=None):
     fig, ax = plt.subplots()
     sns.set_style("white")
     try:
+        import scienceplots
+    except:
+        pass
+    try:
         plt.style.use(['science', 'no-latex'])
     except:
         print('No science style')
