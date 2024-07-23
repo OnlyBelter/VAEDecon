@@ -2,6 +2,9 @@ import contextlib
 import datetime
 import logging
 import os
+
+import matplotlib.pyplot as plt
+import pandas as pd
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Union
 
@@ -440,9 +443,10 @@ class BaseTrainer:
         if self.is_main_process:
             logger.info("Successfully launched training !\n")
 
-        # set best losses for early stopping
+        # set the best losses for early stopping
         best_train_loss = 1e10
         best_eval_loss = 1e10
+        losses_all_epochs = {}
 
         for epoch in range(1, self.training_config.num_epochs + 1):
             self.callback_handler.on_epoch_begin(
@@ -456,11 +460,14 @@ class BaseTrainer:
 
             epoch_train_loss = self.train_step(epoch)
             metrics["train_epoch_loss"] = epoch_train_loss
+            losses_all_epochs[epoch] = {}
+            losses_all_epochs[epoch]['train_epoch_loss'] = epoch_train_loss
 
             if self.eval_dataset is not None:
                 epoch_eval_loss = self.eval_step(epoch)
                 metrics["eval_epoch_loss"] = epoch_eval_loss
                 self._schedulers_step(epoch_eval_loss)
+                losses_all_epochs[epoch]['eval_epoch_loss'] = epoch_eval_loss
 
             else:
                 epoch_eval_loss = best_eval_loss
@@ -528,6 +535,11 @@ class BaseTrainer:
 
             logger.info("Training ended!")
             logger.info(f"Saved final model in {final_dir}")
+
+            losses_df = pd.DataFrame.from_dict(losses_all_epochs, orient='index')
+            losses_df.to_csv(os.path.join(final_dir, 'losses.csv'))
+            plot_loss(losses_df=losses_df, result_dir=final_dir,
+                      train_loss_col_name='train_epoch_loss', val_loss_col_name='eval_epoch_loss')
 
         if self.distributed:
             dist.destroy_process_group()
@@ -730,3 +742,12 @@ class BaseTrainer:
             reconstructions,
             normal_generation,
         )
+
+
+def plot_loss(losses_df, result_dir, train_loss_col_name, val_loss_col_name):
+    fig, ax = plt.subplots(figsize=(6, 2.5))
+    ax.plot(losses_df[train_loss_col_name], label='train_loss')
+    ax.plot(losses_df[val_loss_col_name], label='eval_loss')
+    ax.legend(loc='best')
+    plt.savefig(os.path.join(result_dir, 'losses.png'), dpi=200)
+    plt.close()
