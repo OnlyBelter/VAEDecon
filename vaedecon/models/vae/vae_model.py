@@ -1,3 +1,8 @@
+"""
+Variational Autoencoder (VAE) implementation for cellular component deconvolution.
+OnlyBelter (https://github.com/OnlyBelter, onlybelter@gmail.com)
+"""
+
 import os
 from typing import Optional
 
@@ -84,6 +89,7 @@ class VAE(BaseAE):
         encoder_output = self.encoder(x=x, y=y)
 
         mu, log_var, pred_cell_prop = encoder_output.embedding, encoder_output.log_var, encoder_output.cell_prop
+        # log_var, pred_cell_prop = encoder_output.log_var, encoder_output.cell_prop
         mu_deconv = encoder_output.embedding_all_types  # (batch_size, latent_dim, n_cell_types)
         # cell_type_existed = encoder_output.cell_type_existed  # (batch_size, n_cell_types, 1)
         n_cell_types = mu_deconv.shape[2]
@@ -91,15 +97,15 @@ class VAE(BaseAE):
 
         std = torch.exp(0.5 * log_var)
         # print('std.shape', std.shape, 'mu.shape', mu.shape)
-        z, eps = self._sample_gauss(mu, std)
+        # z, eps = self._sample_gauss(mu, std)
         # reconstructing GEPs for the bulk mode by decoder directly
-        recon_x = self.decoder(z)["reconstruction"]  # bulk mode
-        recon_x = recon_x.reshape(x.shape)  # (batch_size, n_genes)
+        # recon_x = self.decoder(z)["reconstruction"]  # bulk mode
+        # recon_x = recon_x.reshape(x.shape)  # (batch_size, n_genes)
         # reconstructing GEPs for all cell types
         recon_x_all_types = torch.zeros([x.shape[0], x.shape[1], n_cell_types], dtype=torch.float32, device=x.device)
         for i in range(n_cell_types):
             mu_specific_type = mu_deconv[:, :, i]
-            mu_specific_type = mu_specific_type.reshape(mu.shape)
+            mu_specific_type = mu_specific_type.reshape(mu.shape)  # only for reshaping
             z_specific_type, _ = self._sample_gauss(mu_specific_type, std)  # same std for all cell types
             recon_x_all_types[:, :, i] = self.decoder(z_specific_type)["reconstruction"].reshape(x.shape)
         # recon_x_all_types should be recovered to CPM format before doing the matrix multiplication
@@ -115,18 +121,20 @@ class VAE(BaseAE):
         if self.model_config.scaling_by_constant:
             recon_x_conv = recon_x_conv / 20.0
         recon_x_conv = recon_x_conv.reshape(x.shape)
-        loss, recon_loss, kld, cell_prop_loss, recon_loss_conv = self.loss_function(
-            recon_x=recon_x, x=x, mu=mu, log_var=log_var, y=y,
+        loss, kld, cell_prop_loss, recon_loss_conv = self.loss_function(
+            # recon_x=recon_x, x=x, mu=mu, log_var=log_var, y=y,
+            x=x, log_var=log_var, y=y, mu=mu,
             pred_cell_prop=pred_cell_prop, recon_x_conv=recon_x_conv
         )
 
         output = ModelOutput(
-            recon_loss=recon_loss,
+            # recon_loss=recon_loss,
             reg_loss=kld,
             loss=loss,
-            recon_x=recon_x,
-            z=z,
+            # recon_x=recon_x,
+            # z=z,
             mu=mu,
+            mu_deconv=mu_deconv,
             log_var=log_var,
             cell_prop_loss=cell_prop_loss,
             kld=kld,
@@ -138,13 +146,12 @@ class VAE(BaseAE):
 
         return output
 
-    def loss_function(self, recon_x, x, mu, log_var, y: torch.Tensor | None = None,
+    def loss_function(self, x, mu, log_var, y: torch.Tensor | None = None,
                       pred_cell_prop: torch.Tensor = None, recon_x_conv: torch.Tensor = None):
         """
         The loss function of the VAE model
 
         - params:
-        recon_x: reconstructed data from the decoder using a bulk embedding (multiply in the latent space)
         x: input data
         mu: mean of the latent space
         log_var: log variance of the latent space
@@ -158,12 +165,6 @@ class VAE(BaseAE):
         # recon_x_by_decoder = recon_x
         # recon_x_by_conv = recon_x_conv
         if self.model_config.reconstruction_loss == "mse":
-            recon_loss_by_decoder = F.mse_loss(
-                recon_x.reshape(x.shape[0], -1),  # batch_size x features (gene expression values)
-                x.reshape(x.shape[0], -1),
-                reduction="none",
-            ).sum(dim=-1)
-
             recon_loss_by_conv = F.mse_loss(
                 recon_x_conv.reshape(x.shape[0], -1),  # batch_size x features (gene expression values)
                 x.reshape(x.shape[0], -1),
@@ -171,12 +172,6 @@ class VAE(BaseAE):
             ).sum(dim=-1)
 
         elif self.model_config.reconstruction_loss == "bce":
-            recon_loss_by_decoder = F.binary_cross_entropy(
-                recon_x.reshape(x.shape[0], -1),
-                x.reshape(x.shape[0], -1),
-                reduction="none",
-            ).sum(dim=-1)
-
             recon_loss_by_conv = F.binary_cross_entropy(
                 recon_x_conv.reshape(x.shape[0], -1),
                 x.reshape(x.shape[0], -1),
@@ -188,6 +183,8 @@ class VAE(BaseAE):
                 f"Reconstruction loss {self.model_config.reconstruction_loss} not implemented"
             )
         log_var = log_var.reshape(-1, self.model_config.latent_dim)  # batch_size x latent_dim
+        # Since we decomposed bulk GEP into cell type-specific GEPs,
+        # we need to sum over the embeddings of all cell types
         mu = mu.reshape(-1, self.model_config.latent_dim)
         KLD = - torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
 
@@ -204,10 +201,9 @@ class VAE(BaseAE):
         #       'cell_prop_loss.shape', cell_prop_loss.shape)
         lo = self.model_config.loss_coefficient
 
-        return ((lo['recon_decoder']*recon_loss_by_decoder +
-                 lo['recon_convolution']*recon_loss_by_conv +
+        return ((lo['recon_convolution']*recon_loss_by_conv +
                  lo['kld']*KLD + lo['cell_prop']*cell_prop_loss).mean(dim=0),
-                recon_loss_by_decoder.mean(dim=0), KLD.mean(dim=0), cell_prop_loss.mean(dim=0),
+                KLD.mean(dim=0), cell_prop_loss.mean(dim=0),
                 recon_loss_by_conv.mean(dim=0))
 
     def _sample_gauss(self, mu, std):

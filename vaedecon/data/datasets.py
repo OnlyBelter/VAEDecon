@@ -187,3 +187,6 @@ class GEPDataset(Dataset):
 
     def get_cell_prop(self) -> pd.DataFrame:
         return self.cell_prop
+
+    def get_sample_ids(self):
+        return self.gep_data.index.to_list()

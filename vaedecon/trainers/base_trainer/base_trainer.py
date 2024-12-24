@@ -258,7 +258,7 @@ class BaseTrainer:
 
         self.scheduler = scheduler
 
-    def _set_output_dir(self):
+    def set_output_dir(self):
         # Create folder
         if not os.path.exists(self.training_config.output_dir) and self.is_main_process:
             os.makedirs(self.training_config.output_dir, exist_ok=True)
@@ -275,7 +275,7 @@ class BaseTrainer:
             f"{self.model_name}_training_{self._training_signature}",
         )
 
-        self.training_dir = training_dir
+        # self.training_dir = training_dir
 
         if not os.path.exists(training_dir) and self.is_main_process:
             os.makedirs(training_dir, exist_ok=True)
@@ -283,6 +283,7 @@ class BaseTrainer:
                 f"Created {training_dir}. \n"
                 "Training config, checkpoints and final model will be saved here.\n"
             )
+        return training_dir
 
     def _get_file_logger(self, log_output_dir):
         log_dir = log_output_dir
@@ -399,15 +400,16 @@ class BaseTrainer:
         self.set_scheduler()
 
         # create folder for saving
-        self._set_output_dir()
+        # self._set_output_dir()
 
         # set callbacks
         self._setup_callbacks()
 
-    def train(self, log_output_dir: str = None):
+    def train(self, final_dir: str, log_output_dir: str = None):
         """This function is the main training function
 
         Args:
+            final_dir (string): Directory where the model will be saved.
             log_output_dir (str): The path in which the log will be stored
         """
 
@@ -528,7 +530,7 @@ class BaseTrainer:
                 rank=self.rank,
             )
 
-        final_dir = os.path.join(self.training_dir, "final_model")
+        # final_dir = os.path.join(self.training_dir, "final_model")
 
         if self.is_main_process:
             self.save_model(best_model, dir_path=final_dir)

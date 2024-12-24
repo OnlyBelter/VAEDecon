@@ -46,7 +46,7 @@ class ScatterPlot(object):
              x_label: str = None, y_label: str = None, show_corr: bool = True, show_rmse: bool = False,
              show_diag: bool = True, show_mae: bool = False, pred_by: str = None,
              fig_size=(8, 8), group_by: str = None, show_reg_line: bool = False, s=6, order=1,
-             legend_loc: str = 'best'):
+             legend_loc: str = 'best', rasterized=False):
         """
         :param show_columns: a list of column names in both x and y, could be multiple common columns
             or a dict {'x': '', 'y': ''}, only one column allowed
@@ -63,6 +63,7 @@ class ScatterPlot(object):
         :param show_reg_line: fit regression model
         :param s:
         :param legend_loc:
+        :param rasterized: whether to rasterize the plot
         :param order: 1 for linear regression; 2 for Polynomial Regressions, y = alpha + beta1*x + beta2*x^2
         """
         plt.figure(figsize=fig_size)
@@ -79,8 +80,8 @@ class ScatterPlot(object):
             all_y.append(current_y)
             if (self.group_info is not None) and (group_by in self.group_info.columns):
                 inx = self.group_info[group_by] == 1
-                plt.scatter(current_x[~inx], current_y[~inx], s=1, label='others')
-                plt.scatter(current_x[inx], current_y[inx], s=5, label=group_by, marker='x')
+                plt.scatter(current_x[~inx], current_y[~inx], s=1, label='others', rasterized=rasterized)
+                plt.scatter(current_x[inx], current_y[inx], s=5, label=group_by, marker='x', rasterized=rasterized)
             else:
                 plt.scatter(current_x, current_y, s=s, label=show_columns['x'], alpha=.4)  # only 1 vs 1 column
             if show_reg_line:
@@ -104,7 +105,7 @@ class ScatterPlot(object):
                 _y = self.y.loc[:, col]
                 all_x.append(_x)
                 all_y.append(_y)
-                plt.scatter(_x, _y, label=col, s=6, alpha=1 - 0.05 * i)
+                plt.scatter(_x, _y, label=col, s=6, alpha=1 - 0.05 * i, rasterized=rasterized)
         x_left, x_right = plt.xlim()
         y_bottom, y_top = plt.ylim()
         all_x = np.concatenate(all_x)
@@ -140,7 +141,7 @@ class ScatterPlot(object):
         plt.tight_layout()
         if result_file_dir:
             plt.savefig(os.path.join(result_file_dir,
-                                     'x_vs_y_{}.png'.format(self.postfix)), dpi=300)
+                                     'x_vs_y_{}.svg'.format(self.postfix)), dpi=300)
             # plt.savefig(os.path.join(result_file_dir,
             #                          'x_vs_y_{}.svg'.format(self.postfix)), dpi=300)
         plt.close()
@@ -214,7 +215,7 @@ class ScatterPlot(object):
 def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, pd.DataFrame],
                           show_columns: list = None, result_file_dir=None, annotation: dict = None,
                           y_label=None, x_label=None, model_name='average',
-                          show_metrics: bool = False, figsize: tuple = (8, 8)):
+                          show_metrics: bool = False, figsize: tuple = (8, 8), rasterized=False):
     """
     Plot y against y_pred to visualize the performance of prediction result
 
@@ -237,6 +238,8 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
     :param show_metrics: show correlation and RMSE
 
     :param figsize: figure size
+
+    :param rasterized: whether to rasterize the figure
 
     :return: None
     """
@@ -276,7 +279,7 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
         _y = y_pred.loc[:, col]
         all_x.append(_x)
         all_y.append(_y)
-        plt.scatter(_x, _y, label=col, s=6, alpha=1 - 0.05 * i)
+        plt.scatter(_x, _y, label=col, s=6, alpha=1 - 0.05 * i, rasterized=rasterized)
         if annotation:
             x_left, x_right = plt.xlim()
             y_bottom, y_top = plt.ylim()
@@ -305,8 +308,88 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
     plt.legend()
     plt.tight_layout()
     if result_file_dir:
-        plt.savefig(os.path.join(result_file_dir, 'y_true_vs_y_pred_{}.png'.format(model_name)), dpi=200)
+        plt.savefig(os.path.join(result_file_dir, 'y_true_vs_y_pred_{}.svg'.format(model_name)), dpi=300)
     plt.close()
+
+
+def compare_y_y_pred_subplot(y_true, y_pred,
+                             show_columns: list = None, result_file_dir=None, annotation: dict = None,
+                             y_label=None, x_label=None, dataset_name='average',
+                             show_metrics: bool = False, figsize: tuple = (8, 8), ax=None, show_legend=False):
+    """
+    Plot y against y_pred to visualize the performance of prediction result
+
+    :param y_true: this file contains the ground truth of cell fractions when it was simulated
+
+    :param y_pred: this file contains the predicted value of y
+
+    :param show_columns: this list contains the name of columns that want to plot in figure
+
+    :param result_file_dir: where to save results
+
+    :param annotation: annotations that need to show in figure, {anno_name: {col1: value1, col2: value2, ...}, ...}
+
+    :param y_label: y label
+
+    :param x_label: x label
+
+    :param model_name: only for naming files
+
+    :param show_metrics: show correlation and RMSE
+
+    :param figsize: figure size
+
+    :return: None
+    """
+    y_true = read_xy(a=y_true, xy='cell_frac')
+    y_pred = read_xy(a=y_pred, xy='cell_frac')
+
+    # sns.set(font_scale=font_scale)
+    if ax is None:
+        plt.figure(figsize=figsize)
+    else:
+        # Use the pyplot interface to change just one subplot...
+        plt.sca(ax)
+    all_x = []
+    all_y = []
+    for i, col in enumerate(show_columns):
+        _y = y_true.loc[:, col]
+        _x = y_pred.loc[:, col]
+        all_x.append(_x)
+        all_y.append(_y)
+        plt.scatter(_x, _y, label=col, s=1, alpha=0.65, rasterized=True)
+    # plt.xlim([-0.05, 1.05])
+    # plt.ylim([-0.05, 1.05])
+    # plt.xticks([0, 1])
+    # plt.yticks([0, 0.5, 1])
+    x_left, x_right = plt.xlim()
+    y_bottom, y_top = plt.ylim()
+    x_max = x_right
+    y_max = y_top
+    plt.plot([0, max(x_max, y_max)], [0, max(x_max, y_max)], linestyle='--', color='tab:gray')
+    if show_metrics:  # show metrics in test set
+        all_x = np.concatenate(all_x)
+        all_y = np.concatenate(all_y)
+        corr, p_value = get_corr(all_x, all_y, return_p_value=True)
+        rmse = calculate_rmse(y_true=pd.DataFrame(all_x), y_pred=pd.DataFrame(all_y))
+        plt.text(0.32 * x_max, 0.15 * y_max, '$r={:.2f}$'.format(corr), fontsize=5)
+        if p_value < 0.001:
+            plt.text(0.65 * x_max, 0.15 * y_max, '(p<0.001)'.format(p_value), fontsize=5)
+        else:
+            plt.text(0.65 * x_max, 0.15 * y_max, '(p={:.3f})'.format(p_value), fontsize=5)
+        plt.text(0.32 * x_max, 0.05 * y_max, '$RMSE={:.3f}$'.format(rmse), fontsize=5)
+    if x_label is not None:
+        plt.xlabel(x_label)
+    else:
+        plt.xlabel('')
+    plt.ylabel('')
+    if show_legend:
+        plt.legend(loc='upper left', fontsize=5, ncol=1)
+    # plt.tight_layout()
+    if result_file_dir:
+        plt.savefig(os.path.join(result_file_dir, 'y_true_vs_y_pred_{}.svg'.format(dataset_name)), dpi=300)
+    else:
+        return ax
 
 
 def compare_exp_and_cell_fraction(merged_file_path, result_dir,

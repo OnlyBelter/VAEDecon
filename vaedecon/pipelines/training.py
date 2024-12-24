@@ -1,3 +1,4 @@
+import os
 import logging
 from typing import List, Optional, Union
 
@@ -42,7 +43,8 @@ class TrainingPipeline(Pipeline):
             parameters. If None, a default configuration is used.
     """
 
-    def __init__(self, model: Optional[BaseAE], training_config: Optional[BaseTrainerConfig] = None):
+    def __init__(self, model: Optional[BaseAE], training_config: Optional[BaseTrainerConfig] = None,
+                 output_dir: str = None):
         super().__init__()
         if training_config is None:
             training_config = BaseTrainerConfig()
@@ -169,4 +171,7 @@ class TrainingPipeline(Pipeline):
             raise ValueError("The provided training config is not supported.")
 
         self.trainer = trainer
-        self.final_output_dir = trainer.train()
+        output_dir = self.trainer.set_output_dir()
+        self.final_output_dir = os.path.join(output_dir, "final_model")
+        trainer.train(final_dir=self.final_output_dir)
+        # self.final_output_dir = trainer.train()

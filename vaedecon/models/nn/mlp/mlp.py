@@ -109,11 +109,14 @@ class Encoder_MLP(BaseEncoder):
                 # print(embedding_all_types.shape, output["cell_prop"].shape)
                 if y is not None:
                     y = y.reshape((-1, self.n_cell_types, 1))
-                    embedding = torch.matmul(embedding_all_types, y)  # bulk mode embedding
+                    # embedding = torch.matmul(embedding_all_types, y)  # bulk mode embedding
                     cell_type_existed = (y > 0.01).type(torch.int8).type(torch.float32)
                 else:
-                    embedding = torch.matmul(embedding_all_types, output["cell_prop"])
+                    # embedding = torch.matmul(embedding_all_types, output["cell_prop"])
                     cell_type_existed = (output["cell_prop"] > 0.01).type(torch.int8).type(torch.float32)
+                # assume y is unknown, using the average embedding of all cell types as the output miu of encoder
+                # and calculate the KL divergence loss based on this miu
+                embedding = torch.mean(embedding_all_types, dim=2, keepdim=True)  # (batch_size, latent_dim, 1)
 
                 # (latent_dim, n_cell_types) x (batch_size, n_cell_types, 1) -> (batch_size, latent_dim, 1)
                 if self.position_encoding is not None:
