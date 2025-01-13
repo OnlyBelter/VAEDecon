@@ -9,7 +9,7 @@ from ..customexception import DatasetError
 from ..data.datasets import collate_dataset_output
 from ..data.preprocessors import BaseDataset, DataProcessor
 from ..models import BaseAE
-from ..trainers import BaseTrainer, BaseTrainerConfig
+from ..trainers import BaseTrainer, BaseTrainerConfig, BaseTrainer2
 from pythae.trainers.training_callbacks import TrainingCallback
 from .base_pipeline import Pipeline
 
@@ -160,12 +160,19 @@ class TrainingPipeline(Pipeline):
 
         if isinstance(self.training_config, BaseTrainerConfig):
             logger.info("Using Base Trainer\n")
-            trainer = BaseTrainer(
+            # trainer = BaseTrainer(
+            #     model=self.model,
+            #     train_dataset=train_dataloader or train_dataset,
+            #     eval_dataset=eval_dataloader or eval_dataset,
+            #     training_config=self.training_config,
+            #     callbacks=callbacks,
+            # )
+            trainer = BaseTrainer2(
                 model=self.model,
                 train_dataset=train_dataloader or train_dataset,
                 eval_dataset=eval_dataloader or eval_dataset,
                 training_config=self.training_config,
-                callbacks=callbacks,
+                # callbacks=callbacks,
             )
         else:
             raise ValueError("The provided training config is not supported.")

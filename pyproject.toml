@@ -57,6 +57,9 @@ dependencies = [
     "pydantic",
     "cloudpickle",
     "pythae",
+    "torchmetrics",
+    "lightning==2.5.0",
+
 #    'tensorrt',
 #    "sphinx_rtd_theme"
 ]

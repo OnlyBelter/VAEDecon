@@ -2,9 +2,10 @@
 modified from the pythae library.
 """
 
-from .base_trainer import BaseTrainer, BaseTrainerConfig
+from .base_trainer import BaseTrainer, BaseTrainerConfig, BaseTrainer2
 
 __all__ = [
     "BaseTrainer",
     "BaseTrainerConfig",
+    "BaseTrainer2",
 ]

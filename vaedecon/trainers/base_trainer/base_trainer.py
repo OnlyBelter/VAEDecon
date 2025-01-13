@@ -16,6 +16,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
+import lightning as L
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch.loggers import CSVLogger
+
 from ...customexception import ModelError
 from ...data.datasets import BaseDataset, collate_dataset_output
 from ...models import BaseAE
@@ -744,6 +748,296 @@ class BaseTrainer:
             reconstructions,
             normal_generation,
         )
+
+
+class PLTrainer(L.LightningModule):
+    """PyTorch Lightning-based trainer for BaseAE models."""
+
+    def __init__(
+        self,
+        model: BaseAE,
+        training_config: BaseTrainerConfig,
+    ):
+        """Initializes the PLTrainer.
+
+        Args:
+            model: The BaseAE model to train.
+            training_config: The training configuration.
+        """
+        super().__init__()
+        self.model = model
+        self.training_config = training_config
+        self.model_name = model.model_name
+        # self.save_hyperparameters(training_config)  # TODO
+
+    def forward(self, inputs: Dict[str, Any], **kwargs) -> Any:
+        """Forward pass of the model."""
+        return self.model(inputs, **kwargs)
+
+    def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+        """Performs a single training step."""
+        output = self(batch)
+        loss = output.loss
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        return loss
+
+    def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+        """Performs a single validation step."""
+        output = self(batch)
+        loss = output.loss
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        return loss
+
+    def configure_optimizers(self) -> Dict[str, Any]:
+        """Configures the optimizer and learning rate scheduler."""
+        optimizer_cls = getattr(optim, self.training_config.optimizer_cls)
+
+        if self.training_config.optimizer_params is not None:
+            optimizer = optimizer_cls(
+                self.model.parameters(),
+                lr=self.training_config.learning_rate,
+                **self.training_config.optimizer_params,
+            )
+        else:
+            optimizer = optimizer_cls(
+                self.model.parameters(), lr=self.training_config.learning_rate
+            )
+
+        if self.training_config.scheduler_cls is not None:
+            scheduler_cls = getattr(lr_scheduler, self.training_config.scheduler_cls)
+
+            if self.training_config.scheduler_params is not None:
+                scheduler = scheduler_cls(
+                    optimizer, **self.training_config.scheduler_params
+                )
+            else:
+                scheduler = scheduler_cls(optimizer)
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {"scheduler": scheduler, "monitor": "val_loss"},
+            }
+        else:
+            return {"optimizer": optimizer}
+
+    def predict(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        """Generates predictions from the model."""
+        self.model.eval()
+        with torch.no_grad():
+            model_out = self(inputs)
+            reconstructions = model_out.recon_x.cpu().detach()[
+                : min(inputs["data"].shape[0], 10)
+            ]
+            z_enc = model_out.z[: min(inputs["data"].shape[0], 10)]
+            z = torch.randn_like(z_enc)
+            normal_generation = self.model.decoder(z).reconstruction.detach().cpu()
+        return {
+            "true_data": inputs["data"][: min(inputs["data"].shape[0], 10)],
+            "reconstructions": reconstructions,
+            "generations": normal_generation,
+        }
+
+
+class BaseTrainer2:
+    """Trainer class that uses PyTorch Lightning."""
+
+    def __init__(
+        self,
+        model: BaseAE,
+        train_dataset: Union[BaseDataset, DataLoader],
+        eval_dataset: Optional[Union[BaseDataset, DataLoader]] = None,
+        training_config: Optional[BaseTrainerConfig] = None,
+    ):
+        """Initializes the Trainer.
+
+        Args:
+            model: The BaseAE model to train.
+            train_dataset: The training dataset.
+            eval_dataset: The evaluation dataset.
+            training_config: The training configuration.
+        """
+        if training_config is None:
+            training_config = BaseTrainerConfig()
+
+        if training_config.output_dir is None:
+            output_dir = "dummy_output_dir"
+            training_config.output_dir = output_dir
+
+        self.training_config = training_config
+        self.model_name = model.model_name
+        self.rank = self.training_config.rank
+
+        if isinstance(train_dataset, DataLoader):
+            train_loader = train_dataset
+            logger.warning(
+                "Using the provided train dataloader! Carefull this may overwrite some "
+                "parameters provided in your training config."
+            )
+        else:
+            train_loader = self.get_dataloader(
+                train_dataset,
+                batch_size=training_config.per_device_train_batch_size,
+                num_workers=training_config.train_dataloader_num_workers,
+                shuffle=True,
+            )
+
+        if eval_dataset is not None:
+            if isinstance(eval_dataset, DataLoader):
+                eval_loader = eval_dataset
+                logger.warning(
+                    "Using the provided eval dataloader! Carefull this may overwrite some "
+                    "parameters provided in your training config."
+                )
+            else:
+                eval_loader = self.get_dataloader(
+                    eval_dataset,
+                    batch_size=training_config.per_device_eval_batch_size,
+                    num_workers=training_config.eval_dataloader_num_workers,
+                    shuffle=False,
+                )
+        else:
+            logger.info(
+                "! No eval dataset provided ! -> keeping best model on train.\n"
+            )
+            self.training_config.keep_best_on_train = True
+            eval_loader = None
+
+        self.train_loader = train_loader
+        self.eval_loader = eval_loader
+
+        self.pl_model = PLTrainer(model, training_config)
+
+        self.training_dir = self._set_output_dir()
+
+    def get_dataloader(
+        self,
+        dataset: BaseDataset,
+        batch_size: int,
+        num_workers: int,
+        shuffle: bool,
+    ) -> DataLoader:
+        """Creates a DataLoader for the given dataset."""
+        return DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            shuffle=shuffle,
+            collate_fn=collate_dataset_output,
+        )
+
+    def _set_output_dir(self) -> str:
+        """Sets the output directory for saving checkpoints and logs."""
+        if not os.path.exists(self.training_config.output_dir):
+            os.makedirs(self.training_config.output_dir, exist_ok=True)
+            logger.info(
+                f"Created {self.training_config.output_dir} folder since did not exist.\n"
+            )
+
+        training_signature = (
+            str(datetime.datetime.now())[0:19].replace(" ", "_").replace(":", "-")
+        )
+
+        training_dir = os.path.join(
+            self.training_config.output_dir,
+            f"{self.model_name}_training_{training_signature}",
+        )
+
+        if not os.path.exists(training_dir):
+            os.makedirs(training_dir, exist_ok=True)
+            logger.info(
+                f"Created {training_dir}. \n"
+                "Training config, checkpoints and final model will be saved here.\n"
+            )
+        return training_dir
+
+    def train(self, final_dir: str) -> str:
+        """Trains the model using PyTorch Lightning."""
+        set_seed(self.training_config.seed)
+
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=self.training_dir,
+            filename="checkpoint_{epoch}",
+            every_n_epochs=self.training_config.steps_saving
+            if self.training_config.steps_saving
+            else 1,
+            save_top_k=-1,
+        )
+        lr_monitor = LearningRateMonitor(logging_interval='epoch')
+        csv_logger = CSVLogger(save_dir=self.training_dir, name="training_logs")
+
+        trainer = L.Trainer(
+            max_epochs=self.training_config.num_epochs,
+            accelerator="auto",
+            devices="auto",
+            callbacks=[checkpoint_callback, lr_monitor],
+            logger=csv_logger,
+            precision=16 if self.training_config.amp else 32,
+        )
+
+        trainer.fit(
+            model=self.pl_model,
+            train_dataloaders=self.train_loader,
+            val_dataloaders=self.eval_loader,
+        )
+
+        self.save_model(final_dir)
+
+        logger.info("Training ended!")
+        logger.info(f"Saved final model in {final_dir}")
+
+        return final_dir
+
+    def save_model(self, dir_path: str):
+        """Saves the final model and training configuration."""
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+
+        self.pl_model.model.save(dir_path)
+        self.training_config.save_json(dir_path, "training_config")
+
+        try:
+            losses_df = pd.read_csv(os.path.join(self.training_dir, "training_logs", "metrics.csv"))
+        except FileNotFoundError:
+            losses_df = pd.read_csv(os.path.join(self.training_dir, "training_logs", "version_0", "metrics.csv"))
+        losses_df.to_csv(os.path.join(dir_path, 'losses.csv'))
+
+    def predict(self) -> Dict[str, torch.Tensor]:
+        """Generates predictions from the trained model."""
+        inputs = next(iter(self.eval_loader))
+        return self.pl_model.predict(inputs)
+
+    def set_output_dir(self):
+        # Create folder
+        if not os.path.exists(self.training_config.output_dir) and self.is_main_process:
+            os.makedirs(self.training_config.output_dir, exist_ok=True)
+            logger.info(
+                f"Created {self.training_config.output_dir} folder since did not exist.\n"
+            )
+
+        self._training_signature = (
+            str(datetime.datetime.now())[0:19].replace(" ", "_").replace(":", "-")
+        )
+
+        training_dir = os.path.join(
+            self.training_config.output_dir,
+            f"{self.model_name}_training_{self._training_signature}",
+        )
+
+        # self.training_dir = training_dir
+
+        if not os.path.exists(training_dir) and self.is_main_process:
+            os.makedirs(training_dir, exist_ok=True)
+            logger.info(
+                f"Created {training_dir}. \n"
+                "Training config, checkpoints and final model will be saved here.\n"
+            )
+        return training_dir
+
+    @property
+    def is_main_process(self):
+        if self.rank == 0 or self.rank == -1:
+            return True
+        else:
+            return False
 
 
 def plot_loss(losses_df, result_dir, train_loss_col_name, val_loss_col_name):

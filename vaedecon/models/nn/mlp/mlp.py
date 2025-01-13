@@ -1,10 +1,10 @@
 """Proposed multilayer perceptron architectures as a baseline"""
 
-from typing import List
+from typing import List, Optional
 
 import torch
-import torch.nn as nn
 import numpy as np
+import torch.nn as nn
 
 from ...base import BaseModelConfig
 from ..positional_encoding import PositionalEncoding
@@ -16,16 +16,16 @@ from ..base_architectures import BaseDecoder, BaseEncoder
 class Encoder_MLP(BaseEncoder):
     """
     A Normal MLP encoder.
-
     """
 
-    def __init__(self, args: BaseModelConfig, position_encoding: PositionalEncoding = None):
-        BaseEncoder.__init__(self)
+    def __init__(self, args: BaseModelConfig, position_encoding: Optional[PositionalEncoding] = None):
+        super().__init__()
 
         self.input_dim = args.input_dim
         self.latent_dim = args.latent_dim
         self.n_cell_types = args.n_cell_types
         self.using_positional_encoding = args.using_positional_encoding
+        self.hidden_dim = args.hidden_dim if hasattr(args, 'hidden_dim') else [1024, 512, 512]
         if self.using_positional_encoding:
             self.position_encoding = position_encoding()
         else:
@@ -33,45 +33,45 @@ class Encoder_MLP(BaseEncoder):
         # self.n_channels = 1
 
         layers = nn.ModuleList()
-        layers.append(
-            nn.Sequential(
-                nn.Linear(np.prod(args.input_dim), 1024),
-                nn.LayerNorm(1024),
-                nn.ReLU(),
-                nn.Linear(1024, 512),
-                nn.LayerNorm(512),
-                nn.ReLU(),
-                nn.Linear(512, 512),
-                nn.LayerNorm(512),
-                nn.ReLU())
-        )
+        input_size = np.prod(self.input_dim)
+        for hidden_dim in self.hidden_dim:
+            layers.append(
+                nn.Sequential(
+                    nn.Linear(input_size, hidden_dim),
+                    nn.LayerNorm(hidden_dim, eps=1e-6),
+                    nn.ReLU(),
+                )
+            )
+            input_size = hidden_dim
 
         self.layers = layers
         self.depth = len(layers)
 
-        self.embedding = nn.Linear(512, args.latent_dim * args.n_cell_types)
-        self.log_var = nn.Linear(512, self.latent_dim)
+        self.embedding = nn.Linear(in_features=self.hidden_dim[-1],
+                                   out_features=args.latent_dim * args.n_cell_types)
+        self.log_var = nn.Linear(self.hidden_dim[-1], self.latent_dim)
         self.cell_prop = nn.Sequential(
-            nn.Linear(512, self.n_cell_types),
+            nn.Linear(self.hidden_dim[-1], self.n_cell_types),
             nn.Softmax(dim=1)
         )
         # self.position_encoding = self.position_encoding.to(self.embedding.weight.device)
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor | None = None,
-                output_layer_levels: List[int] = None) -> ModelOutput:
+    def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None,
+                output_layer_levels: Optional[List[int]] = None) -> ModelOutput:
         """Forward method
 
         Args:
             x (torch.Tensor): The input data
-            y (torch.Tensor): The cell proportions of the input data
-            output_layer_levels (List[int]): The levels of the layers where the outputs are
+            y (torch.Tensor, optional): The cell proportions of the input data. Defaults to None.
+            output_layer_levels (List[int], optional): The levels of the layers where the outputs are
                 extracted. If None, the last layer's output is returned. Default: None.
 
         Returns:
             ModelOutput: An instance of ModelOutput containing the embeddings of the input data
             under the key `embedding`. Optional: The outputs of the layers specified in
             `output_layer_levels` arguments are available under the keys `embedding_layer_i` where
-            i is the layer's level."""
+            i is the layer's level.
+        """
         output = ModelOutput()
 
         max_depth = self.depth
@@ -92,7 +92,7 @@ class Encoder_MLP(BaseEncoder):
             else:
                 max_depth = max(output_layer_levels)
 
-        out = x
+        out = x.view(x.size(0), -1)  # flatten the input
 
         for i in range(max_depth):
             out = self.layers[i](out)
@@ -100,36 +100,37 @@ class Encoder_MLP(BaseEncoder):
             if output_layer_levels is not None:
                 if i + 1 in output_layer_levels:
                     output[f"embedding_layer_{i+1}"] = out
-            if i + 1 == self.depth:
-                # output["embedding"] = self.embedding(out.reshape(x.shape[0], -1))
-                # using the proposed structure of latent space
-                embedding_all_types = self.embedding(out)  # (batch_size, latent_dim, n_cell_types)
-                embedding_all_types = embedding_all_types.reshape((-1, self.latent_dim, self.n_cell_types))
-                output["cell_prop"] = self.cell_prop(out).reshape((-1, self.n_cell_types, 1))
-                # print(embedding_all_types.shape, output["cell_prop"].shape)
-                if y is not None:
-                    y = y.reshape((-1, self.n_cell_types, 1))
-                    # embedding = torch.matmul(embedding_all_types, y)  # bulk mode embedding
-                    cell_type_existed = (y > 0.01).type(torch.int8).type(torch.float32)
-                else:
-                    # embedding = torch.matmul(embedding_all_types, output["cell_prop"])
-                    cell_type_existed = (output["cell_prop"] > 0.01).type(torch.int8).type(torch.float32)
-                # assume y is unknown, using the average embedding of all cell types as the output miu of encoder
-                # and calculate the KL divergence loss based on this miu
-                embedding = torch.mean(embedding_all_types, dim=2, keepdim=True)  # (batch_size, latent_dim, 1)
+    # if i + 1 == self.depth:
+        # output["embedding"] = self.embedding(out.reshape(x.shape[0], -1))
+        # using the proposed structure of latent space
+        embedding_all_types = self.embedding(out)  # (batch_size, latent_dim, n_cell_types)
+        embedding_all_types = embedding_all_types.view((-1, self.latent_dim, self.n_cell_types))
+        # TODO: getting cell proportions from DeSide
+        output["cell_prop"] = self.cell_prop(out).view((-1, self.n_cell_types, 1))
+        # print(embedding_all_types.shape, output["cell_prop"].shape)
+        if y is not None:
+            y = y.view((-1, self.n_cell_types, 1))
+            # embedding = torch.matmul(embedding_all_types, y)  # bulk mode embedding
+            cell_type_existed = (y > 0.01).type(torch.int8).type(torch.float32)
+        else:
+            # embedding = torch.matmul(embedding_all_types, output["cell_prop"])
+            cell_type_existed = (output["cell_prop"] > 0.01).type(torch.int8).type(torch.float32)
 
-                # (latent_dim, n_cell_types) x (batch_size, n_cell_types, 1) -> (batch_size, latent_dim, 1)
-                if self.position_encoding is not None:
-                    position_encoding_cell_type = torch.matmul(self.position_encoding, cell_type_existed)
-                    output["embedding"] = embedding + position_encoding_cell_type
-                else:
-                    output["embedding"] = embedding
-                output["log_var"] = self.log_var(out).reshape((-1, self.latent_dim, 1))
-                output['embedding_all_types'] = embedding_all_types
-                output['cell_type_existed'] = cell_type_existed
+        # assume y is unknown, using the average embedding of all cell types as the output miu of encoder
+        # and calculate the KL divergence loss based on this miu
+        embedding = torch.mean(embedding_all_types, dim=2, keepdim=True)  # (batch_size, latent_dim, 1)
+
+        # (latent_dim, n_cell_types) x (batch_size, n_cell_types, 1) -> (batch_size, latent_dim, 1)
+        if self.position_encoding is not None:
+            position_encoding_cell_type = torch.matmul(self.position_encoding, cell_type_existed)
+            output["embedding"] = embedding + position_encoding_cell_type
+        else:
+            output["embedding"] = embedding
+        output["log_var"] = self.log_var(out).reshape((-1, self.latent_dim, 1))
+        output['embedding_all_types'] = embedding_all_types
+        output['cell_type_existed'] = cell_type_existed
 
         return output
-
 
 class Decoder_MLP(BaseDecoder):
     """
@@ -137,36 +138,34 @@ class Decoder_MLP(BaseDecoder):
     """
 
     def __init__(self, args: BaseModelConfig):
-        BaseDecoder.__init__(self)
+        super().__init__()
 
         self.input_dim = args.input_dim  # input dimension of the Encoder
         self.latent_dim = args.latent_dim
+        self.hidden_dims = args.hidden_dims if hasattr(args, 'hidden_dims') else [512, 512, 1024]
 
         layers = nn.ModuleList()
+        input_size = self.latent_dim
 
-        layers.append(
-            nn.Sequential(
-                nn.Linear(self.latent_dim, 512),
-                nn.LayerNorm(512),
-                nn.ReLU(),
-                nn.Linear(512, 512),
-                nn.LayerNorm(512),
-                nn.ReLU(),
-                nn.Linear(512, 1024),
-                nn.LayerNorm(1024),
-                nn.ReLU(),
-                nn.Linear(1024, np.prod(self.input_dim)),
-                nn.Sigmoid(),  # to ensure the output is in the range [0, 1]
+        for hidden_dim in self.hidden_dims:
+            layers.append(
+                nn.Sequential(
+                    nn.Linear(input_size, hidden_dim),
+                    nn.LayerNorm(hidden_dim, eps=1e-6),
+                    nn.ReLU(),
+                )
             )
-        )
+            input_size = hidden_dim
+        layers.append(nn.Linear(self.hidden_dims[-1], np.prod(self.input_dim)))  # output layer
 
         self.layers = layers
         self.depth = len(layers)
 
-    def forward(self, z: torch.Tensor, output_layer_levels: List[int] = None):
+    def forward(self, z: torch.Tensor, output_layer_levels: Optional[List[int]] = None) -> ModelOutput:
         """Forward method
 
         Args:
+            z (torch.Tensor): The latent code
             output_layer_levels (List[int]): The levels of the layers where the outputs are
                 extracted. If None, the last layer's output is returned. Default: None.
 
@@ -201,14 +200,9 @@ class Decoder_MLP(BaseDecoder):
             # print('i', i, self.layers[i])
             out = self.layers[i](out)
 
-            # if i == 0:
-            #     out = out.reshape(z.shape[0], 128, 4, 4)
-
             if output_layer_levels is not None:
                 if i + 1 in output_layer_levels:
                     output[f"reconstruction_layer_{i+1}"] = out
 
-            if i + 1 == self.depth:
-                output["reconstruction"] = out
-
+        output["reconstruction"] = out
         return output

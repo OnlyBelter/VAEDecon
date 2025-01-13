@@ -1,175 +1,107 @@
+"""
+Changed to lightning by Belter, Jan 13, 2025.
+"""
+
+from typing import Any
 import torch
-import torch.nn as nn
+import lightning as L
 
 
-class BaseEncoder(nn.Module):
-    """This is a base class for Encoders neural networks."""
-
-    def __init__(self):
-        nn.Module.__init__(self)
-
-    def forward(self, x):
-        r"""This function must be implemented in a child class.
-        It takes the input data and returns an instance of
-        :class:`~pythae.models.base.base_utils.ModelOutput`.
-        If you decide to provide your own encoder network, you must make sure your
-        model inherit from this class by setting and then defining your forward function as
-        such:
-
-        .. code-block::
-
-            >>> from pythae.models.nn import BaseEncoder
-            >>> from pythae.models.base.base_utils import ModelOutput
-            ...
-            >>> class My_Encoder(BaseEncoder):
-            ...
-            ...     def __init__(self):
-            ...         BaseEncoder.__init__(self)
-            ...         # your code
-            ...
-            ...     def forward(self, x: torch.Tensor):
-            ...         # your code
-            ...         output = ModelOutput(
-            ...             embedding=embedding,
-            ...             log_covariance=log_var # for VAE based models
-            ...         )
-            ...         return output
-
-        Parameters:
-            x (torch.Tensor): The input data that must be encoded
-
-        Returns:
-            output (~pythae.models.base.base_utils.ModelOutput): The output of the encoder
-        """
-        raise NotImplementedError()
-
-
-class BaseDecoder(nn.Module):
-    """This is a base class for Decoders neural networks."""
+class BaseEncoder(L.LightningModule):
+    """Base class for encoder neural networks in VAE architectures."""
 
     def __init__(self):
-        nn.Module.__init__(self)
+        super().__init__()
 
-    def forward(self, z: torch.Tensor):
-        r"""This function must be implemented in a child class.
-        It takes the input data and returns an instance of
-        :class:`~pythae.models.base.base_utils.ModelOutput`.
-        If you decide to provide your own decoder network, you must make sure your
-        model inherit from this class by setting and then defining your forward function as
-        such:
+    def forward(self, x: torch.Tensor) -> Any:
+        """Forward pass of the encoder.
 
-        .. code-block::
+        This method must be implemented in child classes. It processes the input data
+        and returns an encoded representation.
 
-            >>> from pythae.models.nn import BaseDecoder
-            >>> from pythae.models.base.base_utils import ModelOutput
-            ...
-            >>> class My_decoder(BaseDecoder):
-            ...
-            ...    def __init__(self):
-            ...        BaseDecoder.__init__(self)
-            ...        # your code
-            ...
-            ...    def forward(self, z: torch.Tensor):
-            ...        # your code
-            ...        output = ModelOutput(
-            ...             reconstruction=reconstruction
-            ...         )
-            ...        return output
-
-        Parameters:
-            z (torch.Tensor): The latent data that must be decoded
+        Args:
+            x (torch.Tensor): Input data to be encoded
 
         Returns:
-            output (~pythae.models.base.base_utils.ModelOutput): The output of the decoder
+            ModelOutput: Encoded representation of the input
 
-        .. note::
-
-            By convention, the reconstruction tensors should be in [0, 1] and of shape
-            BATCH x channels x ...
-
+        Raises:
+            NotImplementedError: If not implemented in child class
         """
-        raise NotImplementedError()
+        raise NotImplementedError("Forward method must be implemented in child class")
 
 
-class BaseMetric(nn.Module):
-    """This is a base class for Metrics neural networks
-    (only applicable for Riemannian based VAE)
-    """
+class BaseDecoder(L.LightningModule):
+    """Base class for decoder neural networks in VAE architectures."""
 
     def __init__(self):
-        nn.Module.__init__(self)
+        super().__init__()
 
-    def forward(self, x):
-        r"""This function must be implemented in a child class.
-        It takes the input data and returns an instance of
-        :class:`~pythae.models.base.base_utils.ModelOutput`.
-        If you decide to provide your own metric network, you must make sure your
-        model inherit from this class by setting and then defining your forward function as
-        such:
+    def forward(self, z: torch.Tensor) -> Any:
+        """Forward pass of the decoder.
 
-        .. code-block::
+        This method must be implemented in child classes. It processes the latent
+        representation and returns the reconstructed data.
 
-            >>> from pythae.models.nn import BaseMetric
-            >>> from pythae.models.base.base_utils import ModelOutput
-            ...
-            >>> class My_Metric(BaseMetric):
-            ...
-            ...    def __init__(self):
-            ...        BaseMetric.__init__(self)
-            ...        # your code
-            ...
-            ...    def forward(self, x: torch.Tensor):
-            ...        # your code
-            ...        output = ModelOutput(
-            ...             L=L # L matrices in the metric of  Riemannian based VAE (see docs)
-            ...         )
-            ...        return output
-
-        Parameters:
-            x (torch.Tensor): The input data that must be encoded
+        Args:
+            z (torch.Tensor): Latent representation to be decoded
 
         Returns:
-            output (~pythae.models.base.base_utils.ModelOutput): The output of the metric
+            ModelOutput: Reconstructed data
+
+        Note:
+            Reconstruction tensors should be in range [0, 1] with shape:
+            (batch_size, channels, ...)
+
+        Raises:
+            NotImplementedError: If not implemented in child class
         """
-        raise NotImplementedError()
+        raise NotImplementedError("Forward method must be implemented in child class")
 
 
-class BaseDiscriminator(nn.Module):
-    """This is a base class for Discriminator neural networks."""
+class BaseMetric(L.LightningModule):
+    """Base class for metric neural networks in Riemannian VAE architectures."""
 
     def __init__(self):
-        nn.Module.__init__(self)
+        super().__init__()
 
-    def forward(self, x):
-        r"""This function must be implemented in a child class.
-        It takes the input data and returns an instance of
-        :class:`~pythae.models.base.base_utils.ModelOutput`.
-        If you decide to provide your own disctriminator network, you must make sure your
-        model inherit from this class by setting and then defining your forward function as
-        such:
+    def forward(self, x: torch.Tensor) -> Any:
+        """Forward pass of the metric network.
 
-        .. code-block::
+        This method must be implemented in child classes. It computes the
+        Riemannian metric for the input data.
 
-            >>> from pythae.models.nn import BaseDiscriminator
-            >>> from pythae.models.base.base_utils import ModelOutput
-            ...
-            >>> class My_Discriminator(BaseDiscriminator):
-            ...
-            ...     def __init__(self):
-            ...         BaseDiscriminator.__init__(self)
-            ...         # your code
-            ...
-            ...     def forward(self, x: torch.Tensor):
-            ...         # your code
-            ...         output = ModelOutput(
-            ...             adversarial_cost=adversarial_cost
-            ...         )
-            ...         return output
-
-        Parameters:
-            x (torch.Tensor): The input data that must be encoded
+        Args:
+            x (torch.Tensor): Input data for metric computation
 
         Returns:
-            output (~pythae.models.base.base_utils.ModelOutput): The output of the encoder
+            ModelOutput: Computed metric values
+
+        Raises:
+            NotImplementedError: If not implemented in child class
         """
-        raise NotImplementedError()
+        raise NotImplementedError("Forward method must be implemented in child class")
+
+
+class BaseDiscriminator(L.LightningModule):
+    """Base class for discriminator neural networks."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> Any:
+        """Forward pass of the discriminator.
+
+        This method must be implemented in child classes. It processes the input
+        data and returns discrimination results.
+
+        Args:
+            x (torch.Tensor): Input data to be discriminated
+
+        Returns:
+            ModelOutput: Discrimination results
+
+        Raises:
+            NotImplementedError: If not implemented in child class
+        """
+        raise NotImplementedError("Forward method must be implemented in child class")

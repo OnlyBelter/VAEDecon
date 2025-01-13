@@ -6,9 +6,10 @@ from typing import Any, Tuple
 
 try:
     import pickle5 as pickle
-except:
+except ImportError:
     import pickle
 import torch
+
 
 logger = logging.getLogger(__name__)
 console = logging.StreamHandler()
