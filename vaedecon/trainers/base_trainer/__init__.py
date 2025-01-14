@@ -1,4 +1,4 @@
-from .base_trainer import BaseTrainer, BaseTrainer2
+from .base_trainer import BaseTrainerL
 from .base_training_config import BaseTrainerConfig
 
-__all__ = ["BaseTrainer", "BaseTrainerConfig", "BaseTrainer2"]
+__all__ = ["BaseTrainerConfig", "BaseTrainerL"]

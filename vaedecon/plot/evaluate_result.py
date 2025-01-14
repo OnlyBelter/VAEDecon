@@ -4,21 +4,19 @@ import numpy as np
 from typing import Union
 import statsmodels.api as sm
 from sklearn.metrics import median_absolute_error
-from ..utility import (print_df, cal_relative_error, calculate_rmse, check_dir, get_corr,
-                       read_xy, read_df, get_inx2cell_type, log2_transform, get_core_zone_of_pca,
-                       get_ccc, read_cancer_purity, cancer_types)
-# from ..utility.read_file import ReadExp
-from .plot_nn import plot_corr_two_columns
 import matplotlib.patches as patches
-# import importlib
 import matplotlib.pyplot as plt
 import seaborn as sns
 import gc
+from pathlib import Path
+from typing import List, Dict
+import torch
+import umap
 
-
-# set_fig_style()
-# sns.set(font_scale=1.5)
-# sns.set_style('white')
+from ..utility import (calculate_rmse, check_dir, get_corr, read_xy, read_df, get_ccc,
+                       get_core_zone_of_pca, read_cancer_purity, cancer_types, non_log2log_cpm)
+from ..data import GEPDataset
+from .plot_nn import plot_corr_two_columns
 
 
 class ScatterPlot(object):
@@ -829,3 +827,164 @@ def plot_pred_cell_prop_with_cpe(cpe_file_path, pred_cell_prop_file_path, result
     if save_metrics:
         metrics_value_df = pd.DataFrame.from_dict(metrics_value, orient='index')
         metrics_value_df.to_csv(os.path.join(result_dir, 'pred_cancer_cell_prop_vs_cpe-deside-metrics.csv'))
+
+
+def plot_single_cell_gep(
+    pred_a: Dict[str, torch.Tensor],
+    test_set: GEPDataset,
+    cell_types: List[str],
+    gep_result_dir: str,
+    n_samples: int = 3,
+) -> None:
+    """Plots the reconstructed single-cell GEPs."""
+    sc_gep_result_dir = os.path.join(gep_result_dir, "sc_gep")
+    check_dir(Path(sc_gep_result_dir))
+    recon_sc_gep = pred_a["recon_x_all_types"].detach().cpu().numpy()
+    # TODO, find all GEPs of different cell types by id
+    sample_ids = test_set.get_sample_ids()
+    gene_list = test_set.get_gene_list()
+
+    nrows = 4
+    ncols = 4
+    fig, axes = plt.subplots(nrows, ncols, sharex=False, sharey=False, figsize=(8, 8))
+    plt.subplots_adjust(wspace=0.1, hspace=0.25)
+    for i, cell_type in enumerate(cell_types):
+        result_file_path = os.path.join(
+            sc_gep_result_dir, f"recon_sc_gep_{cell_type}_top{n_samples}_samples.csv"
+        )
+        result_file_path_ground_truth = os.path.join(
+            sc_gep_result_dir, f"sc_gep_{cell_type}_top{n_samples}_samples.csv"
+        )
+        if not os.path.exists(result_file_path):
+            recon_sc_gep_ct = recon_sc_gep[:n_samples, :, i]
+            recon_sc_gep_ct_pd = pd.DataFrame(
+                recon_sc_gep_ct, index=sample_ids[:n_samples], columns=gene_list
+            )
+            recon_sc_gep_ct_pd = non_log2log_cpm(recon_sc_gep_ct_pd, transpose=False)
+            recon_sc_gep_ct_pd.T.to_csv(result_file_path)
+            sc_gep_ground_truth = test_set.gep_data.loc[
+                sample_ids[:n_samples], gene_list
+            ].copy()
+            sc_gep_ground_truth.T.to_csv(result_file_path_ground_truth)
+        compare_y_y_pred_plot(
+            y_true=result_file_path_ground_truth,
+            y_pred=result_file_path,
+            show_columns=sample_ids[:n_samples],
+            result_file_dir=sc_gep_result_dir,
+            model_name=f"DeSide_{cell_type}",
+            show_metrics=True,
+            y_label="y_recon_sc_gep",
+            figsize=(3.5, 3.5),
+            rasterized=True,
+        )
+        row_index = i // nrows
+        col_index = i % ncols
+        compare_y_y_pred_subplot(
+            y_pred=result_file_path,
+            y_true=result_file_path_ground_truth,
+            show_columns=sample_ids[:n_samples],
+            x_label=cell_type,
+            show_metrics=True,
+            figsize=(2, 2),
+            dataset_name=None,
+            ax=axes[row_index, col_index],
+            show_legend=True,
+        )
+    fig.add_subplot(111, frameon=False)
+    plt.tick_params(
+        labelcolor="none", which="both", top=False, bottom=False, left=False, right=False
+    )
+    plt.xlabel("Predicted gene expression values", labelpad=15)
+    plt.ylabel("True gene expression values")
+    plt.savefig(
+        os.path.join(sc_gep_result_dir, "y_true_vs_y_pred_gep_all_cell_types.svg"),
+        dpi=300,
+    )
+
+
+def plot_bulk_gep(
+    pred_a: Dict[str, torch.Tensor],
+    test_set: GEPDataset,
+    gep_result_dir: str,
+    n_samples: int = 3,
+) -> None:
+    """Plots the reconstructed bulk GEPs."""
+    bulk_gep_result_dir = os.path.join(gep_result_dir, "bulk_gep")
+    check_dir(Path(bulk_gep_result_dir))
+    recon_bulk_gep_conv = pred_a["recon_x_conv"].detach().cpu().numpy()
+    bulk_gep_input = test_set.data.detach().cpu().numpy()
+    sample_ids = test_set.get_sample_ids()
+    gene_list = test_set.get_gene_list()
+    recon_bulk_gep_conv_df = pd.DataFrame(
+        recon_bulk_gep_conv, index=sample_ids, columns=gene_list
+    )
+    bulk_gep_input_df = pd.DataFrame(
+        bulk_gep_input, index=sample_ids, columns=gene_list
+    )
+    recon_bulk_gep_conv_df.to_csv(
+        os.path.join(bulk_gep_result_dir, "recon_bulk_gep_conv.csv")
+    )
+    bulk_gep_input_df.to_csv(
+        os.path.join(bulk_gep_result_dir, "bulk_gep_input.csv")
+    )
+    s_plot = ScatterPlot(x=recon_bulk_gep_conv_df.T, y=bulk_gep_input_df.T)
+    for sample_id in s_plot.x.columns.to_list()[:n_samples]:
+        s_plot.postfix = f"recon_bulk_gep_by_conv_{sample_id}"
+        s_plot.plot(
+            show_columns={"x": sample_id, "y": sample_id},
+            fig_size=(3.5, 3.5),
+            result_file_dir=bulk_gep_result_dir,
+            show_mae=True,
+            show_rmse=True,
+            show_diag=True,
+            show_corr=True,
+            x_label="y_pred by DeSide",
+            y_label=f"y_true of {sample_id} in Test set1",
+            show_reg_line=False,
+            rasterized=True,
+        )
+
+
+def plot_latent_space(
+        pred_a: Dict[str, torch.Tensor],
+        test_set: GEPDataset,
+        cell_types: List[str],
+        test_set_result_dir: str,
+        n_neighbors: int = 50,
+        min_dist: float = 0.3,
+) -> None:
+    """Plots the latent space using UMAP."""
+    sample_ids = test_set.get_sample_ids()
+    latent_space_result_dir = os.path.join(test_set_result_dir, 'latent_space')
+    check_dir(Path(latent_space_result_dir))
+    # z = pred_a['z'].detach().numpy()   # n_samples x latent_dim
+    mu = pred_a['mu'].detach().numpy()  # n_samples x latent_dim
+    mu_deconv = pred_a['mu_deconv'].detach().numpy()  # n_samples x latent_dim x n_cell_types
+    # z_df = pd.DataFrame(np.squeeze(z), index=sample_ids)
+    mu_df = pd.DataFrame(np.squeeze(mu), index=sample_ids)
+    sc_mu_list = []
+    for i in range(len(cell_types)):
+        current_mu = mu_deconv[:, :, i]
+        _df = pd.DataFrame(current_mu, index=sample_ids)
+        _df.index = _df.index.map(lambda x: x + '_' + str(i))
+        _df['cell_type'] = cell_types[i]
+        sc_mu_list.append(_df)
+    sc_mu_df = pd.concat(sc_mu_list)
+    # z_df.to_csv(os.path.join(latent_space_result_dir, 'z_conv.csv'))
+    mu_df.to_csv(os.path.join(latent_space_result_dir, 'mu_conv.csv'))
+    sc_mu_df.to_csv(os.path.join(latent_space_result_dir, 'sc_mu_deconv.csv'))
+    # plot latent space
+
+    sc_mu_umap = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist,
+                           metric='correlation').fit_transform(sc_mu_df.iloc[:, 0:-1])
+    sc_mu_df['UMAP1'] = sc_mu_umap[:, 0]
+    sc_mu_df['UMAP2'] = sc_mu_umap[:, 1]
+    f, ax = plt.subplots(figsize=(6, 6))
+    sns.despine(f, left=True, bottom=True, right=True, top=True)
+    sns.scatterplot(x="UMAP1", y="UMAP2",
+                    hue="cell_type",
+                    palette="tab20",
+                    hue_order=cell_types, linewidth=0,
+                    data=sc_mu_df, ax=ax, rasterized=True)
+    f.savefig(os.path.join(latent_space_result_dir, f'sc_mu_deconv_{n_neighbors}_{min_dist}.svg'), dpi=300)
+    plt.close(f)

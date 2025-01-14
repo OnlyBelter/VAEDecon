@@ -1,10 +1,7 @@
 import os
 from dataclasses import field
 from typing import Union
-
 import torch.nn as nn
-# from pydantic.dataclasses import dataclass
-
 from ...config import BaseConfig
 
 

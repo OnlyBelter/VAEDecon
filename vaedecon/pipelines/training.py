@@ -1,16 +1,16 @@
 import os
 import logging
-from typing import List, Optional, Union
+from typing import Optional, Union, Any, Type
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Dataset
 
 from ..customexception import DatasetError
-from ..data.datasets import collate_dataset_output
-from ..data.preprocessors import BaseDataset, DataProcessor
+from ..data.datasets import collate_dataset_output, BaseDataset
+from ..data.preprocessors import DataProcessor
 from ..models import BaseAE
-from ..trainers import BaseTrainer, BaseTrainerConfig, BaseTrainer2
-from pythae.trainers.training_callbacks import TrainingCallback
+from ..trainers import BaseTrainerConfig, BaseTrainerL
 from .base_pipeline import Pipeline
 
 logger = logging.getLogger(__name__)
@@ -21,11 +21,56 @@ logger.addHandler(console)
 logger.setLevel(logging.INFO)
 
 
+def _check_dataset(dataset: BaseDataset):
+    """Checks if the dataset is valid."""
+    try:
+        dataset_output = dataset[0]
+    except Exception as e:
+        raise DatasetError(
+            "Error when trying to collect data from the dataset. Check `__getitem__` method. "
+            "The Dataset should output a dictionary with at least the key 'data'. "
+            "Please check documentation.\n"
+            f"Exception raised: {type(e)} with message: {e}"
+        ) from e
+
+    if not isinstance(dataset_output, dict) or "data" not in dataset_output.keys():
+        raise DatasetError(
+            "The Dataset should output a dictionary with at least the key 'data'."
+        )
+    try:
+        len(dataset)
+    except Exception as e:
+        raise DatasetError(
+            "Error when trying to get dataset len. Check `__len__` method. "
+            "Please check documentation.\n"
+            f"Exception raised: {type(e)} with message: {e}"
+        ) from e
+
+    # check if the dataset works with the data loader
+    # from torch.utils.data import DataLoader
+    try:
+        dataloader = DataLoader(
+            dataset=dataset,
+            batch_size=min(len(dataset), 2),
+            collate_fn=collate_dataset_output,
+        )
+        loader_out = next(iter(dataloader))
+        assert loader_out.data.shape[0] == min(
+            len(dataset), 2
+        ), "Error when combining dataset with loader."
+    except Exception as e:
+        raise DatasetError(
+            "Error when combining dataset with DataLoader. \n"
+            f"Exception raised: {type(e)} with message: {e}"
+        ) from e
+
+
 class TrainingPipeline(Pipeline):
     """
-    This Pipeline provides an end to end way to train your VAE model.
+    This Pipeline provides an end to end way to train the VAE model.
+
     The trained model will be saved in ``output_dir`` stated in the
-    :class:`~pythae.trainers.BaseTrainerConfig`. A folder
+    :class:`trainers.BaseTrainerConfig`. A folder
     ``training_YYYY-MM-DD_hh-mm-ss`` is
     created where checkpoints and final model will be saved. Checkpoints are saved in
     ``checkpoint_epoch_{epoch}`` folder (optimizer and training config
@@ -34,16 +79,23 @@ class TrainingPipeline(Pipeline):
     None, data is saved in ``dummy_output_dir/training_YYYY-MM-DD_hh-mm-ss`` is created.
 
     Parameters:
-
-        model (Optional[BaseAE]): An instance of :class:`~pythae.models.BaseAE` you want to train.
-            If None, a default :class:`~pythae.models.VAE` model is used. Default: None.
-
-        training_config (Optional[BaseTrainerConfig]): An instance of
-            :class:`~pythae.trainers.BaseTrainerConfig` stating the training
+        model (BaseAE): An instance of :class:`models.BaseAE` you want to train.
+            If None, a default :class:`models.VAE` model is used. Default: None.
+        training_config (BaseTrainerConfig): An instance of
+            :class:`trainers.BaseTrainerConfig` stating the training
             parameters. If None, a default configuration is used.
+        trainer_cls: The trainer class to use.
+            Defaults to BaseTrainerL.
+        n_early_stopping_patience (int): The number of epochs to wait before stopping
+            the training if no improvement is observed. Default: 10.
+        output_dir (Optional[str]): The directory where the model will be saved. If None,
     """
 
-    def __init__(self, model: Optional[BaseAE], training_config: Optional[BaseTrainerConfig] = None,
+    def __init__(self,
+                 model: BaseAE = None,
+                 trainer_cls: Type[BaseTrainerL] = None,
+                 training_config=None,
+                 n_early_stopping_patience: int = 10,
                  output_dir: str = None):
         super().__init__()
         if training_config is None:
@@ -57,128 +109,105 @@ class TrainingPipeline(Pipeline):
         self.data_processor = DataProcessor()
         self.model = model
         self.training_config = training_config
+        self.trainer_cls = trainer_cls
+        self.n_early_stopping_patience = n_early_stopping_patience
         self.final_output_dir = None
 
-    def _check_dataset(self, dataset: BaseDataset):
-        try:
-            dataset_output = dataset[0]
+    def _prepare_data(
+            self,
+            data: Optional[
+                Union[np.ndarray, torch.Tensor, Dataset, DataLoader, BaseDataset]
+            ] = None,
+            data_type: str = "train",
+    ) -> Optional[Union[Dataset, DataLoader]]:
+        """Prepares the data for training or evaluation."""
+        if data is None:
+            return None
 
-        except Exception as e:
-            raise DatasetError(
-                "Error when trying to collect data from the dataset. Check `__getitem__` method. "
-                "The Dataset should output a dictionnary with keys at least ['data']. "
-                "Please check documentation.\n"
-                f"Exception raised: {type(e)} with message: " + str(e)
-            ) from e
-
-        if "data" not in dataset_output.keys():
-            raise DatasetError(
-                "The Dataset should output a dictionnary with keys ['data']"
+        if isinstance(data, DataLoader):
+            logger.info(f"Using provided {data_type} dataloader.")
+            return data
+        elif isinstance(data, (np.ndarray, torch.Tensor)):
+            logger.info(f"Preprocessing {data_type} data...")
+            processed_data = self.data_processor.process_data(data)
+            dataset = self.data_processor.to_dataset(processed_data)
+            logger.info(f"Checking {data_type} dataset...")
+            _check_dataset(dataset)
+            return dataset
+        elif isinstance(data, Dataset):
+            logger.info(f"Checking {data_type} dataset...")
+            _check_dataset(data)
+            return data
+        else:
+            raise ValueError(
+                f"Unsupported data type for {data_type} data: {type(data)}"
             )
-
-        try:
-            len(dataset)
-
-        except Exception as e:
-            raise DatasetError(
-                "Error when trying to get dataset len. Check `__len__` method. "
-                "Please check documentation.\n"
-                f"Exception raised: {type(e)} with message: " + str(e)
-            ) from e
-
-        # check everything if fine when combined with data loader
-        from torch.utils.data import DataLoader
-
-        dataloader = DataLoader(
-            dataset=dataset,
-            batch_size=min(len(dataset), 2),
-            collate_fn=collate_dataset_output,
-        )
-        loader_out = next(iter(dataloader))
-        assert loader_out.data.shape[0] == min(
-            len(dataset), 2
-        ), "Error when combining dataset with loader."
 
     def __call__(
         self,
         train_data: Union[
-            np.ndarray,
-            torch.Tensor,
-            torch.utils.data.Dataset,
-            torch.utils.data.DataLoader,
+            np.ndarray, torch.Tensor, Dataset, DataLoader,
         ] = None,
         eval_data: Union[
-            np.ndarray,
-            torch.Tensor,
-            torch.utils.data.Dataset,
-            torch.utils.data.DataLoader,
+            np.ndarray, torch.Tensor, Dataset, DataLoader,
         ] = None,
-        callbacks: List[TrainingCallback] = None,
-    ):
+        # callbacks: List[TrainingCallback] = None,
+    ) -> Any:
         """
         Launch the model training on the provided data.
 
         Args:
             train_data: The training data or DataLoader.
+            eval_data: The evaluation data or DataLoader. If None, only uses train_data for training.
 
-            eval_data: The evaluation data or DataLoader. If None, only uses train_data for training. Default: None
-
-            callbacks (List[~pythae.trainers.training_callbacks.TrainingCallbacks]):
-                A list of callbacks to use during training.
+        Returns:
+            str: The path to the final model directory.
         """
 
         # Initialize variables for datasets and dataloaders
-        train_dataset, eval_dataset = None, None
-        train_dataloader, eval_dataloader = None, None
+        # train_dataset, eval_dataset = None, None
+        # train_dataloader, eval_dataloader = None, None
+        #
+        # if isinstance(train_data, DataLoader):
+        #     train_dataloader = train_data
+        # elif isinstance(train_data, (np.ndarray, torch.Tensor)):
+        #     logger.info("Preprocessing train data...")
+        #     train_data = self.data_processor.process_data(train_data)
+        #     train_dataset = self.data_processor.to_dataset(train_data)
+        #     logger.info("Checking train dataset...")
+        #     _check_dataset(train_dataset)
+        # else:
+        #     train_dataset = train_data
+        #     logger.info("Checking train dataset...")
+        #     _check_dataset(train_dataset)
+        #
+        # if eval_data is not None:
+        #     if isinstance(eval_data, torch.utils.data.DataLoader):
+        #         eval_dataloader = eval_data
+        #     elif isinstance(eval_data, (np.ndarray, torch.Tensor)):
+        #         logger.info("Preprocessing eval data...\n")
+        #         eval_data = self.data_processor.process_data(eval_data)
+        #         eval_dataset = self.data_processor.to_dataset(eval_data)
+        #         logger.info("Checking eval dataset...")
+        #         _check_dataset(eval_dataset)
+        #     else:
+        #         eval_dataset = eval_data
+        #         logger.info("Checking eval dataset...")
+        #         _check_dataset(eval_dataset)
 
-        if isinstance(train_data, torch.utils.data.DataLoader):
-            train_dataloader = train_data
-        elif isinstance(train_data, (np.ndarray, torch.Tensor)):
-            logger.info("Preprocessing train data...")
-            train_data = self.data_processor.process_data(train_data)
-            train_dataset = self.data_processor.to_dataset(train_data)
-            logger.info("Checking train dataset...")
-            self._check_dataset(train_dataset)
-        else:
-            train_dataset = train_data
-            logger.info("Checking train dataset...")
-            self._check_dataset(train_dataset)
-
-        if eval_data is not None:
-            if isinstance(eval_data, torch.utils.data.DataLoader):
-                eval_dataloader = eval_data
-            elif isinstance(eval_data, (np.ndarray, torch.Tensor)):
-                logger.info("Preprocessing eval data...\n")
-                eval_data = self.data_processor.process_data(eval_data)
-                eval_dataset = self.data_processor.to_dataset(eval_data)
-                logger.info("Checking eval dataset...")
-                self._check_dataset(eval_dataset)
-            else:
-                eval_dataset = eval_data
-                logger.info("Checking eval dataset...")
-                self._check_dataset(eval_dataset)
-
-        if isinstance(self.training_config, BaseTrainerConfig):
-            logger.info("Using Base Trainer\n")
-            # trainer = BaseTrainer(
-            #     model=self.model,
-            #     train_dataset=train_dataloader or train_dataset,
-            #     eval_dataset=eval_dataloader or eval_dataset,
-            #     training_config=self.training_config,
-            #     callbacks=callbacks,
-            # )
-            trainer = BaseTrainer2(
-                model=self.model,
-                train_dataset=train_dataloader or train_dataset,
-                eval_dataset=eval_dataloader or eval_dataset,
-                training_config=self.training_config,
-                # callbacks=callbacks,
-            )
-        else:
-            raise ValueError("The provided training config is not supported.")
+        train_dataset = self._prepare_data(train_data, "train")
+        eval_dataset = self._prepare_data(eval_data, "eval")
+        logger.info(f"Using {self.trainer_cls.__name__} for training.")
+        trainer = self.trainer_cls(
+            model=self.model,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            training_config=self.training_config,
+            n_early_stopping_patience=self.n_early_stopping_patience,
+        )
 
         self.trainer = trainer
-        output_dir = self.trainer.set_output_dir()
+        output_dir = trainer.set_output_dir()
         self.final_output_dir = os.path.join(output_dir, "final_model")
         trainer.train(final_dir=self.final_output_dir)
         # self.final_output_dir = trainer.train()
