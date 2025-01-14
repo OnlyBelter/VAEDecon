@@ -7,7 +7,7 @@ from typing import List, Tuple, Dict, Any, Type
 import torch
 from torch.utils.data import DataLoader
 
-from ..decon_cf import DeSide
+# from ..decon_cf import DeSide
 from ..utility import check_dir, print_msg
 from ..utility.read_file import ReadH5AD
 from ..utility.compare import mean_exp_of_marker_gene, read_and_merge_result, cal_gene_signature_score
@@ -150,146 +150,146 @@ def tcga_evaluation(marker_gene_file_path, total_result_dir, pred_cell_frac_tcga
                                                  cell_type=cell_type, cell_type2max=cell_type2max)
 
 
-def run_step3(evaluation_dataset2path, log_file_path, result_dir, model_dir,
-              all_cell_types, one_minus_alpha=False, pathway_mask=None,
-              method_adding_pathway='add_to_end', hyper_params: dict = None):
-    """
-    Step3: Predicting cell fractions of test set and evaluation
-    :param evaluation_dataset2path: dict, key: dataset name, value: file path
-    :param log_file_path: str, log file path
-    :param result_dir: str, result directory
-    :param model_dir: str, model directory
-    :param all_cell_types: list, all cell types
-    :param one_minus_alpha: bool, whether to use 1-alpha as the predicted cell fraction for all cell types
-    :param pathway_mask: dataframe, pathway mask, genes by pathways
-    :param method_adding_pathway: str, method for adding pathway, 'add_to_end' or 'convert'
-    :param hyper_params: dict, hyper parameters for DNN model
-    """
-    # Step3, evaluation on test set
-    print_msg('Step3: Predicting cell fractions of test set and evaluation...',
-              log_file_path=log_file_path)
-
-    for dataset_name, file_path in evaluation_dataset2path.items():
-        # if 'Test_set' in dataset_name:
-        print(f'   Evaluating on dataset {dataset_name}...')
-        predicted_result_dir = os.path.join(result_dir, dataset_name)
-        check_dir(predicted_result_dir)
-        predicted_cell_frac_file_path = os.path.join(predicted_result_dir,
-                                                     f'{dataset_name}_pred_cell_frac.csv')
-
-        generated_bulk_gep_fp = file_path
-        if dataset_name == 'Pre_Test_set':
-            generated_bulk_gep_fp = './datasets/simulated_bulk_cell_dataset/test_set_nbase3_7ds/' \
-                                    'simu_bulk_exp_Test_set2_log2cpm1p.h5ad'
-        generated_cell_frac = ReadH5AD(generated_bulk_gep_fp).get_cell_fraction()
-
-        if not os.path.exists(predicted_cell_frac_file_path):
-            deside_model = DeSide(model_dir=model_dir)
-            deside_model.predict(input_file=generated_bulk_gep_fp,
-                                 output_file_path=predicted_cell_frac_file_path,
-                                 exp_type='log_space', scaling_by_sample=False,
-                                 scaling_by_constant=True, one_minus_alpha=one_minus_alpha,
-                                 pathway_mask=pathway_mask, method_adding_pathway=method_adding_pathway,
-                                 hyper_params=hyper_params)
-        print('   > Comparing cell frac between y_true and y_pred...')
-        for cell_type in generated_cell_frac.columns.to_list():
-            s_plot = ScatterPlot(x=predicted_cell_frac_file_path,
-                                 y=generated_cell_frac,
-                                 postfix=f'pred_y_y_{cell_type}')
-            s_plot.plot(show_columns={'x': cell_type, 'y': cell_type}, fig_size=(8, 8),
-                        result_file_dir=predicted_result_dir, show_mae=True,
-                        show_rmse=True, show_diag=True,
-                        show_corr=True,
-                        x_label='y_pred by DeSide', y_label=f'y_true of {dataset_name}',
-                        show_reg_line=False)
-        # plot all cell types in one figure
-        compare_y_y_pred_plot(y_true=generated_cell_frac,
-                              y_pred=predicted_cell_frac_file_path,
-                              show_columns=all_cell_types, result_file_dir=predicted_result_dir,
-                              model_name=f'DeSide', show_metrics=True,
-                              y_label=f'y_pred')
-
-
-def run_step4(tcga_data_dir: str, cancer_types: list, log_file_path: str, model_dir: str,
-              marker_gene_file_path: str, result_dir: str, pred_cell_frac_tcga_dir: str,
-              cancer_purity_file_path: str, all_cell_types: list, model_names: list,
-              signature_score_method: str, one_minus_alpha: bool = False,
-              update_figures: bool = False, outlier_file_path: str = None, pathway_mask: pd.DataFrame = None,
-              method_adding_pathway: str = 'add_to_end', hyper_params: dict = None):
-    """
-    Step4: Predicting cell fractions of TCGA
-    :param tcga_data_dir: str, TCGA data directory
-    :param cancer_types: list, cancer types
-    :param log_file_path: str, log file path
-    :param model_dir: str, model directory
-    :param marker_gene_file_path: str, marker gene file path
-    :param result_dir: str, result directory
-    :param pred_cell_frac_tcga_dir: str, predicted cell fraction of TCGA directory
-    :param cancer_purity_file_path: str, cancer purity file path
-    :param all_cell_types: list, all cell types
-    :param model_names: list, model names
-    :param signature_score_method: str, signature score method
-    :param one_minus_alpha: bool, whether to use 1-alpha as the predicted cell fraction for all cell types
-    :param update_figures: bool, whether to update figures
-    :param outlier_file_path: str, outlier file path
-    :param pathway_mask: dataframe, pathway mask, genes by pathways
-    :param method_adding_pathway: str, method for adding pathway, 'add_to_end' or 'convert'
-    :param hyper_params: dict, hyper parameters for DNN model
-    """
-    # TCGA
-    print_msg("Step 4: Predict cell fraction of TCGA...", log_file_path=log_file_path)
-    # model_name = 'DeSide'
-    for model_name in model_names:
-        bulk_tpm = pd.read_csv(os.path.join(tcga_data_dir, 'merged_tpm.csv'), index_col=0)
-        sample2cancer_type = pd.read_csv(os.path.join(tcga_data_dir, 'tcga_sample_id2cancer_type.csv'), index_col=0)
-        for cancer_type in cancer_types:
-            current_sample_ids = sample2cancer_type.loc[sample2cancer_type['cancer_type'] == cancer_type, :].copy()
-            current_bulk_tpm = bulk_tpm.loc[bulk_tpm.index.isin(current_sample_ids.index.to_list()), :].copy()
-            print(f'current_bulk_tpm: {current_bulk_tpm.shape}')
-            current_result_dir = os.path.join(pred_cell_frac_tcga_dir, model_name, cancer_type)
-            check_dir(current_result_dir)
-            y_pred_file_path = os.path.join(current_result_dir, 'y_predicted_result.csv')
-            if not os.path.exists(y_pred_file_path):
-                print(f'Predicting cell fractions of {cancer_type} samples by model {model_name}...')
-                deside_model = DeSide(model_dir=model_dir)
-                deside_model.predict(input_file=current_bulk_tpm, output_file_path=y_pred_file_path,
-                                     exp_type='TPM', scaling_by_constant=True,
-                                     scaling_by_sample=False, one_minus_alpha=one_minus_alpha,
-                                     pathway_mask=pathway_mask, method_adding_pathway=method_adding_pathway,
-                                     hyper_params=hyper_params)
-            else:
-                print(f'   Previous result existed: {y_pred_file_path}')
-            print(f'   Plot and compare predicted result...')
-            # y_pred_file_path = os.path.join(current_result_dir, 'y_predicted_result.csv')
-            plot_predicted_result(cell_frac_result_fp=y_pred_file_path, bulk_exp_fp=current_bulk_tpm.T,
-                                  cancer_type=cancer_type, model_name=model_name, result_dir=current_result_dir,
-                                  cancer_purity_fp=cancer_purity_file_path, update_figures=update_figures)
-
-        tcga_evaluation(marker_gene_file_path=marker_gene_file_path, total_result_dir=result_dir,
-                        pred_cell_frac_tcga_dir=pred_cell_frac_tcga_dir,
-                        cell_types=all_cell_types, tcga_data_dir=tcga_data_dir,
-                        pre_trained_model_dir=model_dir, model_name=model_name,
-                        signature_score_method=signature_score_method, cancer_types=cancer_types,
-                        update_figures=update_figures, outlier_file_path=outlier_file_path,
-                        pathway_mask=pathway_mask)
-
-        # calculate the distribution of predicted cell proportions in TCGA
-        # model_name = 'DeSide'
-        all_pred_cell_frac_file_path = os.path.join(pred_cell_frac_tcga_dir, model_name,
-                                                    f'all_predicted_cell_fraction_by_{model_name}.csv')
-        pred_cell_frac = pd.read_csv(all_pred_cell_frac_file_path, index_col=0)
-        pred_cell_frac = pred_cell_frac.loc[:, all_cell_types].copy()
-        cell_type2cell_prop_dis = {}
-        bins = np.linspace(0, 1, 11)
-        pred_cell_prop_dis_file_path = os.path.join(pred_cell_frac_tcga_dir, model_name,
-                                                    'pred_cell_frac_distribution.csv')
-        if not os.path.exists(pred_cell_prop_dis_file_path):
-            for ct in all_cell_types:
-                current_cp = pred_cell_frac[ct].values
-                hist, bin_edges = np.histogram(current_cp, bins=bins)
-                cell_type2cell_prop_dis[ct] = hist / len(current_cp)
-            cell_type2cell_prop_dis_df = pd.DataFrame.from_dict(cell_type2cell_prop_dis, orient='index')
-            cell_type2cell_prop_dis_df.to_csv(pred_cell_prop_dis_file_path, float_format='%g')
+# def run_step3(evaluation_dataset2path, log_file_path, result_dir, model_dir,
+#               all_cell_types, one_minus_alpha=False, pathway_mask=None,
+#               method_adding_pathway='add_to_end', hyper_params: dict = None):
+#     """
+#     Step3: Predicting cell fractions of test set and evaluation
+#     :param evaluation_dataset2path: dict, key: dataset name, value: file path
+#     :param log_file_path: str, log file path
+#     :param result_dir: str, result directory
+#     :param model_dir: str, model directory
+#     :param all_cell_types: list, all cell types
+#     :param one_minus_alpha: bool, whether to use 1-alpha as the predicted cell fraction for all cell types
+#     :param pathway_mask: dataframe, pathway mask, genes by pathways
+#     :param method_adding_pathway: str, method for adding pathway, 'add_to_end' or 'convert'
+#     :param hyper_params: dict, hyper parameters for DNN model
+#     """
+#     # Step3, evaluation on test set
+#     print_msg('Step3: Predicting cell fractions of test set and evaluation...',
+#               log_file_path=log_file_path)
+#
+#     for dataset_name, file_path in evaluation_dataset2path.items():
+#         # if 'Test_set' in dataset_name:
+#         print(f'   Evaluating on dataset {dataset_name}...')
+#         predicted_result_dir = os.path.join(result_dir, dataset_name)
+#         check_dir(predicted_result_dir)
+#         predicted_cell_frac_file_path = os.path.join(predicted_result_dir,
+#                                                      f'{dataset_name}_pred_cell_frac.csv')
+#
+#         generated_bulk_gep_fp = file_path
+#         if dataset_name == 'Pre_Test_set':
+#             generated_bulk_gep_fp = './datasets/simulated_bulk_cell_dataset/test_set_nbase3_7ds/' \
+#                                     'simu_bulk_exp_Test_set2_log2cpm1p.h5ad'
+#         generated_cell_frac = ReadH5AD(generated_bulk_gep_fp).get_cell_fraction()
+#
+#         if not os.path.exists(predicted_cell_frac_file_path):
+#             deside_model = DeSide(model_dir=model_dir)
+#             deside_model.predict(input_file=generated_bulk_gep_fp,
+#                                  output_file_path=predicted_cell_frac_file_path,
+#                                  exp_type='log_space', scaling_by_sample=False,
+#                                  scaling_by_constant=True, one_minus_alpha=one_minus_alpha,
+#                                  pathway_mask=pathway_mask, method_adding_pathway=method_adding_pathway,
+#                                  hyper_params=hyper_params)
+#         print('   > Comparing cell frac between y_true and y_pred...')
+#         for cell_type in generated_cell_frac.columns.to_list():
+#             s_plot = ScatterPlot(x=predicted_cell_frac_file_path,
+#                                  y=generated_cell_frac,
+#                                  postfix=f'pred_y_y_{cell_type}')
+#             s_plot.plot(show_columns={'x': cell_type, 'y': cell_type}, fig_size=(8, 8),
+#                         result_file_dir=predicted_result_dir, show_mae=True,
+#                         show_rmse=True, show_diag=True,
+#                         show_corr=True,
+#                         x_label='y_pred by DeSide', y_label=f'y_true of {dataset_name}',
+#                         show_reg_line=False)
+#         # plot all cell types in one figure
+#         compare_y_y_pred_plot(y_true=generated_cell_frac,
+#                               y_pred=predicted_cell_frac_file_path,
+#                               show_columns=all_cell_types, result_file_dir=predicted_result_dir,
+#                               model_name=f'DeSide', show_metrics=True,
+#                               y_label=f'y_pred')
+#
+#
+# def run_step4(tcga_data_dir: str, cancer_types: list, log_file_path: str, model_dir: str,
+#               marker_gene_file_path: str, result_dir: str, pred_cell_frac_tcga_dir: str,
+#               cancer_purity_file_path: str, all_cell_types: list, model_names: list,
+#               signature_score_method: str, one_minus_alpha: bool = False,
+#               update_figures: bool = False, outlier_file_path: str = None, pathway_mask: pd.DataFrame = None,
+#               method_adding_pathway: str = 'add_to_end', hyper_params: dict = None):
+#     """
+#     Step4: Predicting cell fractions of TCGA
+#     :param tcga_data_dir: str, TCGA data directory
+#     :param cancer_types: list, cancer types
+#     :param log_file_path: str, log file path
+#     :param model_dir: str, model directory
+#     :param marker_gene_file_path: str, marker gene file path
+#     :param result_dir: str, result directory
+#     :param pred_cell_frac_tcga_dir: str, predicted cell fraction of TCGA directory
+#     :param cancer_purity_file_path: str, cancer purity file path
+#     :param all_cell_types: list, all cell types
+#     :param model_names: list, model names
+#     :param signature_score_method: str, signature score method
+#     :param one_minus_alpha: bool, whether to use 1-alpha as the predicted cell fraction for all cell types
+#     :param update_figures: bool, whether to update figures
+#     :param outlier_file_path: str, outlier file path
+#     :param pathway_mask: dataframe, pathway mask, genes by pathways
+#     :param method_adding_pathway: str, method for adding pathway, 'add_to_end' or 'convert'
+#     :param hyper_params: dict, hyper parameters for DNN model
+#     """
+#     # TCGA
+#     print_msg("Step 4: Predict cell fraction of TCGA...", log_file_path=log_file_path)
+#     # model_name = 'DeSide'
+#     for model_name in model_names:
+#         bulk_tpm = pd.read_csv(os.path.join(tcga_data_dir, 'merged_tpm.csv'), index_col=0)
+#         sample2cancer_type = pd.read_csv(os.path.join(tcga_data_dir, 'tcga_sample_id2cancer_type.csv'), index_col=0)
+#         for cancer_type in cancer_types:
+#             current_sample_ids = sample2cancer_type.loc[sample2cancer_type['cancer_type'] == cancer_type, :].copy()
+#             current_bulk_tpm = bulk_tpm.loc[bulk_tpm.index.isin(current_sample_ids.index.to_list()), :].copy()
+#             print(f'current_bulk_tpm: {current_bulk_tpm.shape}')
+#             current_result_dir = os.path.join(pred_cell_frac_tcga_dir, model_name, cancer_type)
+#             check_dir(current_result_dir)
+#             y_pred_file_path = os.path.join(current_result_dir, 'y_predicted_result.csv')
+#             if not os.path.exists(y_pred_file_path):
+#                 print(f'Predicting cell fractions of {cancer_type} samples by model {model_name}...')
+#                 deside_model = DeSide(model_dir=model_dir)
+#                 deside_model.predict(input_file=current_bulk_tpm, output_file_path=y_pred_file_path,
+#                                      exp_type='TPM', scaling_by_constant=True,
+#                                      scaling_by_sample=False, one_minus_alpha=one_minus_alpha,
+#                                      pathway_mask=pathway_mask, method_adding_pathway=method_adding_pathway,
+#                                      hyper_params=hyper_params)
+#             else:
+#                 print(f'   Previous result existed: {y_pred_file_path}')
+#             print(f'   Plot and compare predicted result...')
+#             # y_pred_file_path = os.path.join(current_result_dir, 'y_predicted_result.csv')
+#             plot_predicted_result(cell_frac_result_fp=y_pred_file_path, bulk_exp_fp=current_bulk_tpm.T,
+#                                   cancer_type=cancer_type, model_name=model_name, result_dir=current_result_dir,
+#                                   cancer_purity_fp=cancer_purity_file_path, update_figures=update_figures)
+#
+#         tcga_evaluation(marker_gene_file_path=marker_gene_file_path, total_result_dir=result_dir,
+#                         pred_cell_frac_tcga_dir=pred_cell_frac_tcga_dir,
+#                         cell_types=all_cell_types, tcga_data_dir=tcga_data_dir,
+#                         pre_trained_model_dir=model_dir, model_name=model_name,
+#                         signature_score_method=signature_score_method, cancer_types=cancer_types,
+#                         update_figures=update_figures, outlier_file_path=outlier_file_path,
+#                         pathway_mask=pathway_mask)
+#
+#         # calculate the distribution of predicted cell proportions in TCGA
+#         # model_name = 'DeSide'
+#         all_pred_cell_frac_file_path = os.path.join(pred_cell_frac_tcga_dir, model_name,
+#                                                     f'all_predicted_cell_fraction_by_{model_name}.csv')
+#         pred_cell_frac = pd.read_csv(all_pred_cell_frac_file_path, index_col=0)
+#         pred_cell_frac = pred_cell_frac.loc[:, all_cell_types].copy()
+#         cell_type2cell_prop_dis = {}
+#         bins = np.linspace(0, 1, 11)
+#         pred_cell_prop_dis_file_path = os.path.join(pred_cell_frac_tcga_dir, model_name,
+#                                                     'pred_cell_frac_distribution.csv')
+#         if not os.path.exists(pred_cell_prop_dis_file_path):
+#             for ct in all_cell_types:
+#                 current_cp = pred_cell_frac[ct].values
+#                 hist, bin_edges = np.histogram(current_cp, bins=bins)
+#                 cell_type2cell_prop_dis[ct] = hist / len(current_cp)
+#             cell_type2cell_prop_dis_df = pd.DataFrame.from_dict(cell_type2cell_prop_dis, orient='index')
+#             cell_type2cell_prop_dis_df.to_csv(pred_cell_prop_dis_file_path, float_format='%g')
 
 
 def create_model(model_config: VAEConfig, encoder_cls: Type[Encoder_MLP],
