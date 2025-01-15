@@ -29,6 +29,7 @@ from .evaluation import get_core_zone_of_pca
 from .pub_func import get_ccc
 from .pub_func import get_x_by_pathway_network
 from .pub_func import non_log2cpm_tensor, non_log2log_cpm_tensor, log_exp2cpm_tensor
+from .pub_func import set_output_dir
 
 
 subcell_type2abbr = {'B Cells (1)': 'B1', 'B Cells (2)': 'B2', 'B Cells (3)': 'B3', 'B Cells (4)': 'B4',

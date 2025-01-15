@@ -86,20 +86,17 @@ class TrainingPipeline(Pipeline):
             parameters. If None, a default configuration is used.
         trainer_cls: The trainer class to use.
             Defaults to BaseTrainerL.
-        n_early_stopping_patience (int): The number of epochs to wait before stopping
-            the training if no improvement is observed. Default: 10.
-        output_dir (Optional[str]): The directory where the model will be saved. If None,
+        result_dir (str): The directory where the model will be saved.
     """
 
     def __init__(self,
                  model: BaseAE = None,
                  trainer_cls: Type[BaseTrainerL] = None,
                  training_config=None,
-                 n_early_stopping_patience: int = 10,
-                 output_dir: str = None):
+                 result_dir: str = None):
         super().__init__()
         if training_config is None:
-            training_config = BaseTrainerConfig()
+            training_config = BaseTrainerConfig(name='VAETrainerConfig')
 
         if not isinstance(training_config, BaseTrainerConfig):
             raise AssertionError(
@@ -110,8 +107,9 @@ class TrainingPipeline(Pipeline):
         self.model = model
         self.training_config = training_config
         self.trainer_cls = trainer_cls
-        self.n_early_stopping_patience = n_early_stopping_patience
-        self.final_output_dir = None
+        self.n_early_stopping_patience = training_config.n_early_stopping_patience
+        self.result_dir = result_dir  # model directory
+        # self.final_output_dir = os.path.join(self.result_dir, "final_model")
 
     def _prepare_data(
             self,
@@ -151,7 +149,6 @@ class TrainingPipeline(Pipeline):
         eval_data: Union[
             np.ndarray, torch.Tensor, Dataset, DataLoader,
         ] = None,
-        # callbacks: List[TrainingCallback] = None,
     ) -> Any:
         """
         Launch the model training on the provided data.
@@ -165,41 +162,13 @@ class TrainingPipeline(Pipeline):
         """
 
         # Initialize variables for datasets and dataloaders
-        # train_dataset, eval_dataset = None, None
-        # train_dataloader, eval_dataloader = None, None
-        #
-        # if isinstance(train_data, DataLoader):
-        #     train_dataloader = train_data
-        # elif isinstance(train_data, (np.ndarray, torch.Tensor)):
-        #     logger.info("Preprocessing train data...")
-        #     train_data = self.data_processor.process_data(train_data)
-        #     train_dataset = self.data_processor.to_dataset(train_data)
-        #     logger.info("Checking train dataset...")
-        #     _check_dataset(train_dataset)
-        # else:
-        #     train_dataset = train_data
-        #     logger.info("Checking train dataset...")
-        #     _check_dataset(train_dataset)
-        #
-        # if eval_data is not None:
-        #     if isinstance(eval_data, torch.utils.data.DataLoader):
-        #         eval_dataloader = eval_data
-        #     elif isinstance(eval_data, (np.ndarray, torch.Tensor)):
-        #         logger.info("Preprocessing eval data...\n")
-        #         eval_data = self.data_processor.process_data(eval_data)
-        #         eval_dataset = self.data_processor.to_dataset(eval_data)
-        #         logger.info("Checking eval dataset...")
-        #         _check_dataset(eval_dataset)
-        #     else:
-        #         eval_dataset = eval_data
-        #         logger.info("Checking eval dataset...")
-        #         _check_dataset(eval_dataset)
 
         train_dataset = self._prepare_data(train_data, "train")
         eval_dataset = self._prepare_data(eval_data, "eval")
         logger.info(f"Using {self.trainer_cls.__name__} for training.")
         trainer = self.trainer_cls(
             model=self.model,
+            result_dir=self.result_dir,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             training_config=self.training_config,
@@ -207,7 +176,7 @@ class TrainingPipeline(Pipeline):
         )
 
         self.trainer = trainer
-        output_dir = trainer.set_output_dir()
-        self.final_output_dir = os.path.join(output_dir, "final_model")
-        trainer.train(final_dir=self.final_output_dir)
+        # output_dir = trainer.set_output_dir()
+        # self.final_output_dir =
+        trainer.train()
         # self.final_output_dir = trainer.train()

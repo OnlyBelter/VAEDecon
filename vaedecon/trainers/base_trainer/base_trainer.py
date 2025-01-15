@@ -137,6 +137,7 @@ class BaseTrainerL:
     def __init__(
         self,
         model: BaseAE,
+        result_dir: str,
         train_dataset: Union[BaseDataset, DataLoader],
         eval_dataset: Optional[Union[BaseDataset, DataLoader]] = None,
         training_config: Optional[BaseTrainerConfig] = None,
@@ -146,6 +147,7 @@ class BaseTrainerL:
 
         Args:
             model: The BaseAE model to train.
+            result_dir: The directory to save the model checkpoints and logs.
             train_dataset: The training dataset.
             eval_dataset: The evaluation dataset.
             training_config: The training configuration.
@@ -161,7 +163,7 @@ class BaseTrainerL:
         self.training_config = training_config
         self.model_name = model.model_name
         self.n_early_stopping_patience = n_early_stopping_patience
-        self.rank = self.training_config.rank
+        # self.rank = self.training_config.rank
 
         if isinstance(train_dataset, DataLoader):
             train_loader = train_dataset
@@ -203,39 +205,41 @@ class BaseTrainerL:
 
         self.pl_model = PLTrainer(model, training_config)
 
-        self.training_dir = self._set_output_dir()
+        self.model_dir = result_dir
 
-    def _set_output_dir(self) -> str:
-        """Sets the output directory for saving checkpoints and logs."""
-        if not os.path.exists(self.training_config.output_dir):
-            os.makedirs(self.training_config.output_dir, exist_ok=True)
-            logger.info(
-                f"Created {self.training_config.output_dir} folder since did not exist.\n"
-            )
+    # def _set_output_dir(self) -> str:
+    #     """Sets the output directory for saving checkpoints and logs."""
+    #     if not os.path.exists(self.training_config.output_dir):
+    #         os.makedirs(self.training_config.output_dir, exist_ok=True)
+    #         logger.info(
+    #             f"Created {self.training_config.output_dir} folder since did not exist.\n"
+    #         )
+    #
+    #     training_signature = (
+    #         str(datetime.datetime.now())[0:19].replace(" ", "_").replace(":", "-")
+    #     )
+    #
+    #     model_dir = os.path.join(
+    #         self.training_config.output_dir,
+    #         f"{self.model_name}_training_{training_signature}",
+    #     )
+    #
+    #     if not os.path.exists(model_dir):
+    #         os.makedirs(model_dir, exist_ok=True)
+    #         logger.info(
+    #             f"Created {model_dir}. \n"
+    #             "Training config, checkpoints and final model will be saved here.\n"
+    #         )
+    #     return model_dir
 
-        training_signature = (
-            str(datetime.datetime.now())[0:19].replace(" ", "_").replace(":", "-")
-        )
-
-        training_dir = os.path.join(
-            self.training_config.output_dir,
-            f"{self.model_name}_training_{training_signature}",
-        )
-
-        if not os.path.exists(training_dir):
-            os.makedirs(training_dir, exist_ok=True)
-            logger.info(
-                f"Created {training_dir}. \n"
-                "Training config, checkpoints and final model will be saved here.\n"
-            )
-        return training_dir
-
-    def train(self, final_dir: str) -> str:
+    def train(self) -> None:
         """Trains the model using PyTorch Lightning."""
         set_seed(self.training_config.seed)
+        # final_dir = self.model_dir
+        # model_par_dir = os.path.dirname(self.model_dir)
 
         checkpoint_callback = ModelCheckpoint(
-            dirpath=self.training_dir,
+            dirpath=self.model_dir,
             filename="checkpoint_{epoch}",
             every_n_epochs=self.training_config.steps_saving
             if self.training_config.steps_saving
@@ -243,7 +247,7 @@ class BaseTrainerL:
             save_top_k=0,
         )
         lr_monitor = LearningRateMonitor(logging_interval='epoch')
-        csv_logger = CSVLogger(save_dir=self.training_dir, name="training_logs")
+        csv_logger = CSVLogger(save_dir=self.model_dir, name="training_logs")
         early_stop_callback = EarlyStopping(monitor="val_loss", patience=self.n_early_stopping_patience,
                                             mode="min", min_delta=0.001)
 
@@ -262,12 +266,12 @@ class BaseTrainerL:
             val_dataloaders=self.eval_loader,
         )
 
-        self.save_model(final_dir)
+        self.save_model(self.model_dir)
 
         logger.info("Training ended!")
-        logger.info(f"Saved final model in {final_dir}")
+        logger.info(f"Saved final model in {self.model_dir}")
 
-        return final_dir
+        # return final_dir
 
     def save_model(self, dir_path: str):
         """Saves the final model and training configuration."""
@@ -278,9 +282,9 @@ class BaseTrainerL:
         self.training_config.save_json(dir_path, "training_config")
 
         try:
-            losses_df = pd.read_csv(os.path.join(self.training_dir, "training_logs", "metrics.csv"))
+            losses_df = pd.read_csv(os.path.join(self.model_dir, "training_logs", "metrics.csv"))
         except FileNotFoundError:
-            losses_df = pd.read_csv(os.path.join(self.training_dir, "training_logs", "version_0", "metrics.csv"))
+            losses_df = pd.read_csv(os.path.join(self.model_dir, "training_logs", "version_0", "metrics.csv"))
         losses_df.to_csv(os.path.join(dir_path, 'losses.csv'))
 
     def predict(self) -> Dict[str, torch.Tensor]:
@@ -288,39 +292,12 @@ class BaseTrainerL:
         inputs = next(iter(self.eval_loader))
         return self.pl_model.predict(inputs)
 
-    def set_output_dir(self):
-        # Create folder
-        if not os.path.exists(self.training_config.output_dir) and self.is_main_process:
-            os.makedirs(self.training_config.output_dir, exist_ok=True)
-            logger.info(
-                f"Created {self.training_config.output_dir} folder since did not exist.\n"
-            )
-
-        _training_signature = (
-            str(datetime.datetime.now())[0:19].replace(" ", "_").replace(":", "-")
-        )
-
-        training_dir = os.path.join(
-            self.training_config.output_dir,
-            f"{self.model_name}_training_{_training_signature}",
-        )
-
-        # self.training_dir = training_dir
-
-        if not os.path.exists(training_dir) and self.is_main_process:
-            os.makedirs(training_dir, exist_ok=True)
-            logger.info(
-                f"Created {training_dir}. \n"
-                "Training config, checkpoints and final model will be saved here.\n"
-            )
-        return training_dir
-
-    @property
-    def is_main_process(self):
-        if self.rank == 0 or self.rank == -1:
-            return True
-        else:
-            return False
+    # @property
+    # def is_main_process(self):
+    #     if self.rank == 0 or self.rank == -1:
+    #         return True
+    #     else:
+    #         return False
 
     def __call__(self, *args, **kwargs):
         pass

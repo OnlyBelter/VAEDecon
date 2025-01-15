@@ -315,18 +315,19 @@ def train_model(
     trainer_cls: Type[BaseTrainerL],
     config: BaseTrainerConfig,
     device: str,
-    n_early_stopping_patience: int = 3,
-) -> Tuple[TrainingPipeline, str]:
+    result_dir: str,
+) -> None:
     """Trains the model using the training pipeline."""
     training_pipeline = TrainingPipeline(
         training_config=config,
         model=model.to(device),
         trainer_cls=trainer_cls,
-        n_early_stopping_patience=n_early_stopping_patience,
+        result_dir=result_dir,
+        # n_early_stopping_patience=n_early_stopping_patience,
     )
     training_pipeline(train_data=train_set, eval_data=val_set)
-    output_dir = training_pipeline.final_output_dir
-    return training_pipeline, output_dir
+    # output_dir = training_pipeline.final_output_dir
+    # return training_pipeline, output_dir
 
 
 def save_metadata(dataset: GEPDataset, output_dir: str, model_config: VAEConfig) -> None:

@@ -20,6 +20,15 @@ from anndata import AnnData, read_h5ad
 from sklearn.metrics import mean_squared_error, r2_score, root_mean_squared_error
 import gzip
 import shutil
+import datetime
+import logging
+
+logger = logging.getLogger(__name__)
+
+# make it print to the console.
+console = logging.StreamHandler()
+logger.addHandler(console)
+logger.setLevel(logging.INFO)
 
 default_core_marker_genes = {'Cancer Cells': ['KRT19', 'KRT18', 'KRT8', 'EPCAM'],
                              'CD4 T': ['BATF', 'ICOS', 'CD4', 'IL7R', 'FOXP3', 'TIGIT'],
@@ -993,6 +1002,32 @@ def get_x_by_pathway_network(x: pd.DataFrame, pathway_network: bool, pathway_mas
     else:
         x = x.values
     return x
+
+
+def set_output_dir(output_dir: str, model_name: str):
+    """Create folder by current timestamp"""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+        logger.info(
+            f"Created {output_dir} folder since did not exist.\n"
+        )
+
+    _training_signature = (
+        str(datetime.datetime.now())[0:19].replace(" ", "_").replace(":", "-")
+    )
+
+    training_dir = os.path.join(
+        output_dir,
+        f"{model_name}_training_{_training_signature}",
+    )
+
+    if not os.path.exists(training_dir):
+        os.makedirs(training_dir, exist_ok=True)
+        logger.info(
+            f"Created {training_dir}. \n"
+            "Training config, checkpoints and final model will be saved here.\n"
+        )
+    return training_dir
 
 
 if __name__ == '__main__':

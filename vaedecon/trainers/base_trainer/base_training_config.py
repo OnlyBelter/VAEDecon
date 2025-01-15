@@ -71,6 +71,8 @@ class BaseTrainerConfig(BaseConfig):
     master_addr: str = field(default="localhost")
     master_port: str = field(default="12345")
     amp: bool = False
+    # The number of epochs to wait before stopping the training if no improvement is observed.
+    n_early_stopping_patience: int = 5
 
     def __post_init__(self):
         """Check compatibility and sets up distributed training"""
