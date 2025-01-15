@@ -1013,7 +1013,7 @@ def set_output_dir(output_dir: str, model_name: str):
         )
 
     _training_signature = (
-        str(datetime.datetime.now())[0:19].replace(" ", "_").replace(":", "-")
+        str(datetime.datetime.now())[0:16].replace(" ", "_").replace(":", "-")
     )
 
     training_dir = os.path.join(
