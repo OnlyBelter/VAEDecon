@@ -346,7 +346,7 @@ def evaluate_model(
     trained_model: AutoModel,
     test_set: GEPDataset,
     result_dir: str,
-    model_config: VAEConfig,
+    # model_config: VAEConfig,
     output_dir: str,
     device: str,
 ) -> Dict[str, Any]:
