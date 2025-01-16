@@ -16,7 +16,7 @@ import pandas as pd
 from torch.utils.data import Dataset
 from torch.utils.data._utils.collate import default_collate
 from ..utility.read_file import ReadExp, ReadH5AD
-from ..utility import non_log2log_cpm, check_dir
+from ..utility import non_log2log_cpm, check_dir, log_message
 
 logger = logging.getLogger(__name__)
 
@@ -120,10 +120,10 @@ class GEPDataset(Dataset):
         all_data = []
         all_cell_prop = []
         for path in file_path:
-            logger.info(f"Reading data from {path}")
+            log_message(f"Reading data from {path}")
             h5ad_obj = ReadH5AD(path)  # read the data in log2(TPM + 1) format
             gep_data = h5ad_obj.get_df(convert_to_tpm=True)  # get the data in pandas DataFrame format in TPM
-            logger.info(f"Data shape: {gep_data.shape}")
+            log_message(f"Data shape: {gep_data.shape}")
             cell_prop = h5ad_obj.get_cell_fraction()
             all_data.append(gep_data)
             all_cell_prop.append(cell_prop)
@@ -134,7 +134,7 @@ class GEPDataset(Dataset):
             self.gep_data = self.gep_data.loc[:, gene_list]
         # rescaling the data to log2(CPM + 1) format after merging
         self.gep_data = non_log2log_cpm(self.gep_data, transpose=False)
-        logger.info(f"Data shape after merging: {self.gep_data.shape}")
+        log_message(f"Data shape after merging: {self.gep_data.shape}")
         # self.gep_data = anndata.concat(all_data)
         # self.gep_data = anndata.read_h5ad(file_path, backed='r')  # read the data in log2(TPM + 1) format
         self.data = self.gep_data.values.astype(np.float32)  # get the data in numpy format

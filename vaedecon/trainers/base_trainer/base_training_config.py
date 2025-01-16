@@ -73,6 +73,7 @@ class BaseTrainerConfig(BaseConfig):
     amp: bool = False
     # The number of epochs to wait before stopping the training if no improvement is observed.
     n_early_stopping_patience: int = 5
+    devices: Union[int, str] = 1  # the number of gpus to use for training
 
     def __post_init__(self):
         """Check compatibility and sets up distributed training"""

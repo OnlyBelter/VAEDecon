@@ -12,6 +12,7 @@ from ..data.preprocessors import DataProcessor
 from ..models import BaseAE
 from ..trainers import BaseTrainerConfig, BaseTrainerL
 from .base_pipeline import Pipeline
+from ..utility import log_message
 
 logger = logging.getLogger(__name__)
 

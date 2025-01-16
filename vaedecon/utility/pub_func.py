@@ -18,6 +18,7 @@ from scipy.sparse import csr_matrix
 from sklearn.decomposition import PCA
 from anndata import AnnData, read_h5ad
 from sklearn.metrics import mean_squared_error, r2_score, root_mean_squared_error
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
 import gzip
 import shutil
 import datetime
@@ -1004,6 +1005,7 @@ def get_x_by_pathway_network(x: pd.DataFrame, pathway_network: bool, pathway_mas
     return x
 
 
+@rank_zero_only
 def set_output_dir(output_dir: str, model_name: str):
     """Create folder by current timestamp"""
     if not os.path.exists(output_dir):
@@ -1013,7 +1015,7 @@ def set_output_dir(output_dir: str, model_name: str):
         )
 
     _training_signature = (
-        str(datetime.datetime.now())[0:16].replace(" ", "_").replace(":", "-")
+        str(datetime.datetime.now())[0:19].replace(" ", "_").replace(":", "-")
     )
 
     training_dir = os.path.join(
@@ -1028,6 +1030,22 @@ def set_output_dir(output_dir: str, model_name: str):
             "Training config, checkpoints and final model will be saved here.\n"
         )
     return training_dir
+
+
+@rank_zero_only
+def log_message(message, level='info'):
+    """Log message to the console"""
+    if level == 'info':
+        logger.info(message)
+    elif level == 'warning':
+        logger.warning(message)
+    elif level == 'error':
+        logger.error(message)
+    elif level == 'critical':
+        logger.critical(message)
+    else:
+        logger.info(message)
+        logger.warning(f'Unknown log level: {level}')
 
 
 if __name__ == '__main__':

@@ -15,5 +15,7 @@ export BLOSC_DIR=/opt/homebrew/opt/c-blosc
 # if you have a GPU, install pytorch with CUDA support first (optional)
 pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu118
 
+# sometimes you may need to install the package annoy manually
+conda install conda-forge::python-annoy
 pip install vaedecon
 ```

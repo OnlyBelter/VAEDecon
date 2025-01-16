@@ -254,7 +254,7 @@ class BaseTrainerL:
         trainer = L.Trainer(
             max_epochs=self.training_config.num_epochs,
             accelerator="auto",
-            devices="auto",
+            devices=self.training_config.devices,
             callbacks=[checkpoint_callback, lr_monitor, early_stop_callback],
             logger=csv_logger,
             precision=16 if self.training_config.amp else 32,
