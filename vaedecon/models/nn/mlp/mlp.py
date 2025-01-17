@@ -143,6 +143,7 @@ class Decoder_MLP(BaseDecoder):
         self.input_dim = args.input_dim  # input dimension of the Encoder
         self.latent_dim = args.latent_dim
         self.hidden_dims = args.hidden_dims if hasattr(args, 'hidden_dims') else [512, 512, 1024]
+        self.relu = nn.ReLU()
 
         layers = nn.ModuleList()
         input_size = self.latent_dim
@@ -156,7 +157,13 @@ class Decoder_MLP(BaseDecoder):
                 )
             )
             input_size = hidden_dim
-        layers.append(nn.Linear(self.hidden_dims[-1], np.prod(self.input_dim)))  # output layer
+        # the last layer
+        layers.append(nn.Sequential(
+            nn.Linear(self.hidden_dims[-1], np.prod(self.input_dim)),
+            nn.Softplus(beta=100, threshold=1),  # make sure the output is positive
+            # ClampLayer(min_val=0, max_val=1),   # clip the output to [0, 1]
+            ),
+        )
 
         self.layers = layers
         self.depth = len(layers)
@@ -204,5 +211,16 @@ class Decoder_MLP(BaseDecoder):
                 if i + 1 in output_layer_levels:
                     output[f"reconstruction_layer_{i+1}"] = out
 
+        # out = torch.clamp(self.relu(out), max=1.0)
         output["reconstruction"] = out
         return output
+
+
+class ClampLayer(nn.Module):
+    def __init__(self, min_val, max_val):
+        super(ClampLayer, self).__init__()
+        self.min_val = min_val
+        self.max_val = max_val
+
+    def forward(self, x):
+        return torch.clamp(x, self.min_val, self.max_val)
