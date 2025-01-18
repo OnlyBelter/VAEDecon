@@ -233,7 +233,8 @@ class DecoderMLP(BaseDecoder):
             elif i < max_depth - 1:
                 if out.size(-1) != latent_output.size(-1):
                     # project the output of the first layer to the output of the current layer
-                    latent_output = nn.Linear(latent_output.size(-1), out.size(-1))(latent_output)
+                    latent_output = nn.Linear(latent_output.size(-1),
+                                              out.size(-1)).to(out.device)(latent_output)
                 # residual connection
                 out = out + latent_output
             out = layer['dropout'](out)
