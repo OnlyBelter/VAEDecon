@@ -29,3 +29,7 @@ class VAEConfig(BaseModelConfig):
         "kld": 0.2,  # coefficient for the KL divergence loss
         "cell_prop": 0.3,  # coefficient for the prediction loss of cell type proportions
     }  # coefficient for each term in the total loss function
+    encoder_hidden_dims: list[int] = [1024, 512, 512]
+    decoder_hidden_dims: list[int] = [512, 512, 1024]
+    encoder_dropout_rate: list[float] = [0.1, 0.1, 0.1]
+    decoder_dropout_rate: list[float] = [0.1, 0.1, 0.1]

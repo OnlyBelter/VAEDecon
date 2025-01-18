@@ -16,7 +16,7 @@ from ..plot import (compare_exp_and_cell_fraction, plot_predicted_result,
 
 from ..data import GEPDataset
 from ..models import AutoModel
-from ..models.nn import Encoder_MLP, Decoder_MLP, PositionalEncoding
+from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding
 from ..models.vae import VAE, VAEConfig
 from ..trainers import BaseTrainerConfig, BaseTrainerL
 from ..pipelines.training import TrainingPipeline
@@ -292,8 +292,8 @@ def tcga_evaluation(marker_gene_file_path, total_result_dir, pred_cell_frac_tcga
 #             cell_type2cell_prop_dis_df.to_csv(pred_cell_prop_dis_file_path, float_format='%g')
 
 
-def create_model(model_config: VAEConfig, encoder_cls: Type[Encoder_MLP],
-                 decoder_cls: Type[Decoder_MLP]) -> VAE:
+def create_model(model_config: VAEConfig, encoder_cls: Type[EncoderMLP],
+                 decoder_cls: Type[DecoderMLP]) -> VAE:
     """Creates the VAE model."""
     model = VAE(
         model_config=model_config,

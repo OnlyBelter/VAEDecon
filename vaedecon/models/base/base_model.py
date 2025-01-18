@@ -10,7 +10,7 @@ import torch
 import lightning as L
 from ...data.datasets import BaseDataset, DatasetOutput
 from ...models.auto_model import AutoConfig
-from ..nn import BaseDecoder, BaseEncoder, Encoder_MLP
+from ..nn import BaseDecoder, BaseEncoder, EncoderMLP
 from ..nn.default_architectures import Decoder_AE_MLP
 from .base_config import BaseModelConfig, EnvironmentConfig
 from ...customexception import BadInheritanceError
@@ -57,7 +57,7 @@ class BaseAE(L.LightningModule):
                 raise AttributeError(
                     "Input dimension ('input_dim') must be set in BaseModelConfig to build the encoder automatically."
                 )
-            encoder = Encoder_MLP(model_config)
+            encoder = EncoderMLP(model_config)
             self.model_config.uses_default_encoder = True
         else:
             self.model_config.uses_default_encoder = False
