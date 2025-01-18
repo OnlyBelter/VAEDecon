@@ -105,7 +105,8 @@ class EncoderMLP(BaseEncoder):
             elif i < max_depth - 1:
                 if out.size(-1) != first_layer_output.size(-1):
                     # project the output of the first layer to the output of the current layer
-                    first_layer_output = nn.Linear(first_layer_output.size(-1), out.size(-1))(first_layer_output)
+                    first_layer_output = nn.Linear(first_layer_output.size(-1),
+                                                   out.size(-1)).to(out.device)(first_layer_output)
                 # residual connection
                 out = out + first_layer_output
             out = layer['dropout'](out)
