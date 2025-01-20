@@ -100,15 +100,15 @@ class EncoderMLP(BaseEncoder):
             out = layer['linear'](out)
             out = layer['norm'](out)
             out = layer['activation'](out)
-            if i == 0:
-                first_layer_output = out
-            elif i < max_depth - 1:
-                if out.size(-1) != first_layer_output.size(-1):
-                    # project the output of the first layer to the output of the current layer
-                    first_layer_output = nn.Linear(first_layer_output.size(-1),
-                                                   out.size(-1)).to(out.device)(first_layer_output)
-                # residual connection
-                out = out + first_layer_output
+            # if i == 0:
+            #     first_layer_output = out
+            # elif i < max_depth - 1:
+            #     if out.size(-1) != first_layer_output.size(-1):
+            #         # project the output of the first layer to the output of the current layer
+            #         first_layer_output = nn.Linear(first_layer_output.size(-1),
+            #                                        out.size(-1)).to(out.device)(first_layer_output)
+            #     # residual connection
+            #     out = out + first_layer_output
             out = layer['dropout'](out)
 
             if output_layer_levels is not None:
@@ -228,15 +228,15 @@ class DecoderMLP(BaseDecoder):
             out = layer['linear'](out)
             out = layer['norm'](out)
             out = layer['activation'](out)
-            if i == 0:
-                latent_output = out
-            elif i < max_depth - 1:
-                if out.size(-1) != latent_output.size(-1):
-                    # project the output of the first layer to the output of the current layer
-                    latent_output = nn.Linear(latent_output.size(-1),
-                                              out.size(-1)).to(out.device)(latent_output)
-                # residual connection
-                out = out + latent_output
+            # if i == 0:
+            #     latent_output = out
+            # elif i < max_depth - 1:
+            #     if out.size(-1) != latent_output.size(-1):
+            #         # project the output of the first layer to the output of the current layer
+            #         latent_output = nn.Linear(latent_output.size(-1),
+            #                                   out.size(-1)).to(out.device)(latent_output)
+            #     # residual connection
+            #     out = out + latent_output
             out = layer['dropout'](out)
 
             if output_layer_levels is not None:
