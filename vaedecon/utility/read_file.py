@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import numpy as np
@@ -7,7 +8,7 @@ from typing import Union
 from scipy.sparse import csr_matrix
 from sklearn import preprocessing as pp
 from .pub_func import (log_exp2cpm, read_df, non_log2log_cpm,
-                       non_log2cpm, get_inx2cell_type)
+                       non_log2cpm, get_inx2cell_type, log_message)
 
 
 class ReadH5AD(object):
@@ -180,14 +181,14 @@ class ReadExp(object):
         not_exist_in_gene_list = [i for i in gene_list if i not in common_genes]
         removed_genes = [i for i in self.exp.columns if i not in common_genes]
         print(f'   {len(common_genes)} common genes will be used, {len(removed_genes)} genes will be removed.')
-        self.exp = self.exp.loc[:, common_genes].copy()
+        self.exp = self.exp.loc[:, common_genes]
         if fill_not_exist and (len(not_exist_in_gene_list) != 0):
             print(f'   {len(not_exist_in_gene_list)} genes are not in current dataset, 0 will be filled')
             _not_exist_exp = pd.DataFrame(np.zeros((self.exp.shape[0], len(not_exist_in_gene_list))),
                                           index=self.exp.index,
                                           columns=not_exist_in_gene_list)
             self.exp = pd.concat([self.exp, _not_exist_exp], axis=1)
-            self.exp = self.exp.loc[:, gene_list].copy()
+            self.exp = self.exp.loc[:, gene_list]
         if not pathway_list:
             if self.file_type == 'log_space':  # scaling to TPM after alignment
                 self.to_tpm()
@@ -317,3 +318,35 @@ def read_gene_set(gene_set_file_path: list, max_n_genes: int = 300) -> pd.DataFr
         gene_set_df.loc[genes, gs] = 1
     gene_set_df.fillna(0, inplace=True)
     return gene_set_df
+
+
+def find_sct_gep_by_id(sct_gep_dataset_file_path: str, sample2cell_id_file_path: str, query_ids: list,
+                       cell_types: list, gene_list: list, n_samples: int = 3, result_dir: str = None,
+                       selected_sample2cell_id_file_name: str = None):
+    sample2cell_ids = pd.read_csv(sample2cell_id_file_path, index_col=0)
+    cell_id_df = sample2cell_ids.loc[query_ids, ['cell_type', 'selected_cell_id']]
+    cell_ids = cell_id_df['selected_cell_id'].tolist()
+    log_message('Reading SCT GEPs...')
+    sct_gep_obj = ReadH5AD(sct_gep_dataset_file_path)
+    sct_geps = sct_gep_obj.get_df().loc[cell_ids, :].copy()
+    del sct_gep_obj
+    sct_gep_obj = ReadExp(sct_geps, exp_type='log_space')
+    del sct_geps
+    sct_gep_obj.align_with_gene_list(gene_list=gene_list, fill_not_exist=True)
+    sct_geps = sct_gep_obj.get_exp()
+    del sct_gep_obj
+    log_message('Querying SCT GEPs by cell type...')
+    if result_dir is not None:
+        for cell_type in cell_types:
+            cell_id_ct = cell_id_df.loc[cell_id_df['cell_type'] == cell_type, 'selected_cell_id'].tolist()
+            selected_sct_gep_ct = sct_geps.loc[cell_id_ct, :]
+            result_file_path = os.path.join(result_dir, f"sc_gep_{cell_type}_top{n_samples}_samples.csv")
+            selected_sct_gep_ct.T.to_csv(result_file_path)
+            del selected_sct_gep_ct
+    else:
+        cell_type2geps = {}
+        for cell_type in cell_types:
+            cell_id_ct = cell_id_df.loc[cell_id_df['cell_type'] == cell_type, 'selected_cell_id'].tolist()
+            cell_type2geps[cell_type] = sct_geps.loc[cell_id_ct, :]
+        return cell_type2geps
+    cell_id_df.to_csv(os.path.join(result_dir, selected_sample2cell_id_file_name))

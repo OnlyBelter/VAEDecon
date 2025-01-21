@@ -56,11 +56,14 @@ class VAE(BaseAE):
         y = inputs.get("labels")  # cell proportions of 16 cell types
 
         encoder_output = self.encoder(x=x, y=y)
-        mu, log_var, pred_cell_prop = (
+        mu, log_var = (
             encoder_output.embedding,
             encoder_output.log_var,
-            encoder_output.cell_prop,
         )
+        if self.model_config.predict_cell_prop:
+            pred_cell_prop = encoder_output.cell_prop,
+        else:
+            pred_cell_prop = None
         # log_var, pred_cell_prop = encoder_output.log_var, encoder_output.cell_prop
         mu_deconv = encoder_output.embedding_all_types  # (batch_size, latent_dim, n_cell_types)
         # cell_type_existed = encoder_output.cell_type_existed  # (batch_size, n_cell_types, 1)
@@ -87,8 +90,10 @@ class VAE(BaseAE):
         recon_x_all_types = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
         if y is not None:
             recon_x_conv = torch.matmul(recon_x_all_types, y.reshape(-1, n_cell_types, 1))
-        else:
+        elif pred_cell_prop is not None:
             recon_x_conv = torch.matmul(recon_x_all_types, pred_cell_prop.reshape(-1, n_cell_types, 1))
+        else:
+            raise ValueError("y or pred_cell_prop must be provided.")
         # convert recon_x_conv to log2(TPM + 1) format
         recon_x_conv = non_log2log_cpm_tensor(recon_x_conv, transpose=True)
         if self.model_config.scaling_by_constant:
@@ -164,14 +169,14 @@ class VAE(BaseAE):
         kld = - torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
 
         # cell proportion loss
-        if y is not None:
+        cell_prop_loss = torch.zeros_like(kld)
+        if y is not None and pred_cell_prop is not None:
             cell_prop_loss = F.mse_loss(
                 pred_cell_prop.reshape(y.shape[0], -1),  # batch_size x features (cell proportions)
                 y.reshape(y.shape[0], -1),
                 reduction="none"
             ).sum(dim=-1)
-        else:
-            cell_prop_loss = torch.zeros_like(kld)
+
         # print('recon_loss_by_decoder.shape', recon_loss_by_decoder.shape, 'kld.shape', kld.shape,
         #       'cell_prop_loss.shape', cell_prop_loss.shape)
         lo = self.model_config.loss_coefficient

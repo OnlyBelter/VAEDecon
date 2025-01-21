@@ -28,6 +28,7 @@ class EncoderMLP(BaseEncoder):
         self.hidden_dims = args.encoder_hidden_dims if hasattr(args, 'encoder_hidden_dims') else [1024, 512, 512]
         self.dropout_rate = args.encoder_dropout_rate
         self.layers = nn.ModuleList()
+        self.predict_cell_prop = args.predict_cell_prop
         if self.using_positional_encoding:
             self.position_encoding = position_encoding()
         else:
@@ -52,10 +53,11 @@ class EncoderMLP(BaseEncoder):
         self.embedding = nn.Linear(in_features=self.hidden_dims[-1],
                                    out_features=args.latent_dim * args.n_cell_types)
         self.log_var = nn.Linear(self.hidden_dims[-1], self.latent_dim)
-        self.cell_prop = nn.Sequential(
-            nn.Linear(self.hidden_dims[-1], self.n_cell_types),
-            nn.Softmax(dim=1)
-        )
+        if self.predict_cell_prop:
+            self.cell_prop = nn.Sequential(
+                nn.Linear(self.hidden_dims[-1], self.n_cell_types),
+                nn.Softmax(dim=1)
+            )
         # self.position_encoding = self.position_encoding.to(self.embedding.weight.device)
 
     def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None,
@@ -120,15 +122,20 @@ class EncoderMLP(BaseEncoder):
         embedding_all_types = self.embedding(out)  # (batch_size, latent_dim, n_cell_types)
         embedding_all_types = embedding_all_types.view((-1, self.latent_dim, self.n_cell_types))
         # TODO: getting cell proportions from DeSide
-        output["cell_prop"] = self.cell_prop(out).view((-1, self.n_cell_types, 1))
+        if self.predict_cell_prop:
+            output["cell_prop"] = self.cell_prop(out).view((-1, self.n_cell_types, 1))
         # print(embedding_all_types.shape, output["cell_prop"].shape)
         if y is not None:
             y = y.view((-1, self.n_cell_types, 1))
             # embedding = torch.matmul(embedding_all_types, y)  # bulk mode embedding
             cell_type_existed = (y > 0.01).type(torch.int8).type(torch.float32)
-        else:
+        elif self.predict_cell_prop:
             # embedding = torch.matmul(embedding_all_types, output["cell_prop"])
             cell_type_existed = (output["cell_prop"] > 0.01).type(torch.int8).type(torch.float32)
+        else:
+            raise NotImplementedError('If self.predict_cell_prop is False, '
+                                      'y (cell proportions of cell types) must be provided. '
+                                      'It can be predicted by DeSide.')
 
         # assume y is unknown, using the average embedding of all cell types as the output miu of encoder
         # and calculate the KL divergence loss based on this miu

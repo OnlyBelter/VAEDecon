@@ -33,3 +33,4 @@ class VAEConfig(BaseModelConfig):
     decoder_hidden_dims: list[int] = [512, 512, 1024]
     encoder_dropout_rate: list[float] = [0.1, 0.1, 0.1]
     decoder_dropout_rate: list[float] = [0.1, 0.1, 0.1]
+    predict_cell_prop: bool = False  # whether to predict cell type proportions

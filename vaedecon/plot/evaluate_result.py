@@ -15,6 +15,7 @@ import umap
 
 from ..utility import (calculate_rmse, check_dir, get_corr, read_xy, read_df, get_ccc,
                        get_core_zone_of_pca, read_cancer_purity, cancer_types, non_log2log_cpm)
+from ..utility.read_file import find_sct_gep_by_id
 from ..data import GEPDataset
 from .plot_nn import plot_corr_two_columns
 
@@ -384,7 +385,7 @@ def compare_y_y_pred_subplot(y_true, y_pred,
     if show_legend:
         plt.legend(loc='upper left', fontsize=5, ncol=1)
     # plt.tight_layout()
-    if result_file_dir:
+    if result_file_dir is not None:
         plt.savefig(os.path.join(result_file_dir, 'y_true_vs_y_pred_{}.svg'.format(dataset_name)), dpi=300)
     else:
         return ax
@@ -835,6 +836,8 @@ def plot_single_cell_gep(
     cell_types: List[str],
     gep_result_dir: str,
     n_samples: int = 3,
+    sct_gep_file_path: str = None,
+    sample2cell_id_file_path: str = None,
 ) -> None:
     """Plots the reconstructed single-cell GEPs."""
     sc_gep_result_dir = os.path.join(gep_result_dir, "sc_gep")
@@ -848,6 +851,18 @@ def plot_single_cell_gep(
     ncols = 4
     fig, axes = plt.subplots(nrows, ncols, sharex=False, sharey=False, figsize=(8, 8))
     plt.subplots_adjust(wspace=0.1, hspace=0.25)
+    rng = np.random.default_rng(seed=42)
+    query_inx = rng.choice(range(len(sample_ids)), size=n_samples, replace=False)
+    query_ids = [sample_ids[i] for i in query_inx]
+    selected_sample2cell_id_file_name = f"selected_{n_samples}_samples2sct_ids.csv"
+    _file_path = os.path.join(sc_gep_result_dir, selected_sample2cell_id_file_name)
+    if not os.path.exists(_file_path):
+        find_sct_gep_by_id(sct_gep_dataset_file_path=sct_gep_file_path, sample2cell_id_file_path=sample2cell_id_file_path,
+                           gene_list=gene_list, cell_types=cell_types, n_samples=n_samples, result_dir=sc_gep_result_dir,
+                           query_ids=query_ids, selected_sample2cell_id_file_name=selected_sample2cell_id_file_name)
+    selected_sample2cell_id = pd.read_csv(_file_path, index_col='selected_cell_id')
+    selected_sample2cell_id = selected_sample2cell_id.rename(columns={selected_sample2cell_id.columns[0]: 'sample_id'})
+    selected_sample2cell_id_mapping = selected_sample2cell_id['sample_id'].to_dict()
     for i, cell_type in enumerate(cell_types):
         result_file_path = os.path.join(
             sc_gep_result_dir, f"recon_sc_gep_{cell_type}_top{n_samples}_samples.csv"
@@ -855,38 +870,40 @@ def plot_single_cell_gep(
         result_file_path_ground_truth = os.path.join(
             sc_gep_result_dir, f"sc_gep_{cell_type}_top{n_samples}_samples.csv"
         )
+        y = pd.read_csv(result_file_path_ground_truth, index_col=0)
+        y = y.rename(columns=selected_sample2cell_id_mapping)
         if not os.path.exists(result_file_path):
-            recon_sc_gep_ct = recon_sc_gep[:n_samples, :, i]
+            recon_sc_gep_ct = recon_sc_gep[query_inx, :, i]
             recon_sc_gep_ct_pd = pd.DataFrame(
-                recon_sc_gep_ct, index=sample_ids[:n_samples], columns=gene_list
+                recon_sc_gep_ct, index=query_ids, columns=gene_list
             )
             recon_sc_gep_ct_pd = non_log2log_cpm(recon_sc_gep_ct_pd, transpose=False)
             recon_sc_gep_ct_pd.T.to_csv(result_file_path)
-            sc_gep_ground_truth = test_set.gep_data.loc[
-                sample_ids[:n_samples], gene_list
-            ].copy()
-            sc_gep_ground_truth.T.to_csv(result_file_path_ground_truth)
-        compare_y_y_pred_plot(
-            y_true=result_file_path_ground_truth,
-            y_pred=result_file_path,
-            show_columns=sample_ids[:n_samples],
-            result_file_dir=sc_gep_result_dir,
-            model_name=f"DeSide_{cell_type}",
-            show_metrics=True,
-            y_label="y_recon_sc_gep",
-            figsize=(3.5, 3.5),
-            rasterized=True,
-        )
+            # sc_gep_ground_truth = test_set.gep_data.loc[
+            #     sample_ids[:n_samples], gene_list
+            # ].copy()
+            # sc_gep_ground_truth.T.to_csv(result_file_path_ground_truth)
+            compare_y_y_pred_plot(
+                y_true=y,
+                y_pred=result_file_path,
+                show_columns=query_ids,
+                result_file_dir=sc_gep_result_dir,
+                model_name=f"DeSide_{cell_type}",
+                show_metrics=True,
+                y_label="y_recon_sc_gep",
+                figsize=(3.5, 3.5),
+                rasterized=True,
+            )
         row_index = i // nrows
         col_index = i % ncols
         compare_y_y_pred_subplot(
             y_pred=result_file_path,
-            y_true=result_file_path_ground_truth,
-            show_columns=sample_ids[:n_samples],
+            y_true=y,
+            show_columns=query_ids,
             x_label=cell_type,
             show_metrics=True,
             figsize=(2, 2),
-            dataset_name=None,
+            dataset_name='',
             ax=axes[row_index, col_index],
             show_legend=True,
         )
