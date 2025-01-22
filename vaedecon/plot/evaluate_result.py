@@ -15,7 +15,7 @@ import umap
 
 from ..utility import (calculate_rmse, check_dir, get_corr, read_xy, read_df, get_ccc,
                        get_core_zone_of_pca, read_cancer_purity, cancer_types, non_log2log_cpm)
-from ..utility.read_file import find_sct_gep_by_id
+# from ..utility.read_file import find_sct_gep_of_bulk_sample
 from ..data import GEPDataset
 from .plot_nn import plot_corr_two_columns
 
@@ -834,16 +834,15 @@ def plot_single_cell_gep(
     pred_a: Dict[str, torch.Tensor],
     test_set: GEPDataset,
     cell_types: List[str],
-    gep_result_dir: str,
+    sc_gep_result_dir: str,
     n_samples: int = 3,
     sct_gep_file_path: str = None,
     sample2cell_id_file_path: str = None,
+    selected_sample2cell_id_file_path: str = None,
 ) -> None:
     """Plots the reconstructed single-cell GEPs."""
-    sc_gep_result_dir = os.path.join(gep_result_dir, "sc_gep")
     check_dir(Path(sc_gep_result_dir))
     recon_sc_gep = pred_a["recon_x_all_types"].detach().cpu().numpy()
-    # TODO, find all GEPs of different cell types by id
     sample_ids = test_set.get_sample_ids()
     gene_list = test_set.get_gene_list()
 
@@ -851,18 +850,12 @@ def plot_single_cell_gep(
     ncols = 4
     fig, axes = plt.subplots(nrows, ncols, sharex=False, sharey=False, figsize=(8, 8))
     plt.subplots_adjust(wspace=0.1, hspace=0.25)
-    rng = np.random.default_rng(seed=42)
-    query_inx = rng.choice(range(len(sample_ids)), size=n_samples, replace=False)
-    query_ids = [sample_ids[i] for i in query_inx]
-    selected_sample2cell_id_file_name = f"selected_{n_samples}_samples2sct_ids.csv"
-    _file_path = os.path.join(sc_gep_result_dir, selected_sample2cell_id_file_name)
-    if not os.path.exists(_file_path):
-        find_sct_gep_by_id(sct_gep_dataset_file_path=sct_gep_file_path, sample2cell_id_file_path=sample2cell_id_file_path,
-                           gene_list=gene_list, cell_types=cell_types, n_samples=n_samples, result_dir=sc_gep_result_dir,
-                           query_ids=query_ids, selected_sample2cell_id_file_name=selected_sample2cell_id_file_name)
-    selected_sample2cell_id = pd.read_csv(_file_path, index_col='selected_cell_id')
+
+    selected_sample2cell_id = pd.read_csv(selected_sample2cell_id_file_path, index_col='selected_cell_id')
     selected_sample2cell_id = selected_sample2cell_id.rename(columns={selected_sample2cell_id.columns[0]: 'sample_id'})
     selected_sample2cell_id_mapping = selected_sample2cell_id['sample_id'].to_dict()
+    query_ids = list(set(selected_sample2cell_id_mapping.values()))
+    query_inx = np.array([sample_ids.index(i) for i in query_ids])
     for i, cell_type in enumerate(cell_types):
         result_file_path = os.path.join(
             sc_gep_result_dir, f"recon_sc_gep_{cell_type}_top{n_samples}_samples.csv"
@@ -879,10 +872,6 @@ def plot_single_cell_gep(
             )
             recon_sc_gep_ct_pd = non_log2log_cpm(recon_sc_gep_ct_pd, transpose=False)
             recon_sc_gep_ct_pd.T.to_csv(result_file_path)
-            # sc_gep_ground_truth = test_set.gep_data.loc[
-            #     sample_ids[:n_samples], gene_list
-            # ].copy()
-            # sc_gep_ground_truth.T.to_csv(result_file_path_ground_truth)
             compare_y_y_pred_plot(
                 y_true=y,
                 y_pred=result_file_path,
@@ -924,6 +913,8 @@ def plot_bulk_gep(
     test_set: GEPDataset,
     gep_result_dir: str,
     n_samples: int = 3,
+    selected_sample2cell_id_file_path: str = None,
+    random_seed: int | None = 42,
 ) -> None:
     """Plots the reconstructed bulk GEPs."""
     bulk_gep_result_dir = os.path.join(gep_result_dir, "bulk_gep")
@@ -944,8 +935,15 @@ def plot_bulk_gep(
     bulk_gep_input_df.to_csv(
         os.path.join(bulk_gep_result_dir, "bulk_gep_input.csv")
     )
+    if selected_sample2cell_id_file_path is not None and os.path.exists(selected_sample2cell_id_file_path):
+        selected_sample2cell_id = pd.read_csv(selected_sample2cell_id_file_path, index_col=0)
+        selected_sample_ids = selected_sample2cell_id.index.drop_duplicates().to_list()
+    else:
+        rng = np.random.default_rng(seed=random_seed)
+        query_inx = rng.choice(range(len(sample_ids)), size=n_samples, replace=False)
+        selected_sample_ids = [sample_ids[i] for i in query_inx]
     s_plot = ScatterPlot(x=recon_bulk_gep_conv_df.T, y=bulk_gep_input_df.T)
-    for sample_id in s_plot.x.columns.to_list()[:n_samples]:
+    for sample_id in selected_sample_ids:
         s_plot.postfix = f"recon_bulk_gep_by_conv_{sample_id}"
         s_plot.plot(
             show_columns={"x": sample_id, "y": sample_id},

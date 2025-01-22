@@ -190,3 +190,41 @@ class GEPDataset(Dataset):
 
     def get_sample_ids(self):
         return self.gep_data.index.to_list()
+
+
+def find_sct_gep_of_bulk_sample(sct_gep_dataset_file_path: str, sample2cell_id_file_path: str,
+                                bulk_dataset: GEPDataset, cell_types: list, result_dir: str = None,
+                                random_seed: int | None = 42, n_samples: int = 3,
+                                selected_sample2cell_id_file_path: str = None):
+    sample_ids = bulk_dataset.get_sample_ids()
+    gene_list = bulk_dataset.get_gene_list()
+    rng = np.random.default_rng(seed=random_seed)
+    query_inx = rng.choice(range(len(sample_ids)), size=n_samples, replace=False)
+    query_ids = [sample_ids[i] for i in query_inx]
+    sample2cell_ids = pd.read_csv(sample2cell_id_file_path, index_col=0)
+    cell_id_df = sample2cell_ids.loc[query_ids, ['cell_type', 'selected_cell_id']]
+    cell_ids = cell_id_df['selected_cell_id'].tolist()
+    log_message('Reading SCT GEPs...')
+    sct_gep_obj = ReadH5AD(sct_gep_dataset_file_path)
+    sct_geps = sct_gep_obj.get_df().loc[cell_ids, :].copy()
+    del sct_gep_obj
+    sct_gep_obj = ReadExp(sct_geps, exp_type='log_space')
+    del sct_geps
+    sct_gep_obj.align_with_gene_list(gene_list=gene_list, fill_not_exist=True)
+    sct_geps = sct_gep_obj.get_exp()
+    del sct_gep_obj
+    log_message('Querying SCT GEPs by cell type...')
+    if result_dir is not None:
+        for cell_type in cell_types:
+            cell_id_ct = cell_id_df.loc[cell_id_df['cell_type'] == cell_type, 'selected_cell_id'].tolist()
+            selected_sct_gep_ct = sct_geps.loc[cell_id_ct, :]
+            result_file_path = os.path.join(result_dir, f"sc_gep_{cell_type}_top{n_samples}_samples.csv")
+            selected_sct_gep_ct.T.to_csv(result_file_path)
+            del selected_sct_gep_ct
+    else:
+        cell_type2geps = {}
+        for cell_type in cell_types:
+            cell_id_ct = cell_id_df.loc[cell_id_df['cell_type'] == cell_type, 'selected_cell_id'].tolist()
+            cell_type2geps[cell_type] = sct_geps.loc[cell_id_ct, :]
+        return cell_type2geps
+    cell_id_df.to_csv(selected_sample2cell_id_file_path)
