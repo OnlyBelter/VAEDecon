@@ -2,7 +2,7 @@
 Changed to lightning by Belter, Jan 13, 2025.
 """
 
-from typing import Any
+from typing import Any, Optional
 import torch
 import lightning as L
 
@@ -13,7 +13,7 @@ class BaseEncoder(L.LightningModule):
     def __init__(self):
         super().__init__()
 
-    def forward(self, x: torch.Tensor) -> Any:
+    def forward(self, x: torch.Tensor, knn_edge_index: Optional[Any], ppi_edge_index: Optional[Any]) -> Any:
         """Forward pass of the encoder.
 
         This method must be implemented in child classes. It processes the input data
@@ -21,6 +21,8 @@ class BaseEncoder(L.LightningModule):
 
         Args:
             x (torch.Tensor): Input data to be encoded
+            knn_edge_index (Optional[torch.Tensor]): KNN edge index, only for GNN
+            ppi_edge_index (Optional[torch.Tensor]): PPI edge index, only for GNN
 
         Returns:
             ModelOutput: Encoded representation of the input

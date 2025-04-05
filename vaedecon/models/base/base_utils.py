@@ -42,8 +42,9 @@ class ModelOutput(OrderedDict):
 
     def __getitem__(self, k):
         if isinstance(k, str):
-            self_dict = {k: v for (k, v) in self.items()}
-            return self_dict[k]
+            # self_dict = {k: v for (k, v) in self.items()}
+            # return self_dict[k]
+            return super().__getitem__(k)
         else:
             return self.to_tuple()[k]
 
@@ -55,11 +56,12 @@ class ModelOutput(OrderedDict):
         super().__setitem__(key, value)
         super().__setattr__(key, value)
 
-    def to_tuple(self) -> Tuple[Any]:
+    def to_tuple(self) -> Tuple[Any, ...]:
         """
         Convert self to a tuple containing all the attributes/keys that are not ``None``.
         """
-        return tuple(self[k] for k in self.keys())
+        # return tuple(self[k] for k in self.keys())
+        return tuple(super().__getitem__(k) for k in self.keys())
 
 
 class CPU_Unpickler(pickle.Unpickler):

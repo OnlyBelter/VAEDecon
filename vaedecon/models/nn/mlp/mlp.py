@@ -116,8 +116,7 @@ class EncoderMLP(BaseEncoder):
             if output_layer_levels is not None:
                 if i + 1 in output_layer_levels:
                     output[f"embedding_layer_{i+1}"] = out
-    # if i + 1 == self.depth:
-        # output["embedding"] = self.embedding(out.reshape(x.shape[0], -1))
+
         # using the proposed structure of latent space
         embedding_all_types = self.embedding(out)  # (batch_size, latent_dim, n_cell_types)
         embedding_all_types = embedding_all_types.view((-1, self.latent_dim, self.n_cell_types))

@@ -59,6 +59,8 @@ dependencies = [
     "pythae",
     "torchmetrics",
     "lightning==2.5.0",
+    "torch-geometric==2.5.3",
+    "networkx>=3.1",
 
 #    'tensorrt',
 #    "sphinx_rtd_theme"
