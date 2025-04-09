@@ -14,6 +14,7 @@ from ...models.base.base_utils import ModelOutput
 
 from ...models.base import BaseAE
 from ...models.nn import BaseDecoder, BaseEncoder
+from ...models.gnn import EncoderGNN
 from ...models.base.base_config import BaseModelConfig
 from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor
 
@@ -51,11 +52,14 @@ class VAE(BaseAE):
         Returns:
             An ModelOutput instance containing the model's output.
         """
-
         x = inputs["data"]
         y = inputs.get("labels")  # cell proportions of 16 cell types
+        sample_ids = inputs["sample_id"]
 
-        encoder_output = self.encoder(x=x, y=y)
+        if issubclass(type(self.encoder), EncoderGNN):
+            encoder_output = self.encoder(x=x, y=y, sample_ids=sample_ids)
+        else:
+            encoder_output = self.encoder(x=x, y=y)
         mu, log_var = (
             encoder_output.embedding,
             encoder_output.log_var,

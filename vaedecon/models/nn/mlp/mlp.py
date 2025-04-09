@@ -20,7 +20,7 @@ class EncoderMLP(BaseEncoder):
 
     def __init__(self, args: BaseModelConfig, position_encoding: Optional[PositionalEncoding] = None):
         super().__init__()
-
+        self.args = args
         self.input_dim = args.input_dim
         self.latent_dim = args.latent_dim
         self.n_cell_types = args.n_cell_types
@@ -65,7 +65,7 @@ class EncoderMLP(BaseEncoder):
         """Forward method
 
         Args:
-            x (torch.Tensor): The input data
+            x (torch.Tensor): The input data (cells x genes)
             y (torch.Tensor, optional): The cell proportions of the input data. Defaults to None.
             output_layer_levels (List[int], optional): The levels of the layers where the outputs are
                 extracted. If None, the last layer's output is returned. Default: None.
@@ -152,6 +152,12 @@ class EncoderMLP(BaseEncoder):
 
         return output
 
+    def get_config(self):
+        return {"params": {"args": self.args.to_dict()},
+                "module_name": self.__class__.__module__,
+                "class_name": self.__class__.__name__,
+                }
+
 
 class DecoderMLP(BaseDecoder):
     """
@@ -234,15 +240,6 @@ class DecoderMLP(BaseDecoder):
             out = layer['linear'](out)
             out = layer['norm'](out)
             out = layer['activation'](out)
-            # if i == 0:
-            #     latent_output = out
-            # elif i < max_depth - 1:
-            #     if out.size(-1) != latent_output.size(-1):
-            #         # project the output of the first layer to the output of the current layer
-            #         latent_output = nn.Linear(latent_output.size(-1),
-            #                                   out.size(-1)).to(out.device)(latent_output)
-            #     # residual connection
-            #     out = out + latent_output
             out = layer['dropout'](out)
 
             if output_layer_levels is not None:
@@ -252,6 +249,12 @@ class DecoderMLP(BaseDecoder):
         # out = torch.clamp(self.relu(out), max=1.0)
         output["reconstruction"] = out
         return output
+
+    def get_config(self):
+        return {"params": {"args": self.args.to_dict()},
+                "module_name": self.__class__.__module__,
+                "class_name": self.__class__.__name__,
+                }
 
 
 class ClampLayer(nn.Module):

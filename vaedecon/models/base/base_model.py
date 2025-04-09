@@ -2,14 +2,18 @@ import inspect
 import logging
 import os
 import sys
+import importlib
 from http.cookiejar import LoadError
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Type
 
 import cloudpickle
+import json
 import torch
+import pandas as pd
 import lightning as L
 from ...data.datasets import BaseDataset, DatasetOutput
 from ...models.auto_model import AutoConfig
+# from ...models.vae import VAEConfig
 from ..nn import BaseDecoder, BaseEncoder, EncoderMLP
 from ..nn.default_architectures import Decoder_AE_MLP
 from .base_config import BaseModelConfig, EnvironmentConfig
@@ -127,29 +131,155 @@ class BaseAE(L.LightningModule):
         """
         pass
 
-    def save(self, dir_path: str):
-        """Saves the model and its configuration."""
+    def _get_encoder_config(self) -> Dict[str, Any]:
+        """Get encoder configuration for JSON serialization."""
+        if hasattr(self.encoder, "get_config"):
+            return self.encoder.get_config()
+        else:
+            # Create a basic configuration with class info
+            return {
+                "class_name": self.encoder.__class__.__name__,
+                "module_name": self.encoder.__class__.__module__,
+                "params": {
+                    "input_dim": getattr(self.encoder, "input_dim", self.input_dim),
+                    "latent_dim": getattr(self.encoder, "latent_dim", self.latent_dim),
+                    # Add other common parameters that might be needed
+                    "hidden_dims": getattr(self.encoder, "hidden_dims", []),
+                }
+            }
+
+    def _get_decoder_config(self) -> Dict[str, Any]:
+        """Get decoder configuration for JSON serialization."""
+        if hasattr(self.decoder, "get_config"):
+            return self.decoder.get_config()
+        else:
+            # Create a basic configuration with class info
+            return {
+                "class_name": self.decoder.__class__.__name__,
+                "module_name": self.decoder.__class__.__module__,
+                "params": {
+                    "input_dim": getattr(self.decoder, "input_dim", self.latent_dim),
+                    "output_dim": getattr(self.decoder, "output_dim", self.input_dim),
+                    # Add other common parameters that might be needed
+                    "hidden_dims": getattr(self.decoder, "hidden_dims", []),
+                }
+            }
+
+    def save(self, model_dir: str, training_config: Optional[Any] = None):
+        """Saves the model and its configuration.
+        Args:
+            model_dir (str): The directory path where the model will be saved.
+            model_dir (str, optional): Optional directory path where training logs are stored. Defaults to None.
+            training_config (Any, optional): The training configuration to be saved. Defaults to None.
+        """
+        # Create directory if it doesn't exist
+        os.makedirs(model_dir, exist_ok=True)
+
+        # Save environment information
         env_spec = EnvironmentConfig(
             python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"
         )
-        model_dict = {"model_state_dict": self.state_dict()}
-        os.makedirs(dir_path, exist_ok=True)
+        env_spec.save_json(model_dir, "environment")
 
-        env_spec.save_json(dir_path, "environment")
-        self.model_config.save_json(dir_path, "model_config")
+        # Save model configuration
+        self.model_config.save_json(model_dir, "model_config")
 
-        # only save .pkl if custom architecture provided
-        if not self.model_config.uses_default_encoder:
-            with open(os.path.join(dir_path, "encoder.pkl"), "wb") as fp:
-                cloudpickle.register_pickle_by_value(inspect.getmodule(self.encoder))
-                cloudpickle.dump(self.encoder, fp)
+        # # Save model architecture configuration (for compatibility with save_model)
+        # model_config = self.get_config()
+        # with open(os.path.join(model_dir, "model_architecture.json"), "w") as f:
+        #     json.dump(model_config, f, indent=4)
 
-        if not self.model_config.uses_default_decoder:
-            with open(os.path.join(dir_path, "decoder.pkl"), "wb") as fp:
+        # # Save encoder and decoder configurations as JSON and pkl
+        if hasattr(self, "encoder"):
+            # json
+            encoder_config = self._get_encoder_config()
+            with open(os.path.join(model_dir, "encoder_config.json"), "w") as f:
+                json.dump(encoder_config, f, indent=4)
+
+            # Save encoder weights separately
+            torch.save(self.encoder.state_dict(), os.path.join(model_dir, "encoder_weights.pt"))
+
+            # # pkl
+            # with open(os.path.join(model_dir, "encoder.pkl"), "wb") as fp:
+            #     cloudpickle.register_pickle_by_value(inspect.getmodule(self.encoder))
+            #     cloudpickle.dump(self.encoder, fp)
+
+        if hasattr(self, "decoder"):
+            # json
+            decoder_config = self._get_decoder_config()
+            with open(os.path.join(model_dir, "decoder_config.json"), "w") as f:
+                json.dump(decoder_config, f, indent=4)
+
+            # Save decoder weights separately
+            torch.save(self.decoder.state_dict(), os.path.join(model_dir, "decoder_weights.pt"))
+
+            # pkl
+            with open(os.path.join(model_dir, "decoder.pkl"), "wb") as fp:
                 cloudpickle.register_pickle_by_value(inspect.getmodule(self.decoder))
                 cloudpickle.dump(self.decoder, fp)
+        # # Save model weights separately
+        torch.save(self.state_dict(), os.path.join(model_dir, "model_weights.pt"))
+        # model_dict = {"model_state_dict": self.state_dict()}
+        # torch.save(model_dict, os.path.join(model_dir, "model.pt"))
 
-        torch.save(model_dict, os.path.join(dir_path, "model.pt"))
+        # Save training configuration if provided
+        if training_config is not None and hasattr(training_config, "save_json"):
+            training_config.save_json(model_dir, "training_config")
+        elif hasattr(self, "training_config") and hasattr(self.training_config, "save_json"):
+            self.training_config.save_json(model_dir, "training_config")
+
+        # Copy training logs
+        try:
+            # Try to find the metrics.csv file
+            metrics_paths = [
+                os.path.join(model_dir, "training_logs", "metrics.csv"),
+                os.path.join(model_dir, "training_logs", "version_0", "metrics.csv")
+            ]
+
+            for path in metrics_paths:
+                if os.path.exists(path):
+                    losses_df = pd.read_csv(path)
+                    losses_df.to_csv(os.path.join(model_dir, 'losses.csv'))
+                    logger.info(f"Copied training logs from {path} to {model_dir}")
+                    break
+            else:
+                logger.warning("Could not find training logs to copy")
+        except Exception as e:
+            logger.warning(f"Failed to copy training logs: {e}")
+
+        logger.info(f"Model successfully saved to {model_dir}")
+
+    @classmethod
+    def _instantiate_model_from_config(cls, config: Dict[str, Any], **kwargs):
+        """Instantiate a model from its configuration."""
+        class_name = config.get("class_name")
+        module_name = config.get("module_name")
+
+        if not class_name or not module_name:
+            raise ValueError("Configuration must include 'class_name' and 'module_name'")
+
+        # Import the module and get the class
+        try:
+            module = importlib.import_module(module_name)
+            model_class = getattr(module, class_name)
+            input_module = importlib.import_module("vaedecon.models.vae")
+            input_class = getattr(input_module, "VAEConfig")
+
+        except (ImportError, AttributeError) as e:
+            raise ImportError(f"Could not import {class_name} from {module_name}: {e}")
+
+        # Get parameters for instantiation
+        params = config.get("params", {})
+        # Update with any additional kwargs
+        params.update(kwargs)
+
+        # Create an instance of the model
+        try:
+            input_instance = input_class(**params["args"])
+            model = model_class(input_instance)
+            return model
+        except Exception as e:
+            raise RuntimeError(f"Failed to instantiate {class_name}: {e}")
 
     @classmethod
     def _load_model_config_from_folder(cls, dir_path: str) -> BaseModelConfig:
@@ -165,28 +295,48 @@ class BaseAE(L.LightningModule):
     @classmethod
     def _load_model_weights_from_folder(cls, dir_path: str) -> Dict[str, Any]:
         """Loads model weights from a folder."""
-        if "model.pt" not in os.listdir(dir_path):
+        if "model_weights.pt" not in os.listdir(dir_path):
             raise FileNotFoundError(
-                f"Missing 'model.pt' in {dir_path}. Cannot load model weights."
+                f"Missing 'model_weights.pt' in {dir_path}. Cannot load model weights."
             )
-        weights_path = os.path.join(dir_path, "model.pt")
+        weights_path = os.path.join(dir_path, "model_weights.pt")
         try:
             model_weights = torch.load(weights_path, map_location="cpu")
         except RuntimeError:
             raise RuntimeError(
                 "Failed to load model weights. Ensure they are in '.pt' format."
             )
-        if "model_state_dict" not in model_weights:
-            raise KeyError(
-                "'model_state_dict' not found in model weights file. Got keys:"
-                f"{model_weights.keys()}"
-            )
-        return model_weights["model_state_dict"]
+        # if "model_state_dict" not in model_weights:
+        #     raise KeyError(
+        #         "'model_state_dict' not found in model weights file. Got keys:"
+        #         f"{model_weights.keys()}"
+        #     )
+        return model_weights
 
     @classmethod
     def _load_custom_encoder_from_folder(cls, dir_path: str) -> BaseEncoder:
         """Loads custom encoder from a folder."""
         cls._check_python_version_from_folder(dir_path=dir_path)
+
+        # Try loading from JSON config first (new method)
+        if "encoder_config.json" in os.listdir(dir_path) and "encoder_weights.pt" in os.listdir(dir_path):
+            logger.info("Loading encoder from JSON configuration and weights")
+            try:
+                # Load encoder configuration
+                with open(os.path.join(dir_path, "encoder_config.json"), "r") as f:
+                    encoder_config = json.load(f)
+
+                # Instantiate encoder from config
+                encoder = cls._instantiate_model_from_config(encoder_config)
+
+                # Load encoder weights
+                encoder_weights = torch.load(os.path.join(dir_path, "encoder_weights.pt"), map_location="cpu")
+                encoder.load_state_dict(encoder_weights)
+
+                return encoder
+            except Exception as e:
+                logger.warning(f"Failed to load encoder from JSON config: {e}. Falling back to pickle.")
+
         if "encoder.pkl" not in os.listdir(dir_path):
             raise FileNotFoundError(
                 f"Missing 'encoder.pkl' in{dir_path}. Cannot load encoder."
@@ -199,13 +349,32 @@ class BaseAE(L.LightningModule):
         """Loads custom decoder from a folder."""
         cls._check_python_version_from_folder(dir_path=dir_path)
 
-        file_list = os.listdir(dir_path)
-        if "decoder.pkl" not in file_list:
-            raise FileNotFoundError(
-                f"Missing 'decoder.pkl' in {dir_path}. Cannot load decoder."
-            )
-        with open(os.path.join(dir_path, "decoder.pkl"), "rb") as fp:
-            return CPU_Unpickler(fp).load()
+        # Try loading from JSON config first (new method)
+        if "decoder_config.json" in os.listdir(dir_path) and "decoder_weights.pt" in os.listdir(dir_path):
+            logger.info("Loading decoder from JSON configuration and weights")
+            try:
+                # Load decoder configuration
+                with open(os.path.join(dir_path, "decoder_config.json"), "r") as f:
+                    decoder_config = json.load(f)
+
+                # Instantiate decoder from config
+                decoder = cls._instantiate_model_from_config(decoder_config)
+
+                # Load decoder weights
+                decoder_weights = torch.load(os.path.join(dir_path, "decoder_weights.pt"), map_location="cpu")
+                decoder.load_state_dict(decoder_weights)
+
+                return decoder
+            except Exception as e:
+                logger.warning(f"Failed to load decoder from JSON config: {e}. Falling back to pickle.")
+
+                file_list = os.listdir(dir_path)
+                if "decoder.pkl" not in file_list:
+                    raise FileNotFoundError(
+                        f"Missing 'decoder.pkl' in {dir_path}. Cannot load decoder."
+                    )
+                with open(os.path.join(dir_path, "decoder.pkl"), "rb") as fp:
+                    return CPU_Unpickler(fp).load()
 
     @classmethod
     def load_from_folder(cls, dir_path: str) -> "BaseAE":
@@ -244,6 +413,10 @@ class BaseAE(L.LightningModule):
                     "Model saved with python 3.8+, but trying to reload it with python 3.7. "
                     "Use python 3.8+ to reload this model."
                 )
+
+    def get_config(self):
+        """Returns the model's config."""
+        return self.model_config
 
 
 def check_encoder(encoder: BaseEncoder) -> BaseEncoder:

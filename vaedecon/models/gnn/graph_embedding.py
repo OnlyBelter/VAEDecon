@@ -1,42 +1,153 @@
+from abc import ABC
+import os
 import torch
+import networkx as nx
 import torch.nn as nn
+import scanpy as sc
 import torch.nn.functional as F
-from torch_geometric.nn import sequential, GATConv, GraphNorm, VGAE, GCNConv, InnerProductDecoder, TransformerConv, GAE, \
-    LayerNorm, SAGEConv
-from torch_geometric.nn.conv import transformer_conv
 from ..nn.base_architectures import BaseEncoder
+from ..base import BaseModelConfig
+from ...models.base.base_utils import ModelOutput
+from ...models.nn.positional_encoding import PositionalEncoding
+from typing import Optional
+from torch_geometric.nn import Sequential, GATConv, GraphNorm, VGAE, GCNConv, InnerProductDecoder, TransformerConv, GAE, \
+    LayerNorm, SAGEConv
+import lightning as L
+from torch_geometric.nn.conv import transformer_conv
 from torch_geometric.utils import negative_sampling
 from sklearn.metrics import average_precision_score, roc_auc_score
-from torch_geometric.utils import add_self_loops, remove_self_loops, softmax
+# from torch_geometric.utils import add_self_loops, remove_self_loops, softmax
+from torch_geometric.utils import softmax, convert
+from torch_geometric.data import Data
 import math
 import numpy as np
 import pandas as pd
 
 EPS = 1e-15
 MAX_LOGSTD = 10
+NETWORK_CUTOFF = 0.5
+EXPRESSION_CUTOFF = 0.0
 
 
-class FeatureDecoder(torch.nn.Module):
-    def __init__(self, feature_dim, embd_dim, inter_dim, drop_p=0.0):
-        super(FeatureDecoder, self).__init__()
-        self.feature_dim = feature_dim
-        self.embd_dim = embd_dim
-        self.inter_dim = inter_dim
-        self.decoder = nn.Sequential(nn.Linear(embd_dim, inter_dim),
-                                     nn.Dropout(drop_p),
-                                     nn.ReLU(),
-                                     nn.Linear(inter_dim, inter_dim),
-                                     nn.Dropout(drop_p),
-                                     nn.ReLU(),
-                                     nn.Linear(inter_dim, feature_dim),
-                                     nn.Dropout(drop_p))
+class EncoderGNN(BaseEncoder):
+    """
+    GNN encoder to integrate PPI (gene embeddings) and cell-cell co-expression network (cell embeddings).
+    """
+    def __init__(self, args: BaseModelConfig, position_encoding: Optional[PositionalEncoding] = None):
+        """
+        :param args: parameters for the GNN encoder
+        """
+        super(EncoderGNN, self).__init__()
+        self.args = args
+        self.col_dim = args.gnn_col_dim
+        self.row_dim = args.gnn_row_dim
+        self.inter_row_dim = args.gnn_inter_row_dim
+        self.embd_row_dim = args.gnn_embd_row_dim
+        self.inter_col_dim = args.gnn_inter_col_dim
+        self.cell_latent_dim = args.latent_dim
+        self.n_cell_types = args.n_cell_types
+        self.embd_col_dim = args.gnn_embd_col_dim  # cell embeddings by the GNN
+        self.drop_p = args.gnn_drop_p
+        self.num_layers = args.gnn_num_layers
+        self.predict_cell_prop = args.predict_cell_prop
+        self.gene_list = args.gene_list
+        if os.path.exists(args.ppi_file_path):
+            self.ppi_file_path = args.ppi_file_path
+        else:
+            raise FileNotFoundError(f"File {args.ppi_file_path} not found.")
+        # self.lambda_rows = lambda_rows
+        # self.lambda_cols = lambda_cols
 
-    def forward(self, z):
-        out = self.decoder(z)
-        return out
+        # graph encoder with the same shape as the input
+        self.encoder = MutualEncoder(self.col_dim, self.row_dim, self.num_layers, self.drop_p)
+        # gene embeddings
+        self.rows_encoder = DimEncoder(self.row_dim, self.inter_row_dim, self.embd_row_dim,
+                                       drop_p=self.drop_p, scale_param=None, reducer=False)
+        # cell embeddings / GEP embeddings for all cell types
+        self.cols_encoder = DimEncoder(self.col_dim, self.inter_col_dim, self.embd_col_dim,
+                                       drop_p=self.drop_p, reducer=False)
+        # linear mapping to get the embeddings of all cell types
+        self.deconvolution_layer = nn.Linear(self.embd_col_dim, self.cell_latent_dim * self.n_cell_types)
+        # the log variance of the cell embeddings in the VAE model
+        self.log_var = nn.Linear(self.embd_col_dim, self.cell_latent_dim)
+        if self.predict_cell_prop:
+            self.cell_prop = nn.Sequential(
+                nn.Linear(self.hidden_dims[-1], self.n_cell_types),
+                nn.Softmax(dim=1)
+            )
+
+    def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None, sample_ids: list = None) -> ModelOutput:
+        """
+        :param x: input node features, gene expression matrix (n_cells, n_genes)
+        :param y: The cell proportions of the input data. Defaults to None.
+        :param sample_ids: The sample IDs of the input data. Defaults to None.
+        :return: gene embedding, cell embedding, reconstructed gene expression
+        """
+        obs = pd.DataFrame(data=None, index=sample_ids)
+        var = pd.DataFrame(data=None, index=self.gene_list)
+        obj = sc.AnnData(X=x.detach().cpu().numpy(), var=var, obs=obs)
+        x_t = x.T
+        if obj.raw is None:
+            obj.raw = obj.copy()
+        ppi = None
+        try:
+            # print(f'Loading human PPI from: {self.ppi_file_path}...')
+            net = pd.read_csv(self.ppi_file_path)[
+                ["g1_symbol", "g2_symbol", "conn"]].drop_duplicates()
+            net, ppi, node_feature = build_network(obj, net, human_flag=True)
+            obj = obj[:, node_feature.index]
+            x_t = torch.from_numpy(node_feature.values)
+            # print(f"N genes: {node_feature.shape}")
+        except Exception as e:
+            print(f"Error during network construction: {e}")
+        ppi_edge_index, _ = nx_to_pyg_edge_index(ppi)  # PPI graph edge index
+        # ppi_edge_index = ppi_edge_index
+        knn_edge_index = build_knn_graph(obj)  # KNN graph edge index, cell-cell interaction network
+
+        output = ModelOutput()
+        embedded = self.encoder(x_t, knn_edge_index, ppi_edge_index)  # gene-cell embedding with the same shape as x.T
+        # gene embedding (n_genes, self.embd_row_dim)
+        embedded_rows = self.rows_encoder(embedded, ppi_edge_index)
+        # cell embedding (n_cells, self.embd_col_dim)
+        cell_embedding_by_gnn = self.cols_encoder(embedded.T, knn_edge_index, inference=True)
+        embedding_all_types = self.deconvolution_layer(cell_embedding_by_gnn)
+        embedding_all_types = embedding_all_types.view(-1, self.cell_latent_dim, self.n_cell_types)
+        embedding = torch.mean(embedding_all_types, dim=2, keepdim=True)
+        log_var = self.log_var(cell_embedding_by_gnn).reshape(-1, self.cell_latent_dim, 1)
+        # out_features = self.feature_decoder(embedded_cols)  # can add linear layers directly for GEP reconstruction
+
+        # TODO: getting cell proportions from DeSide
+        if self.predict_cell_prop:
+            output["cell_prop"] = self.cell_prop(cell_embedding_by_gnn).view((-1, self.n_cell_types, 1))
+        # print(embedding_all_types.shape, output["cell_prop"].shape)
+        if y is not None:
+            y = y.view((-1, self.n_cell_types, 1))
+            # embedding = torch.matmul(embedding_all_types, y)  # bulk mode embedding
+            cell_type_existed = (y > 0.01).type(torch.int8).type(torch.float32)
+        elif self.predict_cell_prop:
+            # embedding = torch.matmul(embedding_all_types, output["cell_prop"])
+            cell_type_existed = (output["cell_prop"] > 0.01).type(torch.int8).type(torch.float32)
+        else:
+            raise NotImplementedError('If self.predict_cell_prop is False, '
+                                      'y (cell proportions of cell types) must be provided. '
+                                      'It can be predicted by DeSide.')
+
+        output['embedding'] = embedding
+        output['log_var'] = log_var
+        output['embedding_all_types'] = embedding_all_types
+        output['cell_type_existed'] = cell_type_existed
+        output['gene_embedding'] = embedded_rows
+
+        return output
+
+    def get_config(self):
+        return {"params": {"args": self.args.to_dict()},
+                "module_name": self.__class__.__module__,
+                "class_name": self.__class__.__name__,
+                }
 
 
-class MutualEncoder(torch.nn.Module):
+class MutualEncoder(L.LightningModule):
     def __init__(self, col_dim, row_dim, num_layers=4, drop_p=0.25):
         super(MutualEncoder, self).__init__()
         self.col_dim = col_dim
@@ -44,32 +155,56 @@ class MutualEncoder(torch.nn.Module):
         self.num_layers = num_layers
 
         self.rows_layers = nn.ModuleList([
-            sequential.Sequential('x,edge_index', [
+            # x: The node feature matrix (typically shape [num_nodes, num_features])
+            # edge_index: The edge index matrix (typically shape [2, num_edges])
+            Sequential('x, edge_index', [
+                # GraphSAGE Convolutional layer from PyTorch Geometric
                 (SAGEConv(self.row_dim, self.row_dim), 'x, edge_index -> x1'),
-                (nn.Dropout(drop_p, inplace=False), 'x1-> x2'),
+                (nn.Dropout(drop_p, inplace=False), 'x1 -> x2'),
                 nn.LeakyReLU(inplace=True),
             ]) for _ in range(num_layers)])
 
         self.cols_layers = nn.ModuleList([
-            sequential.Sequential('x,edge_index', [
+            Sequential('x, edge_index', [
                 (SAGEConv(self.col_dim, self.col_dim), 'x, edge_index -> x1'),
                 nn.LeakyReLU(inplace=True),
-                (nn.Dropout(drop_p, inplace=False), 'x1-> x2'),
+                (nn.Dropout(drop_p, inplace=False), 'x1 -> x2'),
             ]) for _ in range(num_layers)])
 
-    def forward(self, x, knn_edge_index, ppi_edge_index):
-        embbded = x.clone()
+    def forward(self, x: torch.Tensor, knn_edge_index, ppi_edge_index):
+        """
+        :param x: input node features, gene expression matrix (n_genes, n_cells)
+        :param knn_edge_index: KNN graph edge index, cell-cell interaction network
+        :param ppi_edge_index: PPI graph edge index
+        :return: embedded x with the same shape as x
+        """
+        embedded = x.clone()
         for i in range(self.num_layers):
-            embbded = self.cols_layers[i](embbded.T, knn_edge_index).T
-            embbded = self.rows_layers[i](embbded, ppi_edge_index)
+            embedded = self.cols_layers[i](embedded.T, knn_edge_index).T
+            embedded = self.rows_layers[i](embedded, ppi_edge_index)
 
-        return embbded
+        return embedded
 
 
-class TransformerConvReducrLayer(TransformerConv):
-    def __init__(self, in_channels, out_channels, heads=1, dropout=0, add_self_loops=True, scale_param=2, **kwargs):
+class TransformerConvReducerLayer(TransformerConv, ABC):
+    """
+    A modified TransformerConv layer that uses standardization and sigmoid activation
+    for attention weights instead of softmax when scale_param is provided.
+
+    Args:
+        in_channels (int): Size of input node features
+        out_channels (int): Size of output node features
+        heads (int, optional): Number of attention heads. Default: 1
+        dropout (float, optional): Dropout probability of attention weights. Default: 0
+        add_self_loops (bool, optional): If True, adds self-loops to the graph. Default: True
+        scale_param (float or None, optional): Parameter controlling the scaling of
+            standardized attention scores. If None, uses softmax instead. Default: 2
+        **kwargs: Additional arguments passed to TransformerConv
+    """
+    def __init__(self, in_channels, out_channels, heads=1, dropout=0, add_self_loops=True,
+                 scale_param: float | None = 2.0, **kwargs):
         super().__init__(in_channels, out_channels, heads, dropout, add_self_loops, **kwargs)
-        self.treshold_alpha = None
+        self.threshold_alpha = None
         self.scale_param = scale_param
 
     def message(self, query_i, key_j, value_j,
@@ -89,7 +224,7 @@ class TransformerConvReducrLayer(TransformerConv):
             alpha = F.sigmoid(alpha)
         else:
             alpha = softmax(alpha, index, ptr, size_i)
-        self.treshold_alpha = alpha
+        self.threshold_alpha = alpha
 
         self._alpha = alpha
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
@@ -102,22 +237,44 @@ class TransformerConvReducrLayer(TransformerConv):
         return out
 
 
-class DimEncoder(torch.nn.Module):
-    def __init__(self, feature_dim, inter_dim, embd_dim, reducer=False, drop_p=0.2, scale_param=3):
+class DimEncoder(L.LightningModule):
+    """
+    Encoder for dimension reduction using Graph Neural Networks (GNNs) and attention mechanisms.
+
+    This class implements a neural network architecture that reduces high-dimensional
+    data (like gene expression data) to a lower-dimensional embedding space while
+    preserving structural relationships through graph-based learning.
+
+    The encoder consists of:
+    1. A GCN layer followed by LeakyReLU and Dropout
+    2. An attention-based layer (either TransformerConv or TransformerConvReducerLayer)
+
+    The attention mechanism allows the model to learn which connections in the graph
+    are most important for the embedding task.
+    """
+    def __init__(self, feature_dim, inter_dim, embd_dim, reducer=False, drop_p=0.2, scale_param: float | None = 3.0):
+        """
+        :param feature_dim: dimension of the column (the number of genes)
+        :param inter_dim: dimension of the intermediate layer
+        :param embd_dim: dimension of the embedding
+        :param reducer: if True, TransformerConvReducerLayer will be used, otherwise TransformerConv will be used
+        :param drop_p: dropout probability
+        :param scale_param: scale parameter for the attention layer
+        """
         super(DimEncoder, self).__init__()
         self.feature_dim = feature_dim
         self.embd_dim = embd_dim
         self.inter_dim = inter_dim
         self.reducer = reducer
 
-        self.encoder = sequential.Sequential('x, edge_index', [
+        self.encoder = Sequential('x, edge_index', [
             (GCNConv(self.feature_dim, self.inter_dim), 'x, edge_index -> x1'),
             nn.LeakyReLU(inplace=True),
             (nn.Dropout(drop_p, inplace=False), 'x1-> x2')
         ])
         if self.reducer:
-            self.atten_layer = TransformerConvReducrLayer(self.inter_dim, self.embd_dim, dropout=drop_p,
-                                                          add_self_loops=False, heads=1, scale_param=scale_param)
+            self.atten_layer = TransformerConvReducerLayer(self.inter_dim, self.embd_dim, dropout=drop_p,
+                                                           add_self_loops=False, heads=1, scale_param=scale_param)
         else:
             self.atten_layer = TransformerConv(self.inter_dim, self.embd_dim, dropout=drop_p)
 
@@ -136,17 +293,38 @@ class DimEncoder(torch.nn.Module):
         saved_edges = df.groupby('v1')['atten'].nlargest(min_connect).index.values
         saved_edges = [v2 for _, v2 in saved_edges]
         df.iloc[saved_edges, 2] = threshold + EPS
-        indexs = list(df.loc[df.atten >= threshold].index)
-        atten_map = self.atten_map[:, indexs]
+        indexes = list(df.loc[df.atten >= threshold].index)
+        atten_map = self.atten_map[:, indexes]
         self.atten_map = None
         self.atten_weights = None
         return atten_map, df
 
-    def forward(self, x, edge_index, infrance=False):
-        embbded = x.clone()
-        embbded = self.encoder(embbded, edge_index)
-        embbded, atten_map = self.atten_layer(embbded, edge_index, return_attention_weights=True)
-        if self.reducer and not infrance:
+    def forward(self, x, edge_index, inference=False):
+        """
+        Forward pass of the encoder.
+
+        Processes the input features through the GNN layers and returns
+        the embedded representation.
+
+        Parameters:
+        -----------
+        x : torch.Tensor
+            Node feature matrix of shape [num_nodes, feature_dim]
+        edge_index : torch.Tensor
+            Graph connectivity in COO format of shape [2, num_edges]
+        inference : bool, default=False
+            If True, attention maps will not be stored (used during inference)
+            If False, attention maps will be stored for later analysis (during training)
+
+        Returns:
+        --------
+        torch.Tensor
+            Embedded node features of shape [num_nodes, embd_dim]
+        """
+        embedded = x.clone()
+        embedded = self.encoder(embedded, edge_index)
+        embedded, atten_map = self.atten_layer(embedded, edge_index, return_attention_weights=True)
+        if self.reducer and not inference:
             if self.atten_map is None:
                 self.atten_map = atten_map[0].detach()
                 self.atten_weights = atten_map[1].detach()
@@ -154,92 +332,70 @@ class DimEncoder(torch.nn.Module):
                 self.atten_map = torch.concat([self.atten_map.T, atten_map[0].detach().T]).T
                 self.atten_weights = torch.concat([self.atten_weights, atten_map[1].detach()])
 
-        return embbded
+        return embedded
 
 
-class EncoderGNN(BaseEncoder):
-    def __init__(self, col_dim, row_dim, inter_row_dim, embd_row_dim, inter_col_dim, embd_col_dim,
-                 lambda_rows=1, lambda_cols=1, num_layers=2, drop_p=0.25):
+def build_network(obj, net, biogrid_flag=False, human_flag=False):
+    """
+    Build a gene-gene network from the provided interaction information.
+    Args:
+      obj (anndata.AnnData): Single-cell data object (AnnData) containing gene expression data.
+      net (pandas.DataFrame): DataFrame containing gene interactions (Source, Target, and Conn columns).
+      biogrid_flag (bool, optional): If True, columns for net are set to ["Source", "Target"] only.
+      human_flag (bool, optional): If True, keeps gene names unchanged; otherwise adjusts gene name casing.
+    Returns:
+      tuple:
+        pandas.DataFrame: Filtered interaction DataFrame for valid genes.
+        networkx.Graph: Graph representation of the gene network.
+        pandas.DataFrame: Node-level gene expression features.
+    """
+    if not biogrid_flag:
+        net.columns = ["Source", "Target", "Conn"]
+        net = net.loc[net.Conn >= NETWORK_CUTOFF]
 
-        super(EncoderGNN, self).__init__()
-        self.col_dim = col_dim
-        self.row_dim = row_dim
-        self.inter_row_dim = inter_row_dim
-        self.embd_row_dim = embd_row_dim
-        self.inter_col_dim = inter_col_dim
-        self.embd_col_dim = embd_col_dim
-        self.lambda_rows = lambda_rows
-        self.lambda_cols = lambda_cols
+    else:
+        net.columns = ["Source", "Target"]
 
-        self.encoder = MutualEncoder(col_dim, row_dim, num_layers, drop_p)  # TODO: is this enough?
-        self.rows_encoder = DimEncoder(row_dim, inter_row_dim, embd_row_dim, drop_p=drop_p, scale_param=None,
-                                       reducer=False)
+    if not human_flag:
+        net["Source"] = net["Source"].apply(lambda x: x[0] + x[1:].lower()).astype(str)
+        net["Target"] = net["Target"].apply(lambda x: x[0] + x[1:].lower()).astype(str)
 
-        self.cols_encoder = DimEncoder(col_dim, inter_col_dim, embd_col_dim, drop_p=drop_p, reducer=True)
-        self.feature_decodr = FeatureDecoder(col_dim, embd_col_dim, inter_col_dim, drop_p=0)
-        self.ipd = InnerProductDecoder()
-        self.feature_critarion = nn.MSELoss(reduction='mean')
+    genes = list(pd.concat([net.Source, net.Target]).drop_duplicates())
+    genes = obj.var[obj.var.index.isin(genes)].index
+    node_feature = sc.get.obs_df(obj.raw.to_adata(), list(genes)).T  # genes x cells
+    node_feature["non_zero"] = node_feature.apply(lambda x: x.astype(bool).sum(), axis=1)
+    node_feature = node_feature.loc[node_feature.non_zero > node_feature.shape[1] * EXPRESSION_CUTOFF]
+    node_feature.drop("non_zero", axis=1, inplace=True)
 
-    # def recon_loss(self, z, pos_edge_index, neg_edge_index=None, sig=False):
-    #     if neg_edge_index is None:
-    #         neg_edge_index = negative_sampling(pos_edge_index, z.size(0))
-    #
-    #     if not sig:
-    #         embd = torch.corrcoef(z)
-    #         pos = torch.sigmoid(embd[pos_edge_index[0], pos_edge_index[1]])
-    #         neg = torch.sigmoid(embd[neg_edge_index[0], neg_edge_index[1]])
-    #         pos_loss = -torch.log(pos + EPS).mean()
-    #         neg_loss = -torch.log(1 - neg + EPS).mean()
-    #     else:
-    #         pos_loss = -torch.log(
-    #             self.ipd(z, pos_edge_index, sigmoid=sig) + EPS).mean()
-    #
-    #         neg_loss = -torch.log(1 -
-    #                               self.ipd(z, neg_edge_index, sigmoid=sig) +
-    #                               EPS).mean()
-    #
-    #     return pos_loss + neg_loss
-    #
-    # def kl_loss(self, mu=None, logstd=None):
-    #
-    #     mu = self.rows_encoder.__mu__ if mu is None else mu
-    #     logstd = self.rows_encoder.__logstd__ if logstd is None else logstd
-    #     return -0.5 * torch.mean(
-    #         torch.sum(1 + 2 * logstd - mu ** 2 - logstd.exp() ** 2, dim=1))
-    #
-    # def test(self, z, pos_edge_index, neg_edge_index):
-    #
-    #     pos_y = z.new_ones(pos_edge_index.size(1))
-    #     neg_y = z.new_zeros(neg_edge_index.size(1))
-    #     y = torch.cat([pos_y, neg_y], dim=0)
-    #
-    #     pos_pred = self.ipd(z, pos_edge_index, sigmoid=True)
-    #     neg_pred = self.ipd(z, neg_edge_index, sigmoid=True)
-    #     pred = torch.cat([pos_pred, neg_pred], dim=0)
-    #
-    #     y, pred = y.detach().cpu().numpy(), pred.detach().cpu().numpy()
-    #
-    #     return roc_auc_score(y, pred), average_precision_score(y, pred)
-    #
-    # def calculate_loss(self, x, knn_edge_index, ppi_edge_index, highly_variable_index):
-    #     embbed = self.encoder(x, knn_edge_index, ppi_edge_index)
-    #     embbed_rows = self.rows_encoder(embbed, ppi_edge_index)
-    #     row_loss = self.recon_loss(embbed_rows, ppi_edge_index, sig=True)
-    #
-    #     embbed_cols = self.cols_encoder(embbed.T, knn_edge_index)
-    #     out_features = self.feature_decodr(embbed_cols)
-    #     out_features = (out_features - (out_features.mean(axis=0))) / (out_features.std(axis=0) + EPS)
-    #     reg = self.recon_loss(out_features.T, ppi_edge_index, sig=False)
-    #
-    #     out_features = out_features.T[highly_variable_index.values].T
-    #     col_loss = self.feature_critarion(x[highly_variable_index.values].T, out_features)
-    #
-    #     return self.lambda_rows * row_loss + self.lambda_cols * (col_loss + 2 * reg), row_loss, col_loss
+    net = net.loc[net.Source != net.Target]
+    net = net.loc[net.Source.isin(node_feature.index)]
+    net = net.loc[net.Target.isin(node_feature.index)]
 
-    def forward(self, x, knn_edge_index, ppi_edge_index):
-        embbed = self.encoder(x, knn_edge_index, ppi_edge_index)
-        embbed_rows = self.rows_encoder(embbed, ppi_edge_index)  # gene embedding
-        embbed_cols = self.cols_encoder(embbed.T, knn_edge_index, infrance=True)  # cell embedding
-        out_features = self.feature_decodr(embbed_cols)  # can add linear layers directly for GEP reconstruction
+    gp = nx.from_pandas_edgelist(net, "Source", "Target")
 
-        return embbed_rows, embbed_cols, out_features
+    node_feature = node_feature.loc[list(gp.nodes)]
+
+    return net, gp, node_feature
+
+
+def nx_to_pyg_edge_index(G, mapping=None, device='cpu'):
+    G = G.to_directed() if not nx.is_directed(G) else G
+    if mapping is None:
+        mapping = dict(zip(G.nodes(), range(G.number_of_nodes())))
+    edge_index = torch.empty((2, G.number_of_edges()), dtype=torch.long).to(device)
+    for i, (src, dst) in enumerate(G.edges()):
+        edge_index[0, i] = mapping[src]
+        edge_index[1, i] = mapping[dst]
+    return edge_index, mapping
+
+
+def build_knn_graph(obj):
+    if "distances" not in obj.obsp:
+        sc.pp.neighbors(obj, n_neighbors=25, n_pcs=15, use_rep="X", metric="euclidean")
+    graph = obj.obsp["distances"].toarray()
+    graph = (graph > 0).astype(int)
+    graph = nx.from_numpy_array(np.matrix(graph))
+    ppi_geo = convert.from_networkx(graph)
+    edge_index = ppi_geo.edge_index
+    # sc.pp.highly_variable_genes(obj)
+    return edge_index

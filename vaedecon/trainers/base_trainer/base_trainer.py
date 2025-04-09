@@ -1,6 +1,7 @@
 import datetime
 import logging
 import os
+import json
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -207,31 +208,6 @@ class BaseTrainerL:
 
         self.model_dir = result_dir
 
-    # def _set_output_dir(self) -> str:
-    #     """Sets the output directory for saving checkpoints and logs."""
-    #     if not os.path.exists(self.training_config.output_dir):
-    #         os.makedirs(self.training_config.output_dir, exist_ok=True)
-    #         logger.info(
-    #             f"Created {self.training_config.output_dir} folder since did not exist.\n"
-    #         )
-    #
-    #     training_signature = (
-    #         str(datetime.datetime.now())[0:19].replace(" ", "_").replace(":", "-")
-    #     )
-    #
-    #     model_dir = os.path.join(
-    #         self.training_config.output_dir,
-    #         f"{self.model_name}_training_{training_signature}",
-    #     )
-    #
-    #     if not os.path.exists(model_dir):
-    #         os.makedirs(model_dir, exist_ok=True)
-    #         logger.info(
-    #             f"Created {model_dir}. \n"
-    #             "Training config, checkpoints and final model will be saved here.\n"
-    #         )
-    #     return model_dir
-
     def train(self) -> None:
         """Trains the model using PyTorch Lightning."""
         set_seed(self.training_config.seed)
@@ -265,27 +241,10 @@ class BaseTrainerL:
             train_dataloaders=self.train_loader,
             val_dataloaders=self.eval_loader,
         )
-
-        self.save_model(self.model_dir)
+        self.pl_model.model.save(self.model_dir, training_config=self.training_config)
 
         logger.info("Training ended!")
         logger.info(f"Saved final model in {self.model_dir}")
-
-        # return final_dir
-
-    def save_model(self, dir_path: str):
-        """Saves the final model and training configuration."""
-        if not os.path.exists(dir_path):
-            os.makedirs(dir_path)
-
-        self.pl_model.model.save(dir_path)
-        self.training_config.save_json(dir_path, "training_config")
-
-        try:
-            losses_df = pd.read_csv(os.path.join(self.model_dir, "training_logs", "metrics.csv"))
-        except FileNotFoundError:
-            losses_df = pd.read_csv(os.path.join(self.model_dir, "training_logs", "version_0", "metrics.csv"))
-        losses_df.to_csv(os.path.join(dir_path, 'losses.csv'))
 
     def predict(self) -> Dict[str, torch.Tensor]:
         """Generates predictions from the trained model."""

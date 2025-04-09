@@ -1,14 +1,16 @@
 import os
+import numpy as np
 import pandas as pd
 import warnings
 from pathlib import Path
-from typing import Dict, Any, Type
+from typing import Dict, Any, Type, Union, TypeVar
 import torch
 from torch.utils.data import DataLoader
 
 from ..utility import check_dir
 from ..data import GEPDataset
 from ..models import AutoModel
+from ..models.gnn import EncoderGNN
 from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding
 from ..models.vae import VAE, VAEConfig
 from ..trainers import BaseTrainerConfig, BaseTrainerL
@@ -17,20 +19,29 @@ from ..pipelines.training import TrainingPipeline
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
+# Define type variables for better type hinting
+T_Encoder = TypeVar('T_Encoder', bound=Union[EncoderMLP, EncoderGNN])
+T_Decoder = TypeVar('T_Decoder', bound=DecoderMLP)
 
-def create_model(model_config: VAEConfig, encoder_cls: Type[EncoderMLP],
-                 decoder_cls: Type[DecoderMLP]) -> VAE:
+
+def create_model(model_config: VAEConfig, encoder_cls: Type[T_Encoder], decoder_cls: Type[T_Decoder]) -> VAE:
     """Creates the VAE model."""
+    position_encoding = PositionalEncoding(
+        d_model=model_config.latent_dim,
+        dropout=0,
+        max_len=model_config.n_cell_types
+    )
+    encoder = encoder_cls(
+        args=model_config,
+        position_encoding=position_encoding,
+    )
+    decoder = decoder_cls(args=model_config)
     model = VAE(
         model_config=model_config,
-        encoder=encoder_cls(
-            model_config,
-            position_encoding=PositionalEncoding(
-                d_model=model_config.latent_dim, dropout=0, max_len=model_config.n_cell_types
-            ),
-        ),
-        decoder=decoder_cls(model_config),
+        encoder=encoder,
+        decoder=decoder,
     )
+
     return model
 
 
@@ -70,7 +81,7 @@ def load_trained_model(model_dir: str) -> AutoModel:
 
 def evaluate_model(
         trained_model: AutoModel,
-        test_set: GEPDataset,
+        test_set: Union[GEPDataset | DataLoader],
         result_dir: str,
         model_config: VAEConfig,
         output_dir: str,
@@ -89,23 +100,49 @@ def evaluate_model(
     cell_types = pd.read_csv(
         os.path.join(output_dir, "cell_type_list.txt"), index_col=0, header=None
     ).index.to_list()
-    if model_config.predict_cell_prop:
-        pred_a = trained_model({"data": test_set.data.to(device), "labels": None})
-        pred_cell_prop = pred_a["pred_cell_prop"]
-        pred_cell_prop = pred_cell_prop.squeeze().detach().cpu().numpy()
+    test_set_loader = DataLoader(test_set, batch_size=model_config.gnn_row_dim, shuffle=False)
+    if pred_cell_prop_file_path is not None and os.path.exists(pred_cell_prop_file_path):
+        pred_cell_prop_all = pd.read_csv(pred_cell_prop_file_path, index_col=0)
+        pred_cell_prop_all = pred_cell_prop_all.loc[:, cell_types].values
     else:
-        pred_cell_prop = true_cell_prop.copy()
-        if pred_cell_prop_file_path is not None and os.path.exists(pred_cell_prop_file_path):
-            pred_cell_prop = pd.read_csv(pred_cell_prop_file_path, index_col=0)
-        else:
-            raise FileExistsError('Cell property prediction file not found.')
-        pred_cell_prop = pred_cell_prop.loc[:, cell_types].values
-        # TODO, check the order of labels, using the ground truth as the predicted cell prop
-        pred_a = trained_model({"data": test_set.data.float().to(device),
-                                "labels": torch.from_numpy(pred_cell_prop).float().to(device)})
+        pred_cell_prop_all = None
+    pred_results = []
+    pred_cell_prop_list = []
+    with torch.no_grad():
+        for batch in test_set_loader:
+            pred_a = trained_model(batch)  # A ModelOutput including 11 elements
+            if model_config.predict_cell_prop:
+                # pred_a = trained_model(batch)
+                # pred_a = trained_model(test_set_loader)
+                pred_cell_prop = pred_a["pred_cell_prop"]
+                pred_cell_prop = pred_cell_prop.squeeze().detach().cpu().numpy()
+            else:
+                if 'labels' in batch.keys():
+                    pred_cell_prop = batch["labels"].squeeze().detach().cpu().numpy()
+                else:
+                    raise FileExistsError('Cell property prediction file not found.')
+
+                # TODO, check the order of labels, using the ground truth as the predicted cell prop
+                # pred_a = trained_model({"data": test_set.data.float().to(device),
+                #                         "labels": torch.from_numpy(pred_cell_prop).float().to(device)})
+
+                # pred_a = trained_model(test_set_loader)
+            pred_cell_prop_list.append(pred_cell_prop)
+            pred_results.append(pred_a)
+    if pred_cell_prop_all is not None:
+        pred_cell_prop_all = np.concatenate(pred_cell_prop_list, axis=0)
+    pred_all_dict = {}
+    for a_result in pred_results:
+        for key, value in a_result.items():
+            if key not in pred_all_dict:
+                pred_all_dict[key] = []
+            pred_all_dict[key].append(value)
+    for key, value in pred_all_dict.items():
+        if value[0] is not None and len(value[0].shape) > 0:
+            pred_all_dict[key] = torch.cat(value, dim=0)
 
     pred_cell_prop_df = pd.DataFrame(
-        pred_cell_prop,
+        pred_cell_prop_all,
         index=test_set.gep_data.index,
         columns=cell_types,
     )
@@ -117,7 +154,7 @@ def evaluate_model(
         "true_cell_prop": true_cell_prop,
         "pred_cell_prop_file_path": pred_cell_prop_file_path,
         "cell_types": cell_types,
-        "pred_a": pred_a,
+        "pred_a": pred_all_dict,
         "cell_prop_result_dir": cell_prop_result_dir,
         "gep_result_dir": gep_result_dir,
         "test_set_result_dir": test_set_result_dir,

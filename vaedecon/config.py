@@ -80,7 +80,7 @@ class BaseConfig(BaseModel):
 
         Returns:
             (dict): The dictionary containing all the parameters"""
-        return self.dict()
+        return self.model_dump()
 
     def to_json_string(self):
         """Transforms an object into a JSON string

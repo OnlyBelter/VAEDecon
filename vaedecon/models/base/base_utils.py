@@ -3,6 +3,8 @@ import io
 import logging
 from collections import OrderedDict
 from typing import Any, Tuple
+import _pickle
+import types
 
 try:
     import pickle5 as pickle
@@ -38,7 +40,7 @@ def hf_hub_is_available():
 
 class ModelOutput(OrderedDict):
     """Base ModelOutput class fixing the output type from the models. This class is inspired from
-    the ``ModelOutput`` class from hugginface transformers library"""
+    the ``ModelOutput`` class from huggingface transformers library"""
 
     def __getitem__(self, k):
         if isinstance(k, str):
@@ -69,4 +71,7 @@ class CPU_Unpickler(pickle.Unpickler):
         if module == "torch.storage" and name == "_load_from_bytes":
             return lambda b: torch.load(io.BytesIO(b), map_location="cpu")
         else:
+            if module.startswith('torch_geometric.nn.sequential_'):
+                module = 'torch_geometric.nn'
+                name = 'Sequential'
             return super().find_class(module, name)

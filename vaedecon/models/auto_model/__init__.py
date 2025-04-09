@@ -4,7 +4,7 @@ lines of code.
 .. code-block::
 
     >>> from vaedecon.models import AutoModel
-    >>> model = AutoModel.load_from_folder(dir_path='path/to/my_model')
+    >>> model = AutoModel.load_from_folder(model_dir='path/to/my_model')
 """
 
 from .auto_config import AutoConfig

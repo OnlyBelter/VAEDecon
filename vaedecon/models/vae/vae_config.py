@@ -21,6 +21,7 @@ class VAEConfig(BaseModelConfig):
     # reconstruction_loss: Literal["bce", "mse"] = "mse"
     using_positional_encoding: bool = True
     input_gene_list: str = None  # file name
+    gene_list: list = None  # list of gene names in the training set
     cell_type_list: str = None  # file name
     scaling_by_constant: bool = True  # whether to scale the input GEP data by a constant factor (20 by default)
     loss_coefficient: dict = {
