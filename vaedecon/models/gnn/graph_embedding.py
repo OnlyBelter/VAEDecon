@@ -150,6 +150,8 @@ class EncoderGNN(BaseEncoder):
 class MutualEncoder(L.LightningModule):
     def __init__(self, col_dim, row_dim, num_layers=4, drop_p=0.25):
         super(MutualEncoder, self).__init__()
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.to(device)
         self.col_dim = col_dim
         self.row_dim = row_dim
         self.num_layers = num_layers
@@ -178,7 +180,11 @@ class MutualEncoder(L.LightningModule):
         :param ppi_edge_index: PPI graph edge index
         :return: embedded x with the same shape as x
         """
+        x = x.to(self.device)
+        knn_edge_index = knn_edge_index.to(self.device)
+        ppi_edge_index = ppi_edge_index.to(self.device)
         embedded = x.clone()
+
         for i in range(self.num_layers):
             embedded = self.cols_layers[i](embedded.T, knn_edge_index).T
             embedded = self.rows_layers[i](embedded, ppi_edge_index)
