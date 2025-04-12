@@ -78,7 +78,7 @@ class EncoderMLP(BaseEncoder):
         """
         output = ModelOutput()
 
-        max_depth = self.depth
+        # max_depth = self.depth
         if self.position_encoding is not None:
             self.position_encoding = self.position_encoding.to(x.device)
 
@@ -166,7 +166,7 @@ class DecoderMLP(BaseDecoder):
 
     def __init__(self, args: BaseModelConfig):
         super().__init__()
-
+        self.args = args
         self.input_dim = args.input_dim  # input dimension of the Encoder
         self.latent_dim = args.latent_dim
         self.hidden_dims = args.decoder_hidden_dims if hasattr(args, 'decoder_hidden_dims') else [512, 512, 1024]

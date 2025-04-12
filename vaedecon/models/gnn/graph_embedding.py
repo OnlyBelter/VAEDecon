@@ -268,6 +268,8 @@ class DimEncoder(L.LightningModule):
         :param scale_param: scale parameter for the attention layer
         """
         super(DimEncoder, self).__init__()
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.to(device)
         self.feature_dim = feature_dim
         self.embd_dim = embd_dim
         self.inter_dim = inter_dim
@@ -327,6 +329,9 @@ class DimEncoder(L.LightningModule):
         torch.Tensor
             Embedded node features of shape [num_nodes, embd_dim]
         """
+
+        x = x.to(self.device)
+        edge_index = edge_index.to(self.device)
         embedded = x.clone()
         embedded = self.encoder(embedded, edge_index)
         embedded, atten_map = self.atten_layer(embedded, edge_index, return_attention_weights=True)

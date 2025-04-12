@@ -52,9 +52,13 @@ class VAE(BaseAE):
         Returns:
             An ModelOutput instance containing the model's output.
         """
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.to(device)
         x = inputs["data"]
         y = inputs.get("labels")  # cell proportions of 16 cell types
         sample_ids = inputs["sample_id"]
+        x = x.to(self.device)
+        y = y.to(self.device)
 
         if issubclass(type(self.encoder), EncoderGNN):
             encoder_output = self.encoder(x=x, y=y, sample_ids=sample_ids)
