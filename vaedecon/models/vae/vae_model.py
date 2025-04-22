@@ -14,7 +14,7 @@ from ...models.base.base_utils import ModelOutput
 
 from ...models.base import BaseAE
 from ...models.nn import BaseDecoder, BaseEncoder
-from ...models.gnn import EncoderGNN
+from ...models.gnn import EncoderGNN, EncoderSGNN
 from ...models.base.base_config import BaseModelConfig
 from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor
 
@@ -60,7 +60,7 @@ class VAE(BaseAE):
         x = x.to(self.device)
         y = y.to(self.device)
 
-        if issubclass(type(self.encoder), EncoderGNN):
+        if issubclass(type(self.encoder), EncoderGNN) or issubclass(type(self.encoder), EncoderSGNN):
             encoder_output = self.encoder(x=x, y=y, sample_ids=sample_ids)
         else:
             encoder_output = self.encoder(x=x, y=y)

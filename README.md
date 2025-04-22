@@ -13,7 +13,11 @@ export HDF5_DIR=/opt/homebrew/opt/hdf5
 export BLOSC_DIR=/opt/homebrew/opt/c-blosc
 
 # if you have a GPU, install pytorch with CUDA support first (optional)
+# For linux or Windows, please refer to https://pytorch.org/get-started/previous-versions/
 pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu118
+
+# For Mac OS
+conda install pytorch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 -c pytorch
 
 # sometimes you may need to install the package annoy manually
 conda install conda-forge::python-annoy

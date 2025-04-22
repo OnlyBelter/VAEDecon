@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from ..utility import check_dir
 from ..data import GEPDataset
 from ..models import AutoModel
-from ..models.gnn import EncoderGNN
+from ..models.gnn import EncoderGNN, EncoderSGNN
 from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding
 from ..models.vae import VAE, VAEConfig
 from ..trainers import BaseTrainerConfig, BaseTrainerL
@@ -20,7 +20,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
 # Define type variables for better type hinting
-T_Encoder = TypeVar('T_Encoder', bound=Union[EncoderMLP, EncoderGNN])
+T_Encoder = TypeVar('T_Encoder', bound=Union[EncoderMLP, EncoderGNN, EncoderSGNN])
 T_Decoder = TypeVar('T_Decoder', bound=DecoderMLP)
 
 

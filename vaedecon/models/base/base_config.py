@@ -34,6 +34,7 @@ class BaseModelConfig(BaseConfig):
     gnn_num_layers: int = 3  # number of layers in the GNN
     gnn_drop_p: float = 0.1  # dropout probability
     ppi_file_path: str = None  # file path to the PPI
+    gene_hidden_dim: int = 10  # each gene expression value will be increased to this dimension (1d -> higher dimension)
 
 
 class EnvironmentConfig(BaseConfig):
