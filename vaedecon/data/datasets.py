@@ -108,13 +108,23 @@ class GEPDataset(Dataset):
     This Class should be used for any new data sets.
     """
 
-    def __init__(self, file_path: list[str], scaling_by_constant=True, gene_list_file: Path = None):
+    def __init__(self, file_path: list[str], scaling_by_constant=True, gene_list_file: Path = None,
+                 remove_low_var_genes: bool = False, min_var: float = 1, cell_cell2ave_exp_file_path: str = None):
         """
         Args:
             file_path (str): a list of file path containing the data
 
             scaling_by_constant (bool): If True, the data is scaled by a constant factor,
               so that the data is in the range [0, 1].
+
+            gene_list_file (str): a file path containing the gene list to filter the data
+
+            remove_low_var_genes (bool): If True, the low variance genes are removed from the dataset.
+
+            min_var (float): The minimum variance of the gene to be kept.
+
+            cell_cell2ave_exp_file_path (str): The file path to save the average expression of each cell type.
+                - a table: genes x cell types, in TPM format
         """
         # self.file_path = file_path
         all_data = []
@@ -131,7 +141,12 @@ class GEPDataset(Dataset):
         self.gep_data = pd.concat(all_data, axis=0, join='inner')  # merge multiple datasets by rows
         if gene_list_file is not None:  # filter the data based on the gene list, for test sets
             gene_list = load_gene_list(gene_list_file)
-            self.gep_data = self.gep_data.loc[:, gene_list]
+            self.gep_data = self.gep_data.loc[:, self.gep_data.columns.isin(gene_list)]
+
+        # remove low variance genes here
+        if remove_low_var_genes:
+            self.remove_low_var_genes(min_var=min_var, cell_cell2ave_exp_file_path=cell_cell2ave_exp_file_path)
+
         # rescaling the data to log2(CPM + 1) format after merging
         self.gep_data = non_log2log_cpm(self.gep_data, transpose=False)
         log_message(f"Data shape after merging: {self.gep_data.shape}")
@@ -192,6 +207,28 @@ class GEPDataset(Dataset):
 
     def get_sample_ids(self):
         return self.gep_data.index.to_list()
+
+    def remove_low_var_genes(self, min_var: float = 1, cell_cell2ave_exp_file_path: str = None):
+        """Remove low variance genes from the dataset.
+
+        Args:
+            min_var (float): The minimum variance of the gene to be kept.
+            cell_cell2ave_exp_file_path (str): The file path to save the average expression of each cell type.
+            - a table: genes x cell types
+        """
+        n_gene_before_filter = self.gep_data.shape[1]
+        var = self.gep_data.var(axis=0)
+        self.gep_data = self.gep_data.loc[:, var > min_var]
+        if cell_cell2ave_exp_file_path is not None:
+            cell_cell2ave_exp = pd.read_csv(cell_cell2ave_exp_file_path, index_col=0)
+            if 'var' not in cell_cell2ave_exp:
+                cell_cell2ave_exp['var'] = cell_cell2ave_exp.var(axis=0)
+            cell_cell2ave_exp = cell_cell2ave_exp.loc[cell_cell2ave_exp['var'] > min_var, :]
+            self.gep_data = self.gep_data.loc[:, self.gep_data.columns.isin(cell_cell2ave_exp.index)]
+        n_gene_after_filter = self.gep_data.shape[1]
+        log_message(f"Number of genes before filter: {n_gene_before_filter}")
+        log_message(f"Number of genes after filter: {n_gene_after_filter}")
+        log_message(f"Number of genes removed: {n_gene_before_filter - n_gene_after_filter}")
 
 
 def find_sct_gep_of_bulk_sample(sct_gep_dataset_file_path: str, sample2cell_id_file_path: str,

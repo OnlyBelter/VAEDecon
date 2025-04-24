@@ -92,7 +92,9 @@ class EncoderSGNN(BaseEncoder):
             net = pd.read_csv(self.ppi_file_path)[
                 ["g1_symbol", "g2_symbol", "conn"]].drop_duplicates()
             net, ppi, node_feature = build_network(obj, net, human_flag=True)
-            obj = obj[:, node_feature.index]
+            if self.col_dim != node_feature.shape[0]:
+                self.col_dim = node_feature.shape[0]  # update the col_dim, the intersection of the genes in the PPI and the input data
+            # obj = obj[:, node_feature.index]
             x_t = torch.from_numpy(node_feature.values)
             # print(f"N genes: {node_feature.shape}")
         except Exception as e:
