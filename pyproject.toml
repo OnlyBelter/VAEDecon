@@ -33,7 +33,7 @@ classifiers = [
 ]
 dependencies = [
 #    "tensorflow>=2.8.0",
-    "torch==2.2.2",
+    "torch==2.6.0",
     "scikit-learn>=1.4.2",
     "anndata==0.8.0",
     "scanpy==1.10.1",
@@ -58,8 +58,8 @@ dependencies = [
     "cloudpickle",
     "pythae",
     "torchmetrics",
-    "lightning==2.5.0",
-    "torch-geometric==2.5.3",
+    "lightning==2.5.1",
+    "torch-geometric==2.6.1",
     "networkx>=3.1",
 
 #    'tensorrt',
