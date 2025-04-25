@@ -177,10 +177,10 @@ class GEPDataset(Dataset):
         # Select sample
         x = self.data[index]
         y = self.labels[index]
-        sample_id = self.gep_data.index.to_list()[index]
+        # sample_id = self.gep_data.index.to_list()[index]
         # y = self.labels[index]
 
-        return DatasetOutput(data=x, labels=y, sample_id=sample_id)
+        return DatasetOutput(data=x, labels=y)
 
     def save_gene_list(self, file_path: Path):
         check_dir(Path(file_path).parent)

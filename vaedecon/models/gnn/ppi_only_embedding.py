@@ -80,9 +80,10 @@ class EncoderSGNN(BaseEncoder):
         :param sample_ids: The sample IDs of the input data. Defaults to None.
         :return: gene embedding, cell embedding, reconstructed gene expression
         """
-        obs = pd.DataFrame(data=None, index=sample_ids)
+        # obs = pd.DataFrame(data=None, index=sample_ids)
         var = pd.DataFrame(data=None, index=self.gene_list)
-        obj = sc.AnnData(X=x.detach().cpu().numpy(), var=var, obs=obs)
+        # obj = sc.AnnData(X=x.detach().cpu().numpy(), var=var, obs=obs)
+        obj = sc.AnnData(X=x.detach().cpu().numpy(), var=var)
         x_t = x.T
         if obj.raw is None:
             obj.raw = obj.copy()

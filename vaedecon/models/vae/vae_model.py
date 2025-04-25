@@ -56,14 +56,15 @@ class VAE(BaseAE):
         self.to(device)
         x = inputs["data"]
         y = inputs.get("labels")  # cell proportions of 16 cell types
-        sample_ids = inputs["sample_id"]
+        # sample_ids = inputs["sample_id"]
         x = x.to(self.device)
         y = y.to(self.device)
 
-        if issubclass(type(self.encoder), EncoderGNN) or issubclass(type(self.encoder), EncoderSGNN):
-            encoder_output = self.encoder(x=x, y=y, sample_ids=sample_ids)
-        else:
-            encoder_output = self.encoder(x=x, y=y)
+        # if issubclass(type(self.encoder), EncoderGNN) or issubclass(type(self.encoder), EncoderSGNN):
+        #     encoder_output = self.encoder(x=x, y=y, sample_ids=sample_ids)
+        # else:
+        #     encoder_output = self.encoder(x=x, y=y)
+        encoder_output = self.encoder(x=x, y=y)
         mu, log_var = (
             encoder_output.embedding,
             encoder_output.log_var,

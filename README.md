@@ -19,7 +19,7 @@ pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https
 # For Mac OS
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
 
-# sometimes you may need to install the package annoy manually
+# sometimes you may need to install the package annoy manually on linux
 conda install conda-forge::python-annoy
 pip install vaedecon
 ```
