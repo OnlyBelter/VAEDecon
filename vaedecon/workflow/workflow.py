@@ -14,7 +14,7 @@ from ..models.gnn import EncoderGNN, EncoderSGNN
 from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding
 from ..models.vae import VAE, VAEConfig
 from ..trainers import BaseTrainerConfig, BaseTrainerL
-from ..pipelines.training import TrainingPipeline
+from ..pipelines import TrainingPipeline
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)

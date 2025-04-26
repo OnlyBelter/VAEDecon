@@ -3,8 +3,6 @@ import io
 import logging
 from collections import OrderedDict
 from typing import Any, Tuple
-import _pickle
-import types
 
 try:
     import pickle5 as pickle

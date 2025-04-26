@@ -213,5 +213,3 @@ class PPIEncoder(L.LightningModule):
         embedded = self.attention(embedded)
 
         return embedded
-
-

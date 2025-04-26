@@ -8,7 +8,7 @@ from vaedecon.models.nn import BaseDecoder, BaseDiscriminator, BaseEncoder, Base
 from ..base import BaseModelConfig
 # from ..vae import VAEConfig
 
-from pythae.models.base.base_utils import ModelOutput
+from ..base.base_utils import ModelOutput
 
 
 class Encoder_AE_MLP(BaseEncoder):
