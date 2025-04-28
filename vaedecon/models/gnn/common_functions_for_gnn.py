@@ -39,9 +39,9 @@ def build_network(obj, net, biogrid_flag=False, human_flag=False):
     genes = list(pd.concat([net.Source, net.Target]).drop_duplicates())
     genes = obj.var[obj.var.index.isin(genes)].index
     node_feature = sc.get.obs_df(obj.raw.to_adata(), list(genes)).T  # genes x cells
-    node_feature["non_zero"] = node_feature.apply(lambda x: x.astype(bool).sum(), axis=1)
-    node_feature = node_feature.loc[node_feature.non_zero > node_feature.shape[1] * EXPRESSION_CUTOFF]
-    node_feature.drop("non_zero", axis=1, inplace=True)
+    # node_feature["non_zero"] = node_feature.apply(lambda x: x.astype(bool).sum(), axis=1)
+    # node_feature = node_feature.loc[node_feature.non_zero > node_feature.shape[1] * EXPRESSION_CUTOFF]
+    # node_feature.drop("non_zero", axis=1, inplace=True)
 
     net = net.loc[net.Source != net.Target]
     net = net.loc[net.Source.isin(node_feature.index)]

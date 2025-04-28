@@ -72,6 +72,8 @@ class EncoderSGNN(BaseEncoder):
                 nn.Linear(self.embd_col_dim, self.n_cell_types),
                 nn.Softmax(dim=1)
             )
+        self.net = pd.read_csv(self.ppi_file_path)[
+            ["g1_symbol", "g2_symbol", "conn"]].drop_duplicates()
 
     def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None, sample_ids: list = None) -> ModelOutput:
         """
@@ -90,9 +92,7 @@ class EncoderSGNN(BaseEncoder):
         ppi = None
         try:
             # print(f'Loading human PPI from: {self.ppi_file_path}...')
-            net = pd.read_csv(self.ppi_file_path)[
-                ["g1_symbol", "g2_symbol", "conn"]].drop_duplicates()
-            net, ppi, node_feature = build_network(obj, net, human_flag=True)
+            net, ppi, node_feature = build_network(obj, self.net, human_flag=True)
             if self.col_dim != node_feature.shape[0]:
                 self.col_dim = node_feature.shape[0]  # update the col_dim, the intersection of the genes in the PPI and the input data
             # obj = obj[:, node_feature.index]

@@ -24,7 +24,7 @@ class BaseModelConfig(BaseConfig):
     # position_encoding: torch.Tensor = None
     # parameters for GNN encoder
     gnn_col_dim: int = 5000  # dimension of the column (the number of genes)
-    gnn_row_dim: int = 1000  # dimension of the row (the number of cells in each batch)
+    gnn_row_dim: int = 1000  # dimension of the row (the number of cells in each batch to construct the KNN graph)
     gnn_inter_row_dim: int = 500  # dimension of the intermediate layer of the row (gene) embeddings
     gnn_inter_col_dim: int = 500  # dimension of the intermediate layer of the column (cell) embeddings
     gnn_embd_row_dim: int = 50  # dimension of the final row (gene) embeddings
