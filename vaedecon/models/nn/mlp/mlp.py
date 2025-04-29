@@ -5,6 +5,7 @@ from typing import List, Optional
 import torch
 import numpy as np
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ...base import BaseModelConfig
 from ..positional_encoding import PositionalEncoding
@@ -50,14 +51,22 @@ class EncoderMLP(BaseEncoder):
         # self.layers = layers
         self.depth = len(self.layers)
 
-        self.embedding = nn.Linear(in_features=self.hidden_dims[-1],
-                                   out_features=args.latent_dim * args.n_cell_types)
-        self.log_var = nn.Linear(self.hidden_dims[-1], self.latent_dim)
+        # self.embedding = nn.Linear(in_features=self.hidden_dims[-1],
+        #                            out_features=args.latent_dim * args.n_cell_types)
+        self.fc_mu_list = nn.ModuleList(
+            [nn.Linear(self.hidden_dims[-1], self.latent_dim) for _ in range(self.n_cell_types)]
+        )
+        self.fc_logvar_list = nn.ModuleList(
+            [nn.Linear(self.hidden_dims[-1], self.latent_dim) for _ in range(self.n_cell_types)]
+        )
+        # self.log_var = nn.Linear(self.hidden_dims[-1], self.latent_dim)
         if self.predict_cell_prop:
-            self.cell_prop = nn.Sequential(
-                nn.Linear(self.hidden_dims[-1], self.n_cell_types),
-                nn.Softmax(dim=1)
-            )
+            # self.cell_prop = nn.Sequential(
+            #     nn.Linear(self.hidden_dims[-1], self.n_cell_types),
+            #     nn.Softmax(dim=1)
+            # )
+            # Proportion head (outputs Dirichlet distribution parameters)
+            self.fc_dd_alpha = nn.Linear(self.hidden_dims[-1], self.n_cell_types)
         # self.position_encoding = self.position_encoding.to(self.embedding.weight.device)
 
     def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None,
@@ -91,26 +100,16 @@ class EncoderMLP(BaseEncoder):
                 f"Got ({output_layer_levels})."
             )
 
-            if -1 in output_layer_levels:
-                max_depth = self.depth
-            else:
-                max_depth = max(output_layer_levels)
+            # if -1 in output_layer_levels:
+            #     max_depth = self.depth
+            # else:
+            #     max_depth = max(output_layer_levels)
 
         out = x.view(x.size(0), -1)  # flatten the input
-        first_layer_output = None
         for i, layer in enumerate(self.layers):
             out = layer['linear'](out)
             out = layer['norm'](out)
             out = layer['activation'](out)
-            # if i == 0:
-            #     first_layer_output = out
-            # elif i < max_depth - 1:
-            #     if out.size(-1) != first_layer_output.size(-1):
-            #         # project the output of the first layer to the output of the current layer
-            #         first_layer_output = nn.Linear(first_layer_output.size(-1),
-            #                                        out.size(-1)).to(out.device)(first_layer_output)
-            #     # residual connection
-            #     out = out + first_layer_output
             out = layer['dropout'](out)
 
             if output_layer_levels is not None:
@@ -118,19 +117,26 @@ class EncoderMLP(BaseEncoder):
                     output[f"embedding_layer_{i+1}"] = out
 
         # using the proposed structure of latent space
-        embedding_all_types = self.embedding(out)  # (batch_size, latent_dim, n_cell_types)
-        embedding_all_types = embedding_all_types.view((-1, self.latent_dim, self.n_cell_types))
+        # embedding_all_types = self.embedding(out)  # (batch_size, latent_dim, n_cell_types)
+        mu_list = [mu(out) for mu in self.fc_mu_list]
+        # combine the mu_list into a tensor
+        # embedding_all_types = torch.stack(mu_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
+        # embedding_all_types = embedding_all_types.view((-1, self.latent_dim, self.n_cell_types))
+        logvar_list = [logvar(out) for logvar in self.fc_logvar_list]
         # TODO: getting cell proportions from DeSide
         if self.predict_cell_prop:
-            output["cell_prop"] = self.cell_prop(out).view((-1, self.n_cell_types, 1))
+            # output["cell_prop"] = self.cell_prop(out).view((-1, self.n_cell_types, 1))
+            # parameters for Dirichlet distribution
+            # using softplus to make sure the parameters are positive, adding 1e-6 to avoid zero for numerical stability
+            output['dd_alpha'] = F.softplus(self.fc_dd_alpha(out)) + 1e-6
         # print(embedding_all_types.shape, output["cell_prop"].shape)
         if y is not None:
             y = y.view((-1, self.n_cell_types, 1))
             # embedding = torch.matmul(embedding_all_types, y)  # bulk mode embedding
-            cell_type_existed = (y > 0.01).type(torch.int8).type(torch.float32)
+            cell_type_existed = (y >= 0.01).type(torch.int8).type(torch.float32)
         elif self.predict_cell_prop:
             # embedding = torch.matmul(embedding_all_types, output["cell_prop"])
-            cell_type_existed = (output["cell_prop"] > 0.01).type(torch.int8).type(torch.float32)
+            cell_type_existed = (output["cell_prop"] >= 0.01).type(torch.int8).type(torch.float32)
         else:
             raise NotImplementedError('If self.predict_cell_prop is False, '
                                       'y (cell proportions of cell types) must be provided. '
@@ -138,16 +144,19 @@ class EncoderMLP(BaseEncoder):
 
         # assume y is unknown, using the average embedding of all cell types as the output miu of encoder
         # and calculate the KL divergence loss based on this miu
-        embedding = torch.mean(embedding_all_types, dim=2, keepdim=True)  # (batch_size, latent_dim, 1)
+        # embedding = torch.mean(embedding_all_types, dim=2, keepdim=True)  # (batch_size, latent_dim, 1)
 
         # (latent_dim, n_cell_types) x (batch_size, n_cell_types, 1) -> (batch_size, latent_dim, 1)
         if self.position_encoding is not None:
             position_encoding_cell_type = torch.matmul(self.position_encoding, cell_type_existed)
-            output["embedding"] = embedding + position_encoding_cell_type
-        else:
-            output["embedding"] = embedding
-        output["log_var"] = self.log_var(out).reshape((-1, self.latent_dim, 1))
-        output['embedding_all_types'] = embedding_all_types
+            # output["embedding"] = embedding + position_encoding_cell_type
+            mu_list = [mu + position_encoding_cell_type for mu in mu_list]
+        # else:
+        #     output["embedding"] = embedding
+        # output["log_var"] = self.log_var(out).reshape((-1, self.latent_dim, 1))
+        # output['embedding_all_types'] = embedding_all_types
+        output['mu_list'] = mu_list
+        output['logvar_list'] = logvar_list
         output['cell_type_existed'] = cell_type_existed
 
         return output
@@ -216,7 +225,7 @@ class DecoderMLP(BaseDecoder):
         """
         output = ModelOutput()
 
-        max_depth = self.depth
+        # max_depth = self.depth
 
         if output_layer_levels is not None:
             assert all(
@@ -227,10 +236,10 @@ class DecoderMLP(BaseDecoder):
                 f"Got ({output_layer_levels})"
             )
 
-            if -1 in output_layer_levels:
-                max_depth = self.depth
-            else:
-                max_depth = max(output_layer_levels)
+            # if -1 in output_layer_levels:
+            #     max_depth = self.depth
+            # else:
+            #     max_depth = max(output_layer_levels)
 
         out = z.reshape(-1, 1, self.latent_dim)
         # print('z.shape', z.shape)

@@ -974,10 +974,8 @@ def plot_latent_space(
     check_dir(Path(latent_space_result_dir))
     # z = pred_a['z'].detach().numpy()   # n_samples x latent_dim
     # Move tensors to CPU and convert to numpy
-    mu = pred_a['mu'].detach().cpu().numpy()  # n_samples x latent_dim
     mu_deconv = pred_a['mu_deconv'].detach().cpu().numpy()  # n_samples x latent_dim x n_cell_types
     # z_df = pd.DataFrame(np.squeeze(z), index=sample_ids)
-    mu_df = pd.DataFrame(np.squeeze(mu), index=sample_ids)
     sc_mu_list = []
     for i in range(len(cell_types)):
         current_mu = mu_deconv[:, :, i]
@@ -987,8 +985,11 @@ def plot_latent_space(
         sc_mu_list.append(_df)
     sc_mu_df = pd.concat(sc_mu_list)
     # z_df.to_csv(os.path.join(latent_space_result_dir, 'z_conv.csv'))
-    mu_df.to_csv(os.path.join(latent_space_result_dir, 'mu_conv.csv'))
     sc_mu_df.to_csv(os.path.join(latent_space_result_dir, 'sc_mu_deconv.csv'))
+    if 'mu' in pred_a:
+        mu = pred_a['mu'].detach().cpu().numpy()  # n_samples x latent_dim
+        mu_df = pd.DataFrame(np.squeeze(mu), index=sample_ids)
+        mu_df.to_csv(os.path.join(latent_space_result_dir, 'mu_conv.csv'))
     # plot latent space
 
     sc_mu_umap = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist,

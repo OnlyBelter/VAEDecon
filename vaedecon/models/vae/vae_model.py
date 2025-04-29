@@ -4,10 +4,12 @@ OnlyBelter (https://github.com/OnlyBelter, onlybelter@gmail.com)
 """
 
 import logging
-from typing import Optional
+from typing import Optional, List
 
 import torch
 import torch.nn.functional as F
+from sympy.core.facts import deduce_alpha_implications
+from torch.distributions import Normal, Dirichlet, Gamma, kl_divergence
 
 from ...data.datasets import DatasetOutput
 from ...models.base.base_utils import ModelOutput
@@ -65,34 +67,51 @@ class VAE(BaseAE):
         # else:
         #     encoder_output = self.encoder(x=x, y=y)
         encoder_output = self.encoder(x=x, y=y)
-        mu, log_var = (
-            encoder_output.embedding,
-            encoder_output.log_var,
+        mu_list, logvar_list = (
+            encoder_output.mu_list,
+            encoder_output.logvar_list,
         )
+        # stack the mu_list and logvar_list to (batch_size, latent_dim, n_cell_types)
+        mu_types = torch.stack(mu_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
+        log_var_types = torch.stack(logvar_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
+        pred_cell_prop = None
+        dd_alpha = torch.zeros(self.model_config.n_cell_types)
         if self.model_config.predict_cell_prop:
-            pred_cell_prop = encoder_output.cell_prop,
-        else:
-            pred_cell_prop = None
+            dd_alpha = encoder_output.dd_alpha
+            # Sample proportions from Dirichlet distribution
+            pred_cell_prop = self.reparameterize_dirichlet(dd_alpha)
         # log_var, pred_cell_prop = encoder_output.log_var, encoder_output.cell_prop
-        mu_deconv = encoder_output.embedding_all_types  # (batch_size, latent_dim, n_cell_types)
+        # mu_deconv = encoder_output.embedding_all_types  # (batch_size, latent_dim, n_cell_types)
         # cell_type_existed = encoder_output.cell_type_existed  # (batch_size, n_cell_types, 1)
-        n_cell_types = mu_deconv.shape[2]
+        n_cell_types = len(mu_list)
         # get all reconstructed GEPs first, then select the one based on cell_type_existed
 
-        std = torch.exp(0.5 * log_var)
+        # std = torch.exp(0.5 * log_var)
         # print('std.shape', std.shape, 'mu.shape', mu.shape)
         # z, eps = self._sample_gauss(mu, std)
         # reconstructing GEPs for the bulk mode by decoder directly
         # recon_x = self.decoder(z)["reconstruction"]  # bulk mode
         # recon_x = recon_x.reshape(x.shape)  # (batch_size, n_genes)
+
         # reconstructing GEPs for all cell types
-        recon_x_all_types = torch.zeros(
-            [x.shape[0], x.shape[1], n_cell_types], dtype=torch.float32, device=x.device
-        )
-        for i in range(n_cell_types):
-            mu_specific_type = mu_deconv[:, :, i].reshape(mu.shape)
-            z_specific_type = self._sample_gauss(mu_specific_type, std)  # same std for all cell types
-            recon_x_all_types[:, :, i] = self.decoder(z_specific_type)["reconstruction"].reshape(x.shape)
+        # Sample latent type representations for each cell type
+        z_type_list = [
+            self.reparameterize_gaussian(mu_list[i], logvar_list[i])
+            for i in range(n_cell_types)
+        ]  # list of tensors (batch_size, latent_dim)
+        # Decode each latent type representation to its corresponding GEP
+        recon_type_gep_list = [
+            self.decoder(z_type)["reconstruction"].squeeze() for z_type in z_type_list
+        ]  # list of tensors (batch_size, n_genes)
+        # Stack the reconstructed GEPs for all cell types, shape: (batch_size, n_genes, n_cell_types)
+        recon_x_all_types = torch.stack(recon_type_gep_list, dim=2)
+        # recon_x_all_types = torch.zeros(
+        #     [x.shape[0], x.shape[1], n_cell_types], dtype=torch.float32, device=x.device
+        # )
+        # for i in range(n_cell_types):
+        #     mu_specific_type = mu_deconv[:, :, i].reshape(mu.shape)
+        #     z_specific_type = self.reparameterize_gaussian(mu_specific_type, std)  # same std for all cell types
+        #     recon_x_all_types[:, :, i] = self.decoder(z_specific_type)["reconstruction"].reshape(x.shape)
         # recon_x_all_types should be recovered to CPM format before doing the matrix multiplication
         if self.model_config.scaling_by_constant:
             recon_x_all_types = recon_x_all_types * 20.0
@@ -109,23 +128,24 @@ class VAE(BaseAE):
             recon_x_conv = recon_x_conv / 20.0
         recon_x_conv = recon_x_conv.reshape(x.shape)
 
-        loss, kld, cell_prop_loss, recon_loss_conv = self.loss_function(
+        loss, kld_z, kld_p, recon_loss_conv = self.loss_function(
             # recon_x=recon_x, x=x, mu=mu, log_var=log_var, y=y,
-            x=x, log_var=log_var, y=y, mu=mu,
-            pred_cell_prop=pred_cell_prop, recon_x_conv=recon_x_conv
+            x=x, logvar_list=logvar_list, y=y, mu_list=mu_list,
+            dd_alpha=dd_alpha, recon_x_conv=recon_x_conv,
+            beta=self.model_config.loss_coefficient['beta'],
         )
 
         output = ModelOutput(
             # recon_loss=recon_loss,
-            reg_loss=kld,
+            # reg_loss=kld_z,
             loss=loss,
             # recon_x=recon_x,
             # z=z,
-            mu=mu,
-            mu_deconv=mu_deconv,
-            log_var=log_var,
-            cell_prop_loss=cell_prop_loss,
-            kld=kld,
+            # mu=mu,
+            mu_deconv=mu_types,
+            log_var=log_var_types,
+            cell_prop_loss=kld_p,
+            kld=kld_z,
             pred_cell_prop=pred_cell_prop,
             recon_x_conv=recon_x_conv,
             recon_loss_conv=recon_loss_conv,
@@ -133,7 +153,80 @@ class VAE(BaseAE):
         )
         return output
 
-    def loss_function(self, x: torch.Tensor, mu: torch.Tensor,
+    def loss_function(self, x: torch.Tensor,
+                      recon_x_conv: Optional[torch.Tensor] = None,
+                      mu_list: List[torch.Tensor] = None,
+                      logvar_list: List[torch.Tensor] = None,
+                      y: Optional[torch.Tensor] = None,
+                      dd_alpha: Optional[torch.Tensor] = None,
+                      beta=1.0,
+    ):
+        """Calculates the loss for the VAE.
+
+        Args:
+            x: Input data.
+            recon_x_conv: Reconstructed data from cell-type-specific GEPs x cellular proportions.
+            mu_list: List of cell type means.
+            logvar_list: List of cell type log variances.
+            y: Cell proportions of the input data.
+            dd_alpha: Dirichlet distribution parameters.
+            beta: Weight for the KL divergence term.
+        Returns:
+            A tuple containing the total loss, KL divergence loss, cell proportion loss, and reconstruction loss.
+        """
+        # print('recon_x.shape', recon_x.shape, 'x.shape', x.shape, 'mu.shape', mu.shape,
+        #       'log_var.shape', log_var.shape, 'y.shape', y.shape, 'pred_cell_prop.shape', pred_cell_prop.shape)
+        # recon_x_by_decoder = recon_x
+        # recon_x_by_conv = recon_x_conv
+        # --- Reconstruction loss ---
+        if self.model_config.reconstruction_loss == "mse":
+            recon_loss_by_conv = F.mse_loss(
+                recon_x_conv.reshape(x.shape[0], -1),  # batch_size x features (gene expression values)
+                x.reshape(x.shape[0], -1),
+                reduction="none",
+            ).sum(dim=-1)
+        elif self.model_config.reconstruction_loss == "bce":
+            recon_loss_by_conv = F.binary_cross_entropy(
+                recon_x_conv.reshape(x.shape[0], -1),
+                x.reshape(x.shape[0], -1),
+                reduction="none",
+            ).sum(dim=-1)
+        else:
+            raise ValueError(
+                f"Reconstruction loss {self.model_config.reconstruction_loss} is not implemented"
+            )
+
+        # --- KL divergence loss for cellular proportions ---
+        # Prior: Uniform Dirichlet distribution (all alpha = 1)
+        kld_p = torch.zeros(x.shape[0], device=x.device)
+        if y is not None and self.model_config.predict_cell_prop:
+            prior_alpha = torch.ones_like(dd_alpha)
+            prior_dist_p = Dirichlet(prior_alpha)
+            posterior_dist_p = Dirichlet(dd_alpha)
+            kld_p = kl_divergence(prior_dist_p, posterior_dist_p).sum(dim=-1)
+
+        # --- KL divergence loss for GEPs ---
+        # Prior: Gaussian distribution (mean=0, std=1)
+        kld_z_types = torch.zeros(x.shape[0], device=x.device)
+        for mu, logvar in zip(mu_list, logvar_list):
+            # prior_dist = Normal(torch.zeros_like(mu), torch.ones_like(logvar))
+            # std = torch.exp(0.5 * logvar)
+            # posterior_dist = Normal(mu, std)
+            # kld_g = kl_divergence(prior_dist, posterior_dist).sum(dim=-1)
+            kld_g = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=-1)
+            kld_z_types += kld_g
+
+        # print('recon_loss_by_decoder.shape', recon_loss_by_decoder.shape, 'kld.shape', kld.shape,
+        #       'cell_prop_loss.shape', cell_prop_loss.shape)
+        lo = self.model_config.loss_coefficient
+        total_loss = (recon_loss_by_conv
+                + beta * (kld_z_types + kld_p)
+        ).mean(dim=0)
+
+        return (total_loss, kld_z_types.mean(dim=0), kld_p.mean(dim=0),
+                recon_loss_by_conv.mean(dim=0))
+
+    def loss_function_old(self, x: torch.Tensor, mu: torch.Tensor,
                       log_var: torch.Tensor, y: Optional[torch.Tensor] = None,
                       pred_cell_prop: Optional[torch.Tensor] = None,
                       recon_x_conv: Optional[torch.Tensor] = None):
@@ -198,7 +291,22 @@ class VAE(BaseAE):
         return (total_loss, kld.mean(dim=0), cell_prop_loss.mean(dim=0),
                 recon_loss_by_conv.mean(dim=0))
 
-    def _sample_gauss(self, mu, std):
+    def reparameterize_gaussian(self, mu, logvar):
         """Samples from a Gaussian distribution (N(0, I)) using the reparameterization trick."""
+        std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
-        return mu + eps * std
+        return mu + eps * logvar
+
+    def reparameterize_dirichlet(self, alpha):
+        """
+        Use the Gamma distribution reparameterization trick for Dirichlet.
+        Args:
+            alpha (torch.Tensor): The Dirichlet parameters. (batch_size, n_cell_types)
+        Returns: samples from Dirichlet distribution.
+        Requires PyTorch 1.8+ for Gamma.rsample().
+        """
+        gamma_dis = Gamma(concentration=alpha, rate=torch.tensor(1.0, device=alpha.device))
+        gamma_samples = gamma_dis.rsample()  # shape: (batch_size, n_cell_types)
+        # Normalize the samples to sum to 1 to get Dirichlet samples
+        p = gamma_samples / gamma_samples.sum(dim=1, keepdim=True)
+        return p
