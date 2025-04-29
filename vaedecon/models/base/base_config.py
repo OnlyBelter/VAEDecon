@@ -35,6 +35,8 @@ class BaseModelConfig(BaseConfig):
     gnn_drop_p: float = 0.1  # dropout probability
     ppi_file_path: str = None  # file path to the PPI
     gene_hidden_dim: int = 10  # each gene expression value will be increased to this dimension (1d -> higher dimension)
+    biogrid_flag: bool = False  # if True, the columns for net are set to ["Source", "Target"] only
+    gene_list: list = None # gene list in the input data
 
 
 class EnvironmentConfig(BaseConfig):

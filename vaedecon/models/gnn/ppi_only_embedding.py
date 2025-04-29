@@ -2,6 +2,9 @@ import os
 import torch
 import torch.nn as nn
 import scanpy as sc
+import networkx as nx
+from torch_geometric.utils import from_networkx
+
 from ..nn.base_architectures import BaseEncoder
 from ..base import BaseModelConfig
 from ...models.base.base_utils import ModelOutput
@@ -10,7 +13,7 @@ from typing import Optional
 from torch_geometric.nn import Sequential, SAGEConv
 import lightning as L
 import pandas as pd
-from .common_functions_for_gnn import build_network, nx_to_pyg_edge_index
+# from .common_functions_for_gnn import build_network, nx_to_pyg_edge_index
 
 EPS = 1e-15
 MAX_LOGSTD = 10
@@ -42,6 +45,7 @@ class EncoderSGNN(BaseEncoder):
         self.num_layers = args.gnn_num_layers
         self.predict_cell_prop = args.predict_cell_prop
         self.gene_list = args.gene_list
+        self.biogrid_flag = args.biogrid_flag
         if os.path.exists(args.ppi_file_path):
             self.ppi_file_path = args.ppi_file_path
         else:
@@ -72,49 +76,31 @@ class EncoderSGNN(BaseEncoder):
                 nn.Linear(self.embd_col_dim, self.n_cell_types),
                 nn.Softmax(dim=1)
             )
+        # the PPI network in a DataFrame format with two or three columns, such as ["Source", "Target", "Conn"]
         self.net = pd.read_csv(self.ppi_file_path)[
             ["g1_symbol", "g2_symbol", "conn"]].drop_duplicates()
+
+        self.keep_genes, self.edge_index = self._prepare_ppi(self.gene_list)
+        self.col_dim = len(self.keep_genes)  # update the col_dim, the intersection of the genes in the PPI and the input data
+        self.keep_idx = [self.gene_list.index(g) for g in self.keep_genes]
 
     def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None, sample_ids: list = None) -> ModelOutput:
         """
         :param x: input node features, gene expression matrix (n_cells, n_genes)
         :param y: The cell proportions of the input data. Defaults to None.
         :param sample_ids: The sample IDs of the input data. Defaults to None.
-        :return: gene embedding, cell embedding, reconstructed gene expression
+        :return: gene bulk_embedding, cell bulk_embedding, reconstructed gene expression
         """
-        # obs = pd.DataFrame(data=None, index=sample_ids)
-        var = pd.DataFrame(data=None, index=self.gene_list)
-        # obj = sc.AnnData(X=x.detach().cpu().numpy(), var=var, obs=obs)
-        obj = sc.AnnData(X=x.detach().cpu().numpy(), var=var)
-        x_t = x.T
-        if obj.raw is None:
-            obj.raw = obj.copy()
-        ppi = None
-        try:
-            # print(f'Loading human PPI from: {self.ppi_file_path}...')
-            net, ppi, node_feature = build_network(obj, self.net, human_flag=True)
-            if self.col_dim != node_feature.shape[0]:
-                self.col_dim = node_feature.shape[0]  # update the col_dim, the intersection of the genes in the PPI and the input data
-            # obj = obj[:, node_feature.index]
-            x_t = torch.from_numpy(node_feature.values)
-            # print(f"N genes: {node_feature.shape}")
-        except Exception as e:
-            print(f"Error during network construction: {e}")
-        ppi_edge_index, _ = nx_to_pyg_edge_index(ppi)  # PPI graph edge index
-        # ppi_edge_index = ppi_edge_index
+        x_sub = x[:, self.keep_idx]  # (n_cells, n_genes)
+        x_in = x_sub.view(-1, self.col_dim, 1)  # (n_cells, n_genes, 1)
+        ppi_attention = self.encoder(x_in, self.edge_index).squeeze()  # gene bulk_embedding with shape (n_cells, n_genes)
 
         output = ModelOutput()
-        x = x_t.T.view(-1, self.col_dim, 1)  # (n_cells, n_genes, 1)
-        ppi_attention = self.encoder(x, ppi_edge_index).squeeze()  # gene embedding with shape (n_cells, n_genes)
-        # gene embedding (n_genes, self.embd_row_dim)
-        # embedded_rows = self.rows_encoder(embedded, ppi_edge_index)
-        # cell embedding (n_cells, self.embd_col_dim)
-        # cell_embedding_by_gnn = self.cols_encoder(embedded.T, knn_edge_index, inference=True)
         cell_embedding = self.cell_embedding_layer(ppi_attention)  # (n_cells, self.embd_col_dim)
         embedding_all_types = self.deconvolution_layer(cell_embedding)
         embedding_all_types = embedding_all_types.view(-1, self.cell_latent_dim, self.n_cell_types)
-        embedding = torch.mean(embedding_all_types, dim=2, keepdim=True)  # bulk mode embedding
-        log_var = self.log_var(cell_embedding).reshape(-1, self.cell_latent_dim, 1)  # todo: check here
+        bulk_embedding = torch.mean(embedding_all_types, dim=2, keepdim=True)  # bulk mode embedding
+        log_var = self.log_var(cell_embedding).reshape(-1, self.cell_latent_dim, 1)
         # out_features = self.feature_decoder(embedded_cols)  # can add linear layers directly for GEP reconstruction
 
         # TODO: getting cell proportions from DeSide
@@ -123,23 +109,49 @@ class EncoderSGNN(BaseEncoder):
         # print(embedding_all_types.shape, output["cell_prop"].shape)
         if y is not None:
             y = y.view((-1, self.n_cell_types, 1))
-            # embedding = torch.matmul(embedding_all_types, y)  # bulk mode embedding
+            # bulk_embedding = torch.matmul(embedding_all_types, y)  # bulk mode embedding
             cell_type_existed = (y >= 0.01).type(torch.int8).type(torch.float32)
         elif self.predict_cell_prop:
-            # embedding = torch.matmul(embedding_all_types, output["cell_prop"])
-            cell_type_existed = (output["cell_prop"] > 0.01).type(torch.int8).type(torch.float32)
+            # bulk_embedding = torch.matmul(embedding_all_types, output["cell_prop"])
+            cell_type_existed = (output["cell_prop"] >= 0.01).type(torch.int8).type(torch.float32)
         else:
             raise NotImplementedError('If self.predict_cell_prop is False, '
                                       'y (cell proportions of cell types) must be provided. '
                                       'It can be predicted by DeSide.')
 
-        output['embedding'] = embedding  # the mean of all cell types
+        output['embedding'] = bulk_embedding  # the mean of all cell types
         output['log_var'] = log_var
         output['embedding_all_types'] = embedding_all_types
         output['cell_type_existed'] = cell_type_existed
         # output['gene_embedding'] = embedded_rows
 
         return output
+
+    def _prepare_ppi(self, gene_list: list) -> tuple:
+        """
+        Prepare the PPI network by filtering and converting it to a graph format.
+        :param gene_list: all genes in the input data
+        :return:
+        """
+        net = self.net.copy()
+        if self.biogrid_flag:
+            net.columns = ["Source", "Target"]
+        else:
+            net.columns = ["Source", "Target", "Conn"]
+            net = net.loc[net.Conn >= NETWORK_CUTOFF]
+        # filter out self-loops and keep only genes in gene_list
+        mask = (net["Source"] != net["Target"]) & (net["Source"].isin(gene_list)) & (net["Target"].isin(gene_list))
+        net = net.loc[mask]
+
+        # list of surviving genes in the PPI network
+        keep_genes = list(pd.concat([net.Source, net.Target]).drop_duplicates())
+
+        # create a graph from the PPI network
+        G = nx.from_pandas_edgelist(net, "Source", "Target")
+        data = from_networkx(G)
+        edge_index = torch.tensor(data.edge_index)
+
+        return keep_genes, edge_index
 
     def get_config(self):
         return {"params": {"args": self.args.to_dict()},
