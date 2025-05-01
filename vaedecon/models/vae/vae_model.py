@@ -48,8 +48,8 @@ class VAE(BaseAE):
         latent_dim = model_config.latent_dim
         n_cell_types = model_config.n_cell_types
         # (latent_dim, latent_dim), orthonormal row vectors in latent space
-        self.anchors = self.make_orthonormal_anchors(latent_dim=latent_dim)
-        self.register_buffer("anchors", self.anchors)
+        self.anchor_vectors = self.make_orthonormal_anchors(latent_dim=latent_dim)
+        self.register_buffer("anchors", self.anchor_vectors)
         # Learn a logit for each cell type to weight orthonormal anchors in the latent space
         self.logits = nn.Parameter(torch.zeros(n_cell_types, latent_dim))
 
