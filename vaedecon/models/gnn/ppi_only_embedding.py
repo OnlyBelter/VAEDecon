@@ -1,6 +1,7 @@
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import scanpy as sc
 import networkx as nx
 from torch_geometric.utils import from_networkx
@@ -15,7 +16,7 @@ import lightning as L
 import pandas as pd
 # from .common_functions_for_gnn import build_network, nx_to_pyg_edge_index
 
-EPS = 1e-15
+EPS = 1e-6
 MAX_LOGSTD = 10
 NETWORK_CUTOFF = 0.5
 EXPRESSION_CUTOFF = 0.0
@@ -32,15 +33,15 @@ class EncoderSGNN(BaseEncoder):
         """
         super(EncoderSGNN, self).__init__()
         self.args = args
-        self.col_dim = args.gnn_col_dim  # dimension of the column (the number of genes)
+        self.gnn_n_genes = args.gnn_n_genes  # the number of genes in the graph
         # self.row_dim = args.gnn_row_dim
         self.gene_hidden_dim = args.gene_hidden_dim
-        self.inter_row_dim = args.gnn_inter_row_dim
-        self.embd_row_dim = args.gnn_embd_row_dim
+        # self.inter_row_dim = args.gnn_inter_row_dim
+        # self.embd_row_dim = args.gnn_embd_row_dim
         self.inter_col_dim = args.gnn_inter_col_dim
         self.cell_latent_dim = args.latent_dim
         self.n_cell_types = args.n_cell_types
-        self.embd_col_dim = args.gnn_embd_col_dim  # cell embeddings by the GNN
+        self.embd_col_dim = args.gnn_embd_col_dim  # cell embeddings by the GNN, the layer before mu
         self.drop_p = args.gnn_drop_p
         self.num_layers = args.gnn_num_layers
         self.predict_cell_prop = args.predict_cell_prop
@@ -50,10 +51,18 @@ class EncoderSGNN(BaseEncoder):
             self.ppi_file_path = args.ppi_file_path
         else:
             raise FileNotFoundError(f"File {args.ppi_file_path} not found.")
+        if self.args.using_positional_encoding:
+            self.position_encoding = PositionalEncoding(
+                d_model=self.n_cell_types,
+                dropout=0,
+                max_len=self.cell_latent_dim
+            )
+        else:
+            self.position_encoding = None
         # self.lambda_rows = lambda_rows
         # self.lambda_cols = lambda_cols
 
-        # graph encoder with the same shape as the input
+        # a graph encoder with the same shape as the input, encoding the gene features and PPI information by GNN
         self.encoder = PPIEncoder(gene_hidden_dim=self.gene_hidden_dim, num_layers=self.num_layers,
                                   drop_p=self.drop_p)
         # gene embeddings
@@ -62,26 +71,34 @@ class EncoderSGNN(BaseEncoder):
         # cell embeddings / GEP embeddings for all cell types
         # self.cols_encoder = DimEncoder(self.col_dim, self.inter_col_dim, self.embd_col_dim,
         #                                drop_p=self.drop_p, reducer=False)
-        self.cell_embedding_layer = nn.Sequential(
-            nn.Linear(self.col_dim, self.embd_col_dim),
+        self.cell_embedding_before_mu = nn.Sequential(
+            nn.Linear(self.gnn_n_genes, self.embd_col_dim),
             nn.LeakyReLU(inplace=True)
         )
-        # linear mapping to get the embeddings of all cell types
-        # (n_samples, n_genes) -> (n_samples, cell_latent_dim x n_cell_types)
-        self.deconvolution_layer = nn.Linear(self.embd_col_dim, self.cell_latent_dim * self.n_cell_types)
-        # the log variance of the cell embeddings in the VAE model
-        self.log_var = nn.Linear(self.embd_col_dim, self.cell_latent_dim)
+        # linear mapping to get the embeddings of all cell types for each GEP (1 cell or sample)
+        # (n_samples, n_genes) -> [n_samples, cell_latent_dim] x n_cell_types, (a list)
+        # self.deconvolution_layer = nn.Linear(self.embd_col_dim, self.cell_latent_dim * self.n_cell_types)
+        self.gcc_mu_list = nn.ModuleList(
+            [nn.Linear(self.embd_col_dim, self.cell_latent_dim) for _ in range(self.n_cell_types)]
+        )
+        # the log variance of the cell embeddings for all cell types in the VAE model
+        # self.log_var = nn.Linear(self.embd_col_dim, self.cell_latent_dim)
+        self.gnn_logvar_list = nn.ModuleList(
+            [nn.Linear(self.embd_col_dim, self.cell_latent_dim) for _ in range(self.n_cell_types)]
+        )
         if self.predict_cell_prop:
-            self.cell_prop = nn.Sequential(
-                nn.Linear(self.embd_col_dim, self.n_cell_types),
-                nn.Softmax(dim=1)
-            )
+            # self.cell_prop = nn.Sequential(
+            #     nn.Linear(self.embd_col_dim, self.n_cell_types),
+            #     nn.Softmax(dim=1)
+            # )
+            # Proportion head (outputs Dirichlet distribution parameters)
+            self.gnn_dd_alpha = nn.Linear(self.embd_col_dim, self.n_cell_types)
         # the PPI network in a DataFrame format with two or three columns, such as ["Source", "Target", "Conn"]
         self.net = pd.read_csv(self.ppi_file_path)[
             ["g1_symbol", "g2_symbol", "conn"]].drop_duplicates()
 
         self.keep_genes, self.edge_index = self._prepare_ppi(self.gene_list)
-        self.col_dim = len(self.keep_genes)  # update the col_dim, the intersection of the genes in the PPI and the input data
+        self.gnn_n_genes = len(self.keep_genes)  # update the col_dim, the intersection of the genes in the PPI and the input data
         self.keep_idx = [self.gene_list.index(g) for g in self.keep_genes]
 
     def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None, sample_ids: list = None) -> ModelOutput:
@@ -92,20 +109,23 @@ class EncoderSGNN(BaseEncoder):
         :return: gene bulk_embedding, cell bulk_embedding, reconstructed gene expression
         """
         x_sub = x[:, self.keep_idx]  # (n_cells, n_genes)
-        x_in = x_sub.view(-1, self.col_dim, 1)  # (n_cells, n_genes, 1)
+        x_in = x_sub.view(-1, self.gnn_n_genes, 1)  # (n_cells, n_genes, 1)
         ppi_attention = self.encoder(x_in, self.edge_index).squeeze()  # gene bulk_embedding with shape (n_cells, n_genes)
 
-        output = ModelOutput()
-        cell_embedding = self.cell_embedding_layer(ppi_attention)  # (n_cells, self.embd_col_dim)
-        embedding_all_types = self.deconvolution_layer(cell_embedding)
-        embedding_all_types = embedding_all_types.view(-1, self.cell_latent_dim, self.n_cell_types)
-        bulk_embedding = torch.mean(embedding_all_types, dim=2, keepdim=True)  # bulk mode embedding
-        log_var = self.log_var(cell_embedding).reshape(-1, self.cell_latent_dim, 1)
+        cell_embedding_before_mu = self.cell_embedding_before_mu(ppi_attention)  # (n_cells, self.embd_col_dim)
+        # embedding_all_types = self.deconvolution_layer(cell_embedding_before_mu)
+        mu_list = [mu(cell_embedding_before_mu) for mu in self.gcc_mu_list]
+        logvar_list = [logvar(cell_embedding_before_mu) for logvar in self.gnn_logvar_list]
+        # embedding_all_types = embedding_all_types.view(-1, self.cell_latent_dim, self.n_cell_types)
+        # bulk_embedding = torch.mean(embedding_all_types, dim=2, keepdim=True)  # bulk mode embedding
+        # log_var = self.log_var(cell_embedding_before_mu).reshape(-1, self.cell_latent_dim, 1)
         # out_features = self.feature_decoder(embedded_cols)  # can add linear layers directly for GEP reconstruction
 
         # TODO: getting cell proportions from DeSide
+        output = ModelOutput()
         if self.predict_cell_prop:
-            output["cell_prop"] = self.cell_prop(cell_embedding).view((-1, self.n_cell_types, 1))
+            # output["cell_prop"] = self.cell_prop(cell_embedding_before_mu).view((-1, self.n_cell_types, 1))
+            output['dd_alpha'] = F.softplus(self.gnn_dd_alpha(cell_embedding_before_mu)) + EPS
         # print(embedding_all_types.shape, output["cell_prop"].shape)
         if y is not None:
             y = y.view((-1, self.n_cell_types, 1))
@@ -119,9 +139,15 @@ class EncoderSGNN(BaseEncoder):
                                       'y (cell proportions of cell types) must be provided. '
                                       'It can be predicted by DeSide.')
 
-        output['embedding'] = bulk_embedding  # the mean of all cell types
-        output['log_var'] = log_var
-        output['embedding_all_types'] = embedding_all_types
+        if self.position_encoding is not None:
+            position_encoding_cell_type = torch.matmul(self.position_encoding, cell_type_existed)
+            mu_list = [mu_list[i] + position_encoding_cell_type[i, :] for i in range(self.n_cell_types)]
+
+        # output['embedding'] = bulk_embedding  # the mean of all cell types
+        # output['log_var'] = log_var
+        # output['embedding_all_types'] = embedding_all_types
+        output['mu_list'] = mu_list
+        output['logvar_list'] = logvar_list
         output['cell_type_existed'] = cell_type_existed
         # output['gene_embedding'] = embedded_rows
 
@@ -161,15 +187,15 @@ class EncoderSGNN(BaseEncoder):
 
 
 class PPIEncoder(L.LightningModule):
-    def __init__(self, gene_hidden_dim, num_layers=3, drop_p=0.25):
+    def __init__(self, gene_hidden_dim: int, num_layers=3, drop_p=0.25):
         super(PPIEncoder, self).__init__()
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.to(device)
+        # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.to(self.device)
         # self.col_dim = col_dim
         self.gene_hidden_dim = gene_hidden_dim
         self.num_layers = num_layers
 
-        # First, define the initial layer separately (input dimension is 1 for gene expression values)
+        # First, define the initial layer separately (input dimension is 1 for gene expression values, the features for each gene)
         initial_layer = Sequential('x, edge_index', [
             # First GraphSAGE layer with input dimension 1
             # TODO: monitor: here will become to a 3 dimensional tensor
@@ -197,15 +223,6 @@ class PPIEncoder(L.LightningModule):
             nn.Linear(self.gene_hidden_dim, 1),
             nn.Softmax(dim=1)
         )
-
-        # self.rows_layers = nn.ModuleList(gnn_layers + [attention])
-
-        # self.cols_layers = nn.ModuleList([
-        #     Sequential('x, edge_index', [
-        #         (SAGEConv(self.col_dim, self.col_dim), 'x, edge_index -> x1'),
-        #         nn.LeakyReLU(inplace=True),
-        #         (nn.Dropout(drop_p, inplace=False), 'x1 -> x2'),
-        #     ]) for _ in range(num_layers)])
 
     def forward(self, x: torch.Tensor, ppi_edge_index):
         """

@@ -23,18 +23,18 @@ class BaseModelConfig(BaseConfig):
     reconstruction_loss: Literal["bce", "mse"] = "mse"
     # position_encoding: torch.Tensor = None
     # parameters for GNN encoder
-    gnn_col_dim: int = 5000  # dimension of the column (the number of genes)
-    gnn_row_dim: int = 1000  # dimension of the row (the number of cells in each batch to construct the KNN graph)
-    gnn_inter_row_dim: int = 500  # dimension of the intermediate layer of the row (gene) embeddings
+    gnn_n_genes: int = 5000  # the number of genes in the graph
+    # gnn_row_dim: int = 1000  # dimension of the row (the number of cells in each batch to construct the KNN graph)
+    # gnn_inter_row_dim: int = 500  # dimension of the intermediate layer of the row (gene) embeddings
     gnn_inter_col_dim: int = 500  # dimension of the intermediate layer of the column (cell) embeddings
-    gnn_embd_row_dim: int = 50  # dimension of the final row (gene) embeddings
-    gnn_embd_col_dim: int = 50  # dimension of the final column (cell) embeddings
-    gnn_lambda_rows: float = 1.0  # weight for the row (gene) loss
+    # gnn_embd_row_dim: int = 50  # dimension of the final row (gene) embeddings
+    gnn_embd_col_dim: int = 50  # dimension of the final column (cell) embeddings, the layer before mu
+    # gnn_lambda_rows: float = 1.0  # weight for the row (gene) loss
     gnn_lambda_cols: float = 1.0  # weight for the column (cell) loss
     gnn_num_layers: int = 3  # number of layers in the GNN
     gnn_drop_p: float = 0.1  # dropout probability
     ppi_file_path: str = None  # file path to the PPI
-    gene_hidden_dim: int = 10  # each gene expression value will be increased to this dimension (1d -> higher dimension)
+    gene_hidden_dim: int = 10  # each gene expression value (or with other features) will be increased to this dimension (1d -> higher dimension)
     biogrid_flag: bool = False  # if True, the columns for net are set to ["Source", "Target"] only
     gene_list: list = None # gene list in the input data
 

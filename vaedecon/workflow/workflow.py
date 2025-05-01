@@ -86,7 +86,8 @@ def evaluate_model(
         model_config: VAEConfig,
         output_dir: str,
         device: str,
-        pred_cell_prop_file_path: str = None
+        pred_cell_prop_file_path: str = None,
+        val_batch_size: int = None,
 ) -> Dict[str, Any]:
     """Evaluates the trained model on the test set."""
     test_set_result_dir = os.path.join(result_dir, "test_set")
@@ -100,7 +101,7 @@ def evaluate_model(
     cell_types = pd.read_csv(
         os.path.join(output_dir, "cell_type_list.txt"), index_col=0, header=None
     ).index.to_list()
-    test_set_loader = DataLoader(test_set, batch_size=model_config.gnn_row_dim, shuffle=False)
+    test_set_loader = DataLoader(test_set, batch_size=val_batch_size, shuffle=False)
     if pred_cell_prop_file_path is not None and os.path.exists(pred_cell_prop_file_path):
         pred_cell_prop_all = pd.read_csv(pred_cell_prop_file_path, index_col=0)
         pred_cell_prop_all = pred_cell_prop_all.loc[:, cell_types].values

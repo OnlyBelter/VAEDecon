@@ -33,7 +33,7 @@ class EncoderGNN(BaseEncoder):
         """
         super(EncoderGNN, self).__init__()
         self.args = args
-        self.col_dim = args.gnn_col_dim
+        self.col_dim = args.gnn_n_genes
         self.row_dim = args.gnn_row_dim
         self.inter_row_dim = args.gnn_inter_row_dim
         self.embd_row_dim = args.gnn_embd_row_dim

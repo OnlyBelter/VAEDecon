@@ -9,6 +9,12 @@ class PositionalEncoding(nn.Module):
     https://pytorch.org/tutorials/beginner/transformer_tutorial.html
     """
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        """
+        Generate the positional encoding matrix for each cell type in the latent space.
+        :param d_model: the number of cell types
+        :param dropout: the dropout probability
+        :param max_len: the dimension of the latent space
+        """
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
 
