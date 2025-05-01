@@ -49,6 +49,7 @@ class VAE(BaseAE):
         n_cell_types = model_config.n_cell_types
         # (latent_dim, latent_dim), orthonormal row vectors in latent space
         self.anchors = self.make_orthonormal_anchors(latent_dim=latent_dim)
+        self.register_buffer("anchors", self.anchors)
         # Learn a logit for each cell type to weight orthonormal anchors in the latent space
         self.logits = nn.Parameter(torch.zeros(n_cell_types, latent_dim))
 
@@ -360,13 +361,14 @@ class VAE(BaseAE):
         p = gamma_samples / gamma_samples.sum(dim=1, keepdim=True)
         return p
 
-    def make_orthonormal_anchors(self, latent_dim, radius=1.0):
+    @staticmethod
+    def make_orthonormal_anchors(latent_dim, radius=1.0):
         """
         Generate orthonormal anchors for the latent space.
         Args:
             radius (float): The radius of the sphere on which the anchors are located.
         :return: Orthonormal vectors in the latent space. Rows are orthonormal vectors (after transpose).
         """
-        random_weights = torch.randn(latent_dim, latent_dim, device=self.device)
+        random_weights = torch.randn(latent_dim, latent_dim)
         q, _ = torch.qr(random_weights)  # QR decomposition to get orthonormal vectors
         return radius * q.t()
