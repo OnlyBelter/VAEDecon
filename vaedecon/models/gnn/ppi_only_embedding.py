@@ -68,9 +68,9 @@ class EncoderSGNN(BaseEncoder):
         self.register_buffer('edge_index', edge_index)
 
         # Gene features (mean and std) for each gene across cell types buffer
-        if not os.path.exists(args.gene_mean_std_file_path):
-            raise FileNotFoundError(f"Gene features file not found: {args.gene_mean_std_file_path}")
-        gf_df = pd.read_csv(args.gene_mean_std_file_path, index_col=0)
+        if not os.path.exists(args.gene_mean_std_fp):
+            raise FileNotFoundError(f"Gene features file not found: {args.gene_mean_std_fp}")
+        gf_df = pd.read_csv(args.gene_mean_std_fp, index_col=0)
         gf_mat = gf_df.iloc[self.keep_idx, :].values  # shape = (n_genes, n_feats)
         self.register_buffer('gene_features', torch.tensor(gf_mat, dtype=torch.float32))
 

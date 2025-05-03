@@ -56,9 +56,9 @@ class VAE(BaseAE):
         # Learn a logit for each cell type to weight orthonormal anchors in the latent space
         self.logits = nn.Parameter(torch.zeros(n_cell_types, latent_dim))
         # Gene features (mean and std) for each gene across cell types buffer
-        if not os.path.exists(model_config.gene_mean_std_file_path):
-            raise FileNotFoundError(f"Gene features file not found: {model_config.gene_mean_std_file_path}")
-        gf_df = pd.read_csv(model_config.gene_mean_std_file_path, index_col=0).values
+        if not os.path.exists(model_config.gene_mean_std_fp):
+            raise FileNotFoundError(f"Gene features file not found: {model_config.gene_mean_std_fp}")
+        gf_df = pd.read_csv(model_config.gene_mean_std_fp, index_col=0).values
         # gf_mat = gf_df.loc[self.keep_genes].values  # shape = (n_genes, n_feats)
         self.register_buffer('gene_features', torch.tensor(gf_df, dtype=torch.float32))
 

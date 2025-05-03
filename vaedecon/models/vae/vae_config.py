@@ -33,4 +33,4 @@ class VAEConfig(BaseModelConfig):
     encoder_dropout_rate: list[float] = [0.1, 0.1, 0.1]
     decoder_dropout_rate: list[float] = [0.1, 0.1, 0.1]
     predict_cell_prop: bool = False  # whether to predict cell type proportions
-    gene_mean_std_file_path: str = None  # the file path of the mean and std of gene expression values across cell types in the SCT dataset
+    gene_mean_std_fp: str = None  # the file path of the mean and std of gene expression values across cell types in the SCT dataset
