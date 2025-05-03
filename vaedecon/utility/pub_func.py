@@ -575,16 +575,20 @@ def non_log2log_cpm_tensor(exp: torch.Tensor, result_file_path: str = None,
 
     :return: log2(CPM + 1) or save the result to file, samples by genes if transpose is True, otherwise genes by samples
     """
-
+    dim0, dim1 = (1, 2)  # expected shape: batch_size, n_cell_type, n_gene
+    if len(exp.shape) == 2:  # if the shape is 2, it means genes by samples
+        dim0 = 0
+        dim1 = 1
     if transpose:
-        exp = torch.transpose(exp, 1, 2)  # transpose to samples by genes
+        exp = torch.transpose(exp, dim0, dim1)  # transpose to samples by genes
     exp = non_log2cpm_tensor(exp)  # CPM/TPM
     exp = torch.log2(exp + correct)
     # exp = torch.round(exp, decimals=3)
     if transpose:
-        exp = torch.transpose(exp, 1, 2)  # transpose back to genes by samples
+        exp = torch.transpose(exp, dim0, dim1)  # transpose back to genes by samples
     if result_file_path is not None:
         torch.save(exp, result_file_path)
+        return None
     else:
         return exp
 
@@ -612,8 +616,12 @@ def non_log2cpm_tensor(exp: torch.Tensor, sum_exp=1e6) -> torch.Tensor:
 
     :return: counts per million (CPM) or transcript per million (TPM)
     """
-    batch_size, n_cell_type, n_gene = exp.shape
-    return exp / torch.sum(exp, -1).reshape((batch_size, n_cell_type, 1)) * sum_exp
+    if len(exp.shape) == 2:  # if the shape is 2, it means genes by samples
+        batch_size, n_gene = exp.shape
+        return exp / torch.sum(exp, -1).reshape((batch_size, 1)) * sum_exp
+    else:  # expected shape: batch_size, n_cell_type, n_gene
+        batch_size, n_cell_type, n_gene = exp.shape
+        return exp / torch.sum(exp, -1).reshape((batch_size, n_cell_type, 1)) * sum_exp
 
 
 def get_corr(df_col1, df_col2, return_p_value=False) -> Union[float, tuple]:

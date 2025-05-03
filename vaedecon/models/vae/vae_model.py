@@ -15,9 +15,9 @@ import torch.nn.functional as F
 from torch.distributions import Normal, Dirichlet, Gamma, kl_divergence
 
 from ...data.datasets import DatasetOutput
-from ...models.base.base_utils import ModelOutput
+# from ...models.base.base_utils import ModelOutput
 
-from ...models.base import BaseAE, reparameterize_dirichlet, reparameterize_gaussian
+from ...models.base import BaseAE, reparameterize_dirichlet, reparameterize_gaussian, ModelOutput
 from ...models.nn import BaseDecoder, BaseEncoder
 # from ...models.gnn import EncoderGNN, EncoderSGNN
 # from ...models.base.base_config import BaseModelConfig
@@ -58,9 +58,12 @@ class VAE(BaseAE):
         # Gene features (mean and std) for each gene across cell types buffer
         if not os.path.exists(model_config.gene_mean_std_fp):
             raise FileNotFoundError(f"Gene features file not found: {model_config.gene_mean_std_fp}")
-        gf_df = pd.read_csv(model_config.gene_mean_std_fp, index_col=0).values
+        gf_df = pd.read_csv(model_config.gene_mean_std_fp, index_col=0)
+        g_mean = gf_df.loc[:, [col for col in gf_df.columns if col.endswith("avg")]].values  # shape = (n_genes, n_cell_types)
+        g_std = gf_df.loc[:, [col for col in gf_df.columns if col.endswith("std")]].values  # shape = (n_genes, n_cell_types)
         # gf_mat = gf_df.loc[self.keep_genes].values  # shape = (n_genes, n_feats)
-        self.register_buffer('gene_features', torch.tensor(gf_df, dtype=torch.float32))
+        self.register_buffer('g_mean', torch.tensor(g_mean, dtype=torch.float32))
+        self.register_buffer('g_std', torch.tensor(g_std, dtype=torch.float32))
 
     def forward(self, inputs: DatasetOutput, **kwargs) -> ModelOutput:
         """Forward pass of the VAE model.
@@ -79,10 +82,6 @@ class VAE(BaseAE):
         x = x.to(self.device)
         y = y.to(self.device)
 
-        # if issubclass(type(self.encoder), EncoderGNN) or issubclass(type(self.encoder), EncoderSGNN):
-        #     encoder_output = self.encoder(x=x, y=y, sample_ids=sample_ids)
-        # else:
-        #     encoder_output = self.encoder(x=x, y=y)
         encoder_output = self.encoder(x=x, y=y)
         mu_list, logvar_list, cell_prop = (
             encoder_output.mu_list,
@@ -96,20 +95,7 @@ class VAE(BaseAE):
         dd_alpha = torch.zeros(self.model_config.n_cell_types)
         if self.model_config.predict_cell_prop:
             dd_alpha = encoder_output.dd_alpha
-        #     Sample proportions from Dirichlet distribution
-            # pred_cell_prop = reparameterize_dirichlet(dd_alpha)
-        # log_var, pred_cell_prop = encoder_output.log_var, encoder_output.cell_prop
-        # mu_deconv = encoder_output.embedding_all_types  # (batch_size, latent_dim, n_cell_types)
-        # cell_type_existed = encoder_output.cell_type_existed  # (batch_size, n_cell_types, 1)
         n_cell_types = len(mu_list)
-        # get all reconstructed GEPs first, then select the one based on cell_type_existed
-
-        # std = torch.exp(0.5 * log_var)
-        # print('std.shape', std.shape, 'mu.shape', mu.shape)
-        # z, eps = self._sample_gauss(mu, std)
-        # reconstructing GEPs for the bulk mode by decoder directly
-        # recon_x = self.decoder(z)["reconstruction"]  # bulk mode
-        # recon_x = recon_x.reshape(x.shape)  # (batch_size, n_genes)
 
         # reconstructing GEPs for all cell types
         # Sample latent type representations for each cell type
@@ -123,18 +109,20 @@ class VAE(BaseAE):
         ]  # list of tensors (batch_size, n_genes)
         # Stack the reconstructed GEPs for all cell types, shape: (batch_size, n_genes, n_cell_types)
         recon_x_all_types = torch.stack(recon_type_gep_list, dim=2)
-        # recon_x_all_types = torch.zeros(
-        #     [x.shape[0], x.shape[1], n_cell_types], dtype=torch.float32, device=x.device
-        # )
-        # for i in range(n_cell_types):
-        #     mu_specific_type = mu_deconv[:, :, i].reshape(mu.shape)
-        #     z_specific_type = self.reparameterize_gaussian(mu_specific_type, std)  # same std for all cell types
-        #     recon_x_all_types[:, :, i] = self.decoder(z_specific_type)["reconstruction"].reshape(x.shape)
+
         # recon_x_all_types should be recovered to CPM format before doing the matrix multiplication
         if self.model_config.scaling_by_constant:
             recon_x_all_types = recon_x_all_types * 20.0
         recon_x_all_types = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
-        recon_x_conv = torch.matmul(recon_x_all_types, cell_prop.reshape(-1, n_cell_types, 1))
+        recon_x_conv = torch.matmul(recon_x_all_types, cell_prop.reshape(-1, n_cell_types, 1))  # (batch_size, n_genes, 1)
+
+        # Compare the means and stds of each gene among reconstructed GEPs across cell types
+        recon_gene_mean = recon_x_all_types.mean(dim=0)  # (n_genes, n_cell_types)
+        recon_gene_std = recon_x_all_types.std(dim=0)  # (n_genes, n_cell_types)
+        # Convert to the same format as the gene features
+        recon_gene_mean = non_log2log_cpm_tensor(recon_gene_mean, transpose=True) / 20.0
+        recon_gene_std = non_log2log_cpm_tensor(recon_gene_std, transpose=True) / 20.0
+
         # if y is not None:
         #     recon_x_conv = torch.matmul(recon_x_all_types, y.reshape(-1, n_cell_types, 1))
         # elif pred_cell_prop is not None:
@@ -142,7 +130,7 @@ class VAE(BaseAE):
         # else:
         #     raise ValueError("y or pred_cell_prop must be provided.")
         # convert recon_x_conv to log2(TPM + 1) format
-        recon_x_conv = non_log2log_cpm_tensor(recon_x_conv, transpose=True)
+        recon_x_conv = non_log2log_cpm_tensor(recon_x_conv, transpose=True)  # TODO, check here!
         if self.model_config.scaling_by_constant:
             recon_x_conv = recon_x_conv / 20.0
         recon_x_conv = recon_x_conv.reshape(x.shape)
@@ -151,13 +139,16 @@ class VAE(BaseAE):
         anchor_weights = F.softmax(self.logits, dim=-1)  # (n_cell_types, latent_dim)
         mu_prior = anchor_weights @ self.anchors  # (n_cell_types, latent_dim)
 
-        loss, kld_z, kld_p, recon_loss_conv, repulsion_loss = self.loss_function(
+        (loss, kld_z, kld_p, recon_loss_conv, repulsion_loss,
+         gene_mean_loss, gene_std_loss) = self.loss_function(
             # recon_x=recon_x, x=x, mu=mu, log_var=log_var, y=y,
             x=x, logvar_list=logvar_list, y=y, mu_list=mu_list,
             dd_alpha=dd_alpha, recon_x_conv=recon_x_conv,
             beta=self.model_config.loss_coefficient['beta'],
             mu_prior=mu_prior,
             gamma=self.model_config.loss_coefficient['gamma'],
+            recon_gene_mean= recon_gene_mean,
+            recon_gene_std= recon_gene_std,
         )
 
         output = ModelOutput(
@@ -175,6 +166,8 @@ class VAE(BaseAE):
             recon_x_conv=recon_x_conv,
             recon_loss_conv=recon_loss_conv,
             recon_x_all_types=recon_x_all_types,
+            gene_mean_loss=gene_mean_loss,
+            gene_std_loss=gene_std_loss,
         )
         return output
 
@@ -191,6 +184,8 @@ class VAE(BaseAE):
                       weight_type: str = "batch",  # "batch" or "global"
                       global_gene_mean: Optional[torch.Tensor] = None,
                       low_weight_coef: Optional[torch.Tensor] = 1.0,  # strength of up-weighting
+                      recon_gene_mean: Optional[torch.Tensor] = None,
+                      recon_gene_std: Optional[torch.Tensor] = None,
     ):
         """Calculates the loss for the VAE.
 
@@ -205,6 +200,11 @@ class VAE(BaseAE):
             beta: Weight for the KL divergence term.
             gamma: Weight for the repulsion loss.
             eps: Small value to avoid division by zero.
+            weight_type: Type of gene weight to use for the reconstruction loss, low expressed genes will be given a higher weight.
+            global_gene_mean: Pre-computed global mean for each gene when using "global" weight type.
+            low_weight_coef: Coefficient to control the strength of up-weighting low-expressed genes.
+            recon_gene_mean: Reconstructed gene means for each cell type across the whole batch.
+            recon_gene_std: Reconstructed gene standard deviations for each cell type across the whole batch.
         Returns:
             A tuple containing the total loss, KL divergence loss, cell proportion loss, and reconstruction loss.
         """
@@ -240,6 +240,11 @@ class VAE(BaseAE):
             )
         # apply weights to the reconstruction loss
         recon_loss_by_conv = (recon_loss_by_conv * w).sum(dim=-1)  # (batch_size,)
+
+        # --- Representation loss for gene means and stds ---
+        # Sum over all genes first, then mean over cell types
+        gene_mean_loss = F.mse_loss(recon_gene_mean, self.g_mean, reduction="none").sum(dim=0).mean(dim=0)  # a scalar
+        gene_std_loss = F.mse_loss(recon_gene_std, self.g_std, reduction="none").sum(dim=0).mean(dim=0)  # a scalar
 
         # --- KL divergence loss for cellular proportions ---
         # Prior: Uniform Dirichlet distribution (all alpha = 1)
@@ -282,10 +287,12 @@ class VAE(BaseAE):
         total_loss = (recon_loss_by_conv
                 + beta * (kld_z_types + kld_p)
                 + gamma * repulsion_loss
+                + gene_mean_loss
+                + gene_std_loss
         ).mean(dim=0)
 
         return (total_loss, kld_z_types.mean(dim=0), kld_p.mean(dim=0),
-                recon_loss_by_conv.mean(dim=0), repulsion_loss.mean(dim=0))
+                recon_loss_by_conv.mean(dim=0), repulsion_loss.mean(dim=0), gene_mean_loss, gene_std_loss)
 
     def loss_function_old(self, x: torch.Tensor, mu: torch.Tensor,
                       log_var: torch.Tensor, y: Optional[torch.Tensor] = None,

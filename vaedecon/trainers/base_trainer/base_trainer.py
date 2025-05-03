@@ -18,6 +18,7 @@ from lightning.pytorch.loggers import CSVLogger
 
 from ...data.datasets import BaseDataset, collate_dataset_output
 from ...models import BaseAE
+from ...models.base import ModelOutput
 from pythae.trainers.trainer_utils import set_seed
 from .base_training_config import BaseTrainerConfig
 
@@ -56,16 +57,16 @@ class PLTrainer(L.LightningModule):
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Performs a single training step."""
         output = self(batch)
-        loss = output.loss
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        return loss
+        self.loss_monitor(step='train', output=output,
+                          loss_types=('loss', 'kld', 'recon_loss_conv', 'gene_mean_loss', 'gene_std_loss'))
+        return output.loss
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Performs a single validation step."""
         output = self(batch)
-        loss = output.loss
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        return loss
+        self.loss_monitor(step='val', output=output,
+                          loss_types=('loss', 'kld', 'recon_loss_conv', 'gene_mean_loss', 'gene_std_loss'))
+        return output.loss
 
     def configure_optimizers(self) -> Dict[str, Any]:
         """Configures the optimizer and learning rate scheduler."""
@@ -114,6 +115,23 @@ class PLTrainer(L.LightningModule):
             "reconstructions": reconstructions,
             "generations": normal_generation,
         }
+
+    def loss_monitor(self, loss_types: tuple=('loss',), step: str='train', output: ModelOutput=None) -> None:
+        """
+        Monitors the loss during training and validation step.
+        Args:
+            loss_types (tuple): List of loss types to monitor.
+            step (str): The step during which to monitor the loss ('train' or 'val').
+            output (ModelOutput): The model output containing the loss values.
+        """
+        for loss_type in loss_types:
+            loss_name = loss_type
+            if step == 'train' and loss_type == 'loss':
+                loss_name = 'train_loss'
+            elif step == 'val' and loss_type == 'loss':
+                loss_name = 'val_loss'
+            self.log(loss_name, output.get(loss_type), on_step=True if step=='train' else False,
+                     on_epoch=True, prog_bar=True, logger=True)
 
 
 def get_dataloader(
