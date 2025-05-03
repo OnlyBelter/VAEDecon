@@ -347,8 +347,6 @@ def get_gene_mean_std_across_cell_types(sct_dataset_fp: str, result_fp, gene_lis
         ct2ave = pd.DataFrame(ct2ave)
         if log2p1 is True:
             ct2ave = np.log2(ct2ave + 1)
-            result_fp = result_fp.replace('.csv', '_log2p1.csv')
         if scaling_by_constant is True:
             ct2ave = ct2ave / 20
-            result_fp = result_fp.replace('.csv', '_scaled.csv')
         ct2ave.to_csv(result_fp, float_format='%.3f')
