@@ -162,7 +162,7 @@ class ReadExp(object):
 
     def do_scaling_by_constant(self, divide_by=20):
         """
-        Scaling GEPs by dividing a constant in log space, so all expression values are in [0, 1)
+        Scaling GEPs by dividing a constant in log space (20 by default), ensures all expression values are in [0, 1)
         """
         if self.file_type != 'log_space':
             raise ValueError('   This file is not in log space')
@@ -318,3 +318,37 @@ def read_gene_set(gene_set_file_path: list, max_n_genes: int = 300) -> pd.DataFr
         gene_set_df.loc[genes, gs] = 1
     gene_set_df.fillna(0, inplace=True)
     return gene_set_df
+
+
+def get_gene_mean_std_across_cell_types(sct_dataset_fp: str, result_fp, gene_list_fp,
+                                        cell_type_fp, scaling_by_constant: bool=True, log2p1: bool=True) -> tuple:
+    """Get the mean and std of gene expression values across cell types in the SCT dataset."""
+    # sct_dataset_obj = ReadH5AD(sct_dataset_fp)
+    # sct_dataset_df = sct_dataset_obj.get_df(convert_to_tpm=True)
+    if not os.path.exists(result_fp):
+        gene_list = pd.read_csv(gene_list_fp, index_col=0, header=None).index.tolist()
+        cell_type_list = pd.read_csv(cell_type_fp, index_col=0, header=None).index.tolist()
+        sct_obj = ReadH5AD(sct_dataset_fp)
+
+        h5ad = sct_obj.get_h5ad()
+        h5ad_obs = h5ad.obs.copy()
+        ct2ave = {}
+        for col in cell_type_list:
+            x = h5ad[h5ad_obs[col] == 1, :]
+            x_df = pd.DataFrame(x.X, index=x.obs.index, columns=x.var.index)
+            exp_obj = ReadExp(x_df, exp_type='log_space')
+            exp_obj.align_with_gene_list(gene_list=gene_list, fill_not_exist=True)
+            exp_obj.to_tpm()
+            exp = exp_obj.get_exp()
+            exp_avg = exp.mean(axis=0)
+            exp_std = exp.std(axis=0)
+            ct2ave[col + '_avg'] = exp_avg
+            ct2ave[col + '_std'] = exp_std
+        ct2ave = pd.DataFrame(ct2ave)
+        if log2p1 is True:
+            ct2ave = np.log2(ct2ave + 1)
+            result_fp = result_fp.replace('.csv', '_log2p1.csv')
+        if scaling_by_constant is True:
+            ct2ave = ct2ave / 20
+            result_fp = result_fp.replace('.csv', '_scaled.csv')
+        ct2ave.to_csv(result_fp, float_format='%.3f')

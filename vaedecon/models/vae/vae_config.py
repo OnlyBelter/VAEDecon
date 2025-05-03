@@ -16,9 +16,11 @@ class VAEConfig(BaseModelConfig):
 
     # reconstruction_loss: Literal["bce", "mse"] = "mse"
     using_positional_encoding: bool = True
-    input_gene_list: str = None  # file name
-    gene_list: list = None  # list of gene names in the training set
-    cell_type_list: str = None  # file name
+    # the file path of gene list in the training set (after preprocessing,
+    # such as interaction from multiple datasets) and for GEP-level reconstruction
+    input_gene_list_fp: str = None
+    # gene_list: list = None  # list of gene names in the training set
+    cell_type_fp: str = None  # the file path of cell types in the training set and for reconstruction
     scaling_by_constant: bool = True  # whether to scale the input GEP data by a constant factor (20 by default)
     loss_coefficient: dict = {
         "recon_decoder": 0.2,  # coefficient for the reconstruction loss of the decoder
@@ -31,3 +33,4 @@ class VAEConfig(BaseModelConfig):
     encoder_dropout_rate: list[float] = [0.1, 0.1, 0.1]
     decoder_dropout_rate: list[float] = [0.1, 0.1, 0.1]
     predict_cell_prop: bool = False  # whether to predict cell type proportions
+    gene_mean_std_file_path: str = None  # the file path of the mean and std of gene expression values across cell types in the SCT dataset

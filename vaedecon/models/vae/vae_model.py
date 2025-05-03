@@ -3,22 +3,25 @@ Variational Autoencoder (VAE) implementation for cellular component deconvolutio
 OnlyBelter (https://github.com/OnlyBelter, onlybelter@gmail.com)
 """
 
+import os
+import pandas as pd
 import logging
 from typing import Optional, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sympy.core.facts import deduce_alpha_implications
+# from sympy.core.facts import deduce_alpha_implications
 from torch.distributions import Normal, Dirichlet, Gamma, kl_divergence
 
 from ...data.datasets import DatasetOutput
 from ...models.base.base_utils import ModelOutput
 
-from ...models.base import BaseAE
+from ...models.base import BaseAE, reparameterize_dirichlet, reparameterize_gaussian
 from ...models.nn import BaseDecoder, BaseEncoder
-from ...models.gnn import EncoderGNN, EncoderSGNN
-from ...models.base.base_config import BaseModelConfig
+# from ...models.gnn import EncoderGNN, EncoderSGNN
+# from ...models.base.base_config import BaseModelConfig
+from .vae_config import VAEConfig
 from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor
 
 logger = logging.getLogger(__name__)
@@ -32,7 +35,7 @@ class VAE(BaseAE):
 
     def __init__(
         self,
-        model_config: BaseModelConfig,
+        model_config: VAEConfig,
         encoder: Optional[BaseEncoder] = None,
         decoder: Optional[BaseDecoder] = None,
     ):
@@ -52,6 +55,12 @@ class VAE(BaseAE):
         self.register_buffer("anchors", self.anchor_vectors)
         # Learn a logit for each cell type to weight orthonormal anchors in the latent space
         self.logits = nn.Parameter(torch.zeros(n_cell_types, latent_dim))
+        # Gene features (mean and std) for each gene across cell types buffer
+        if not os.path.exists(model_config.gene_mean_std_file_path):
+            raise FileNotFoundError(f"Gene features file not found: {model_config.gene_mean_std_file_path}")
+        gf_df = pd.read_csv(model_config.gene_mean_std_file_path, index_col=0).values
+        # gf_mat = gf_df.loc[self.keep_genes].values  # shape = (n_genes, n_feats)
+        self.register_buffer('gene_features', torch.tensor(gf_df, dtype=torch.float32))
 
     def forward(self, inputs: DatasetOutput, **kwargs) -> ModelOutput:
         """Forward pass of the VAE model.
@@ -75,19 +84,20 @@ class VAE(BaseAE):
         # else:
         #     encoder_output = self.encoder(x=x, y=y)
         encoder_output = self.encoder(x=x, y=y)
-        mu_list, logvar_list = (
+        mu_list, logvar_list, cell_prop = (
             encoder_output.mu_list,
             encoder_output.logvar_list,
+            encoder_output.cell_prop,
         )
         # stack the mu_list and logvar_list to (batch_size, latent_dim, n_cell_types)
         mu_types = torch.stack(mu_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
         log_var_types = torch.stack(logvar_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
-        pred_cell_prop = None
+        # pred_cell_prop = None
         dd_alpha = torch.zeros(self.model_config.n_cell_types)
         if self.model_config.predict_cell_prop:
             dd_alpha = encoder_output.dd_alpha
-            # Sample proportions from Dirichlet distribution
-            pred_cell_prop = self.reparameterize_dirichlet(dd_alpha)
+        #     Sample proportions from Dirichlet distribution
+            # pred_cell_prop = reparameterize_dirichlet(dd_alpha)
         # log_var, pred_cell_prop = encoder_output.log_var, encoder_output.cell_prop
         # mu_deconv = encoder_output.embedding_all_types  # (batch_size, latent_dim, n_cell_types)
         # cell_type_existed = encoder_output.cell_type_existed  # (batch_size, n_cell_types, 1)
@@ -104,7 +114,7 @@ class VAE(BaseAE):
         # reconstructing GEPs for all cell types
         # Sample latent type representations for each cell type
         z_type_list = [
-            self.reparameterize_gaussian(mu_list[i], logvar_list[i])
+            reparameterize_gaussian(mu_list[i], logvar_list[i])
             for i in range(n_cell_types)
         ]  # list of tensors (batch_size, latent_dim)
         # Decode each latent type representation to its corresponding GEP
@@ -124,12 +134,13 @@ class VAE(BaseAE):
         if self.model_config.scaling_by_constant:
             recon_x_all_types = recon_x_all_types * 20.0
         recon_x_all_types = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
-        if y is not None:
-            recon_x_conv = torch.matmul(recon_x_all_types, y.reshape(-1, n_cell_types, 1))
-        elif pred_cell_prop is not None:
-            recon_x_conv = torch.matmul(recon_x_all_types, pred_cell_prop.reshape(-1, n_cell_types, 1))
-        else:
-            raise ValueError("y or pred_cell_prop must be provided.")
+        recon_x_conv = torch.matmul(recon_x_all_types, cell_prop.reshape(-1, n_cell_types, 1))
+        # if y is not None:
+        #     recon_x_conv = torch.matmul(recon_x_all_types, y.reshape(-1, n_cell_types, 1))
+        # elif pred_cell_prop is not None:
+        #     recon_x_conv = torch.matmul(recon_x_all_types, pred_cell_prop.reshape(-1, n_cell_types, 1))
+        # else:
+        #     raise ValueError("y or pred_cell_prop must be provided.")
         # convert recon_x_conv to log2(TPM + 1) format
         recon_x_conv = non_log2log_cpm_tensor(recon_x_conv, transpose=True)
         if self.model_config.scaling_by_constant:
@@ -160,7 +171,7 @@ class VAE(BaseAE):
             log_var=log_var_types,
             cell_prop_loss=kld_p,
             kld=kld_z,
-            pred_cell_prop=pred_cell_prop,
+            pred_cell_prop=cell_prop,
             recon_x_conv=recon_x_conv,
             recon_loss_conv=recon_loss_conv,
             recon_x_all_types=recon_x_all_types,
@@ -340,26 +351,6 @@ class VAE(BaseAE):
 
         return (total_loss, kld.mean(dim=0), cell_prop_loss.mean(dim=0),
                 recon_loss_by_conv.mean(dim=0))
-
-    def reparameterize_gaussian(self, mu, logvar):
-        """Samples from a Gaussian distribution (N(0, I)) using the reparameterization trick."""
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * logvar
-
-    def reparameterize_dirichlet(self, alpha):
-        """
-        Use the Gamma distribution reparameterization trick for Dirichlet.
-        Args:
-            alpha (torch.Tensor): The Dirichlet parameters. (batch_size, n_cell_types)
-        Returns: samples from Dirichlet distribution.
-        Requires PyTorch 1.8+ for Gamma.rsample().
-        """
-        gamma_dis = Gamma(concentration=alpha, rate=torch.tensor(1.0, device=alpha.device))
-        gamma_samples = gamma_dis.rsample()  # shape: (batch_size, n_cell_types)
-        # Normalize the samples to sum to 1 to get Dirichlet samples
-        p = gamma_samples / gamma_samples.sum(dim=1, keepdim=True)
-        return p
 
     @staticmethod
     def make_orthonormal_anchors(latent_dim, radius=1.0):

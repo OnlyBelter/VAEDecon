@@ -67,10 +67,10 @@ def train_model(
     # return training_pipeline, output_dir
 
 
-def save_metadata(dataset: GEPDataset, output_dir: str, model_config: VAEConfig) -> None:
+def save_metadata(dataset: GEPDataset, model_config: VAEConfig) -> None:
     """Saves the gene list and cell type list."""
-    dataset.save_gene_list(Path(os.path.join(output_dir, model_config.input_gene_list)))
-    dataset.save_cell_types(Path(os.path.join(output_dir, model_config.cell_type_list)))
+    dataset.save_gene_list(Path(model_config.input_gene_list_fp))
+    dataset.save_cell_types(Path(model_config.cell_type_fp))
 
 
 def load_trained_model(model_dir: str) -> AutoModel:
@@ -98,9 +98,7 @@ def evaluate_model(
     check_dir(Path(gep_result_dir))
 
     true_cell_prop = test_set.get_cell_prop()
-    cell_types = pd.read_csv(
-        os.path.join(output_dir, "cell_type_list.txt"), index_col=0, header=None
-    ).index.to_list()
+    cell_types = pd.read_csv(model_config.cell_type_fp, index_col=0, header=None).index.to_list()
     test_set_loader = DataLoader(test_set, batch_size=val_batch_size, shuffle=False)
     if pred_cell_prop_file_path is not None and os.path.exists(pred_cell_prop_file_path):
         pred_cell_prop_all = pd.read_csv(pred_cell_prop_file_path, index_col=0)

@@ -114,7 +114,7 @@ class GEPDataset(Dataset):
         Args:
             file_path (str): a list of file path containing the data
 
-            scaling_by_constant (bool): If True, the data is scaled by a constant factor,
+            scaling_by_constant (bool): If True, the data is scaled by a constant factor (20 by default),
               so that the data is in the range [0, 1].
 
             gene_list_file (str): a file path containing the gene list to filter the data

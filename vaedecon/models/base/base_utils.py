@@ -9,31 +9,12 @@ try:
 except ImportError:
     import pickle
 import torch
-
+from torch.distributions import Gamma
 
 logger = logging.getLogger(__name__)
 console = logging.StreamHandler()
 logger.addHandler(console)
 logger.setLevel(logging.INFO)
-
-model_card_template = """---
-language: en
-tags:
-- pythae
-license: apache-2.0
----
-
-### Downloading this model from the Hub
-This model was trained with pythae. It can be downloaded or reloaded using the method `load_from_hf_hub`
-```python
->>> from pythae.models import AutoModel
->>> model = AutoModel.load_from_hf_hub(hf_hub_path="your_hf_username/repo_name")
-```
-"""
-
-
-def hf_hub_is_available():
-    return importlib.util.find_spec("huggingface_hub") is not None
 
 
 class ModelOutput(OrderedDict):
@@ -73,3 +54,25 @@ class CPU_Unpickler(pickle.Unpickler):
                 module = 'torch_geometric.nn'
                 name = 'Sequential'
             return super().find_class(module, name)
+
+
+def reparameterize_gaussian(mu, logvar):
+    """Samples from a Gaussian distribution (N(0, I)) using the reparameterization trick."""
+    std = torch.exp(0.5 * logvar)
+    eps = torch.randn_like(std)
+    return mu + eps * logvar
+
+
+def reparameterize_dirichlet(alpha):
+    """
+    Use the Gamma distribution reparameterization trick for Dirichlet.
+    Args:
+        alpha (torch.Tensor): The Dirichlet parameters. (batch_size, n_cell_types)
+    Returns: samples from Dirichlet distribution.
+    Requires PyTorch 1.8+ for Gamma.rsample().
+    """
+    gamma_dis = Gamma(concentration=alpha, rate=torch.tensor(1.0, device=alpha.device))
+    gamma_samples = gamma_dis.rsample()  # shape: (batch_size, n_cell_types)
+    # Normalize the samples to sum to 1 to get Dirichlet samples
+    p = gamma_samples / gamma_samples.sum(dim=1, keepdim=True)
+    return p
