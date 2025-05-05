@@ -6,7 +6,7 @@ OnlyBelter (https://github.com/OnlyBelter, onlybelter@gmail.com)
 import os
 import pandas as pd
 import logging
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -209,23 +209,18 @@ class VAE(BaseAE):
             A tuple containing the total loss, KL divergence loss, cell proportion loss, and reconstruction loss.
         """
         batch_size, n_genes = x.shape
-        # construct weights for each gene
-        if weight_type == "batch":
-            mean_g = x.mean(dim=0)  # (n_genes,)
-            w_g = 1.0 / (mean_g + eps)  # (n_genes,) # avoid division by zero, up-weighting low-expressed genes
-        elif weight_type == "global" and global_gene_mean is not None:
-            # pre-compute the global mean for each gene
-            w_g = 1.0 / (global_gene_mean + eps)  # (n_genes,)
+        if self.model_config.loss_coefficient['weighting_gene_by_exp']:
+            # construct weights for each gene, (batch_size, n_genes)
+            w = self.compute_gene_weights(
+                weight_type=weight_type,
+                global_gene_mean=global_gene_mean,
+                low_weight_coef=1.0,
+                eps=eps,
+                clamp_range=(0.5, 2.0),
+            )
         else:
             # fall back to uniform weights
-            w_g = torch.ones(n_genes, device=x.device)  # (n_genes,)
-        # normalize weights to keep average weight = 1
-        w_g = w_g / w_g.mean()  # (n_genes,)
-        w_g = torch.clamp(w_g, min=0.5, max=2.0)  # (n_genes,) # Clamp weights to avoid extreme values
-        # optionally control the strength of up-weighting
-        w_g = w_g.pow(low_weight_coef)  # (n_genes,) when low_weight_coef > 1.0, up-weighting low-expressed genes stronger
-        # expand weights to match the batch size
-        w = w_g.unsqueeze(0).expand(batch_size, n_genes)  # (batch_size, n_genes)
+            w = torch.ones(batch_size, n_genes, device=x.device)
 
         # --- Reconstruction loss ---
         flat_x = x.reshape(batch_size, -1)  # (batch_size, n_genes)
@@ -293,6 +288,54 @@ class VAE(BaseAE):
 
         return (total_loss, kld_z_types.mean(dim=0), kld_p.mean(dim=0),
                 recon_loss_by_conv.mean(dim=0), repulsion_loss.mean(dim=0), gene_mean_loss, gene_std_loss)
+
+    def compute_gene_weights(
+            self,
+            weight_type: str = "batch",
+            global_gene_mean: Optional[torch.Tensor] = None,
+            low_weight_coef: float = 1.0,
+            eps: float = 1e-6,
+            clamp_range: Tuple[float, float] = (0.5, 2.0),
+    ) -> torch.Tensor:
+        """
+        Compute per-gene weights for a batch of expression profiles.
+
+        Args:
+            x:            (batch_size, n_genes) raw expressions.
+            weight_type:  "batch", "global", or anything else → uniform.
+            global_gene_mean:
+                          (n_genes,) precomputed across all data; only for "global".
+            low_weight_coef:
+                          Exponent to amplify low-expression genes (>1.0 stronger).
+            eps:          Small constant to avoid div-by-zero.
+            clamp_range:  (min, max) after normalization.
+
+        Returns:
+            w: (batch_size, n_genes) normalized, clamped, exponentiated weights.
+        """
+        batch_size, n_genes = self.x.shape
+
+        # 1) choose raw weight w_g based on type
+        if weight_type == "batch":
+            mean_g = self.x.mean(dim=0)  # (n_genes,)
+            w_g = 1.0 / (mean_g + eps)
+        elif weight_type == "global" and global_gene_mean is not None:
+            w_g = 1.0 / (global_gene_mean + eps)
+        else:
+            w_g = torch.ones(n_genes, device=self.x.device)
+
+        # 2) normalize so that average weight = 1
+        w_g = w_g / w_g.mean()
+
+        # 3) clamp to avoid extremes
+        w_g = torch.clamp(w_g, min=clamp_range[0], max=clamp_range[1])
+
+        # 4) optionally up-weight low-expr genes more strongly
+        if low_weight_coef != 1.0:
+            w_g = w_g.pow(low_weight_coef)
+
+        # 5) expand to full batch
+        return w_g.unsqueeze(0).expand(batch_size, -1)
 
     def loss_function_old(self, x: torch.Tensor, mu: torch.Tensor,
                       log_var: torch.Tensor, y: Optional[torch.Tensor] = None,
