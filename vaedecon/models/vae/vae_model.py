@@ -221,7 +221,7 @@ class VAE(BaseAE):
             w_g = torch.ones(n_genes, device=x.device)  # (n_genes,)
         # normalize weights to keep average weight = 1
         w_g = w_g / w_g.mean()  # (n_genes,)
-        w_g = torch.clamp(w_g, min=0.2, max=5.0)  # (n_genes,) # Clamp weights to avoid extreme values
+        w_g = torch.clamp(w_g, min=0.5, max=2.0)  # (n_genes,) # Clamp weights to avoid extreme values
         # optionally control the strength of up-weighting
         w_g = w_g.pow(low_weight_coef)  # (n_genes,) when low_weight_coef > 1.0, up-weighting low-expressed genes stronger
         # expand weights to match the batch size
