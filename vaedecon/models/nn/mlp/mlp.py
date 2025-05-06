@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from ...base import BaseModelConfig
 from ..positional_encoding import PositionalEncoding
-from ....models.base.base_utils import ModelOutput
+from ....models.base.base_utils import ModelOutput, reparameterize_dirichlet
 from ..base_architectures import BaseDecoder, BaseEncoder
 # from ..utils import ResBlock
 
@@ -70,7 +70,7 @@ class EncoderMLP(BaseEncoder):
         # self.position_encoding = self.position_encoding.to(self.embedding.weight.device)
 
     def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None,
-                output_layer_levels: Optional[List[int]] = None) -> ModelOutput:
+                output_layer_levels: Optional[List[int]] = None, eps: float = 1e-6) -> ModelOutput:
         """Forward method
 
         Args:
@@ -78,6 +78,7 @@ class EncoderMLP(BaseEncoder):
             y (torch.Tensor, optional): The cell proportions of the input data. Defaults to None.
             output_layer_levels (List[int], optional): The levels of the layers where the outputs are
                 extracted. If None, the last layer's output is returned. Default: None.
+            eps (float, optional): A small value to avoid division by zero. Default: 1e-6.
 
         Returns:
             ModelOutput: An instance of ModelOutput containing the embeddings of the input data
@@ -125,39 +126,26 @@ class EncoderMLP(BaseEncoder):
         logvar_list = [logvar(out) for logvar in self.fc_logvar_list]
         # TODO: getting cell proportions from DeSide
         if self.predict_cell_prop:
-            # output["cell_prop"] = self.cell_prop(out).view((-1, self.n_cell_types, 1))
-            # parameters for Dirichlet distribution
-            # using softplus to make sure the parameters are positive, adding 1e-6 to avoid zero for numerical stability
-            output['dd_alpha'] = F.softplus(self.fc_dd_alpha(out)) + 1e-6
-        # print(embedding_all_types.shape, output["cell_prop"].shape)
-        if y is not None:
-            y = y.view((-1, self.n_cell_types, 1))
-            # embedding = torch.matmul(embedding_all_types, y)  # bulk mode embedding
-            cell_type_existed = (y >= 0.01).type(torch.int8).type(torch.float32)
-        elif self.predict_cell_prop:
-            # embedding = torch.matmul(embedding_all_types, output["cell_prop"])
-            cell_type_existed = (output["cell_prop"] >= 0.01).type(torch.int8).type(torch.float32)
+            # output["cell_prop"] = self.cell_prop(cell_embedding_before_mu).view((-1, self.n_cell_types, 1))
+            dd_alpha = F.softplus(self.fc_dd_alpha(out)) + eps
+            output['dd_alpha'] = dd_alpha
+            cell_prop = reparameterize_dirichlet(dd_alpha)
+        elif y is not None:
+            cell_prop = y.to(self.device)
         else:
             raise NotImplementedError('If self.predict_cell_prop is False, '
                                       'y (cell proportions of cell types) must be provided. '
                                       'It can be predicted by DeSide.')
-
-        # assume y is unknown, using the average embedding of all cell types as the output miu of encoder
-        # and calculate the KL divergence loss based on this miu
-        # embedding = torch.mean(embedding_all_types, dim=2, keepdim=True)  # (batch_size, latent_dim, 1)
-
-        # (latent_dim, n_cell_types) x (batch_size, n_cell_types, 1) -> (batch_size, latent_dim, 1)
+        # Using position encoding to shift mu for each cell type, adding the positional encoding
         if self.position_encoding is not None:
-            position_encoding_cell_type = torch.matmul(self.position_encoding, cell_type_existed)
-            # output["embedding"] = embedding + position_encoding_cell_type
-            mu_list = [mu + position_encoding_cell_type for mu in mu_list]
-        # else:
-        #     output["embedding"] = embedding
-        # output["log_var"] = self.log_var(out).reshape((-1, self.latent_dim, 1))
-        # output['embedding_all_types'] = embedding_all_types
+            exists = (cell_prop >= 0.01).float()  # (B, n_cell_types)
+            position_encoding_cell_type = torch.matmul(self.position_encoding(), exists)
+            mu_list = [mu_list[i] + position_encoding_cell_type[i, :].unsqueeze(1) for i in range(self.n_cell_types)]
+
         output['mu_list'] = mu_list
         output['logvar_list'] = logvar_list
-        output['cell_type_existed'] = cell_type_existed
+        output['cell_type_existed'] = (cell_prop >= 0.01).float()  # (B, n_cell_types)
+        output['cell_prop'] = cell_prop
 
         return output
 

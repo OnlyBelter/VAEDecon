@@ -6,7 +6,7 @@ OnlyBelter (https://github.com/OnlyBelter, onlybelter@gmail.com)
 import os
 import pandas as pd
 import logging
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Union, Sequence
 
 import torch
 import torch.nn as nn
@@ -36,17 +36,22 @@ class VAE(BaseAE):
     def __init__(
         self,
         model_config: VAEConfig,
-        encoder: Optional[BaseEncoder] = None,
+        encoders: list[BaseDecoder] = None,
         decoder: Optional[BaseDecoder] = None,
     ):
         """Initializes the VAE model.
 
         Args:
             model_config: The VAE configuration.
-            encoder: An optional encoder.
+            encoders: A list with a single encoder (MLP or GNN) or two encoders (MLP and GNN).
             decoder: An optional decoder.
         """
-        super().__init__(model_config=model_config, encoder=encoder, decoder=decoder)
+        super().__init__(model_config=model_config, encoders=encoders, decoder=decoder)
+        # set the encoder list and count the number of encoders
+        # self.encoders = encoders
+        self.n_encoders = len(self.encoders)
+        assert self.n_encoders in (1, 2), 'Only 1 or 2 encoders are supported.'
+
         self.model_name = "VAE"
         latent_dim = model_config.latent_dim
         n_cell_types = model_config.n_cell_types
@@ -65,6 +70,19 @@ class VAE(BaseAE):
         self.register_buffer('g_mean', torch.tensor(g_mean, dtype=torch.float32))
         self.register_buffer('g_std', torch.tensor(g_std, dtype=torch.float32))
 
+        # Calculate gene weights based on the mean expression values across cell types
+        w = torch.ones_like(self.g_mean)
+        if self.model_config.loss_coefficient['weighting_gene_by_exp']:
+            weight_clamp_range = self.model_config.loss_coefficient['weight_clamp_range']
+            # construct weights for each gene across cell types, (batch_size, n_genes, n_cell_types)
+            w = self.compute_gene_weights(
+                low_weight_coef=1.0,
+                eps=1e-6,
+                clamp_range=weight_clamp_range,
+            )
+        self.register_buffer('w', torch.tensor(w, dtype=torch.float32))  # (n_genes, n_cell_types)
+
+
     def forward(self, inputs: DatasetOutput, **kwargs) -> ModelOutput:
         """Forward pass of the VAE model.
 
@@ -76,25 +94,49 @@ class VAE(BaseAE):
         """
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(device)
-        x = inputs["data"]
+        x = inputs["data"].to(device)
         y = inputs.get("labels")  # cell proportions of 16 cell types
-        # sample_ids = inputs["sample_id"]
-        x = x.to(self.device)
-        y = y.to(self.device)
+        if y is not None:
+            y = y.to(device)
 
-        encoder_output = self.encoder(x=x, y=y)
-        mu_list, logvar_list, cell_prop = (
-            encoder_output.mu_list,
-            encoder_output.logvar_list,
-            encoder_output.cell_prop,
-        )
+        # Call all encoders, and collect the outputs
+        mu_lists, logvar_lists, prop_list, dd_alpha_list = [], [], [], []
+        for encoder in self.encoders:
+            out = encoder(x=x, y=y)
+            mu_lists.append(out.mu_list)
+            logvar_lists.append(out.logvar_list)
+            prop_list.append(out.cell_prop)
+            if self.model_config.predict_cell_prop:
+                dd_alpha_list.append(out.dd_alpha)
+        if self.n_encoders == 1:
+            mu_list, logvar_list, cell_prop = (
+                mu_lists[0],
+                logvar_lists[0],
+                prop_list[0],
+            )
+        else:  # two encoders
+            mu_list, logvar_list = self._poe_fuse_per_celltype(
+                mu_lists=mu_lists,
+                logvar_lists=logvar_lists,
+            )
+            cell_prop = torch.mean(torch.stack(prop_list, dim=0), dim=0)  # (batch_size, n_cell_types)
+
+        # encoder_output = self.encoder(x=x, y=y)
+        # mu_list, logvar_list, cell_prop = (
+        #     encoder_output.mu_list,
+        #     encoder_output.logvar_list,
+        #     encoder_output.cell_prop,
+        # )
         # stack the mu_list and logvar_list to (batch_size, latent_dim, n_cell_types)
         mu_types = torch.stack(mu_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
         log_var_types = torch.stack(logvar_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
         # pred_cell_prop = None
         dd_alpha = torch.zeros(self.model_config.n_cell_types)
         if self.model_config.predict_cell_prop:
-            dd_alpha = encoder_output.dd_alpha
+            if self.n_encoders == 1:
+                dd_alpha = dd_alpha_list[0]
+            else:  # two encoders
+                dd_alpha = torch.mean(torch.stack(dd_alpha_list, dim=0), dim=0) # (batch_size, n_cell_types)
         n_cell_types = len(mu_list)
 
         # reconstructing GEPs for all cell types
@@ -209,18 +251,6 @@ class VAE(BaseAE):
             A tuple containing the total loss, KL divergence loss, cell proportion loss, and reconstruction loss.
         """
         batch_size, n_genes = x.shape
-        if self.model_config.loss_coefficient['weighting_gene_by_exp']:
-            # construct weights for each gene, (batch_size, n_genes)
-            w = self.compute_gene_weights(
-                weight_type=weight_type,
-                global_gene_mean=global_gene_mean,
-                low_weight_coef=1.0,
-                eps=eps,
-                clamp_range=(0.5, 2.0),
-            )
-        else:
-            # fall back to uniform weights
-            w = torch.ones(batch_size, n_genes, device=x.device)
 
         # --- Reconstruction loss ---
         flat_x = x.reshape(batch_size, -1)  # (batch_size, n_genes)
@@ -234,11 +264,13 @@ class VAE(BaseAE):
                 f"Reconstruction loss {self.model_config.reconstruction_loss} is not implemented"
             )
         # apply weights to the reconstruction loss
-        recon_loss_by_conv = (recon_loss_by_conv * w).sum(dim=-1)  # (batch_size,)
+        # recon_loss_by_conv = (recon_loss_by_conv * w).sum(dim=-1)  # (batch_size,)
+        recon_loss_by_conv = recon_loss_by_conv.sum(dim=-1)  # (batch_size,)  # sum over genes without weights
 
         # --- Representation loss for gene means and stds ---
         # Sum over all genes first, then mean over cell types
-        gene_mean_loss = F.mse_loss(recon_gene_mean, self.g_mean, reduction="none").sum(dim=0).mean(dim=0)  # a scalar
+        gene_mean_loss = F.mse_loss(recon_gene_mean, self.g_mean, reduction="none")
+        gene_mean_loss = (gene_mean_loss * self.w).sum(dim=0).mean(dim=0)  # a scalar
         gene_std_loss = F.mse_loss(recon_gene_std, self.g_std, reduction="none").sum(dim=0).mean(dim=0)  # a scalar
 
         # --- KL divergence loss for cellular proportions ---
@@ -291,8 +323,6 @@ class VAE(BaseAE):
 
     def compute_gene_weights(
             self,
-            weight_type: str = "batch",
-            global_gene_mean: Optional[torch.Tensor] = None,
             low_weight_coef: float = 1.0,
             eps: float = 1e-6,
             clamp_range: Tuple[float, float] = (0.5, 2.0),
@@ -301,10 +331,6 @@ class VAE(BaseAE):
         Compute per-gene weights for a batch of expression profiles.
 
         Args:
-            x:            (batch_size, n_genes) raw expressions.
-            weight_type:  "batch", "global", or anything else → uniform.
-            global_gene_mean:
-                          (n_genes,) precomputed across all data; only for "global".
             low_weight_coef:
                           Exponent to amplify low-expression genes (>1.0 stronger).
             eps:          Small constant to avoid div-by-zero.
@@ -313,19 +339,12 @@ class VAE(BaseAE):
         Returns:
             w: (batch_size, n_genes) normalized, clamped, exponentiated weights.
         """
-        batch_size, n_genes = self.x.shape
 
-        # 1) choose raw weight w_g based on type
-        if weight_type == "batch":
-            mean_g = self.x.mean(dim=0)  # (n_genes,)
-            w_g = 1.0 / (mean_g + eps)
-        elif weight_type == "global" and global_gene_mean is not None:
-            w_g = 1.0 / (global_gene_mean + eps)
-        else:
-            w_g = torch.ones(n_genes, device=self.x.device)
+        # 1) choose raw weight w_g based on type for bulk GEPs
+        w_g = 1.0 / (self.g_mean + eps)  # (n_genes, n_cell_types)
 
         # 2) normalize so that average weight = 1
-        w_g = w_g / w_g.mean()
+        w_g = w_g / w_g.mean(dim=0, keepdim=True)
 
         # 3) clamp to avoid extremes
         w_g = torch.clamp(w_g, min=clamp_range[0], max=clamp_range[1])
@@ -334,8 +353,7 @@ class VAE(BaseAE):
         if low_weight_coef != 1.0:
             w_g = w_g.pow(low_weight_coef)
 
-        # 5) expand to full batch
-        return w_g.unsqueeze(0).expand(batch_size, -1)
+        return w_g
 
     def loss_function_old(self, x: torch.Tensor, mu: torch.Tensor,
                       log_var: torch.Tensor, y: Optional[torch.Tensor] = None,
@@ -413,3 +431,37 @@ class VAE(BaseAE):
         random_weights = torch.randn(latent_dim, latent_dim)
         q, _ = torch.qr(random_weights)  # QR decomposition to get orthonormal vectors
         return radius * q.t()
+
+    @staticmethod
+    def _poe_fuse_per_celltype(
+        mu_lists: List[torch.Tensor],
+        logvar_lists: List[torch.Tensor],
+        eps: float = 1e-6,
+        ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        """
+        Perform product of experts (PoE) fusion for the mean and log variance of the latent space.
+
+        Args:
+            mu_lists: List of means from different encoders.
+            logvar_lists: List of log variances from different encoders.
+            eps: Small value to avoid division by zero.
+
+        Returns:
+            Fused mean and log variance.
+        """
+        # PoE fusion
+        fused_mu, fused_logvar = [], []
+        for mu1, lv1, mu2, lv2 in zip(mu_lists[0], logvar_lists[0], mu_lists[1], logvar_lists[1]):
+            # PoE fusion for each cell type
+            prec1 = torch.exp(-lv1)  # precision, (batch_size, latent_dim)
+            prec2 = torch.exp(-lv2)
+
+            # fused precision
+            mu_poe = (mu1 * prec1 + mu2 * prec2) / (prec1 + prec2 + eps)
+
+            # fused log variance
+            lv_poe = -torch.log(prec1 + prec2 + eps)
+
+            fused_mu.append(mu_poe)
+            fused_logvar.append(lv_poe)
+        return fused_mu, fused_logvar

@@ -4,7 +4,7 @@ import os
 import sys
 import importlib
 from http.cookiejar import LoadError
-from typing import Optional, Dict, Any, Type
+from typing import Optional, Dict, Any, Type, Union, Sequence
 
 import cloudpickle
 import json
@@ -15,6 +15,7 @@ from ...data.datasets import BaseDataset, DatasetOutput
 from ...models.auto_model import AutoConfig
 # from ...models.vae import VAEConfig
 from ..nn import BaseDecoder, BaseEncoder, EncoderMLP
+# from ..gnn import EncoderSGNN
 from ..nn.default_architectures import Decoder_AE_MLP
 from .base_config import BaseModelConfig, EnvironmentConfig
 from ...customexception import BadInheritanceError
@@ -37,7 +38,7 @@ class BaseAE(L.LightningModule):
     def __init__(
         self,
         model_config: BaseModelConfig,
-        encoder: Optional[BaseEncoder] = None,
+        encoders: list[BaseEncoder] = None,  # one or two encoders
         decoder: Optional[BaseDecoder] = None,
     ):
         super().__init__()
@@ -56,17 +57,17 @@ class BaseAE(L.LightningModule):
             self.model_config.uses_default_decoder = True
         else:
             self.model_config.uses_default_decoder = False
-        if encoder is None:
+        if encoders is None:
             if model_config.input_dim is None:
                 raise AttributeError(
                     "Input dimension ('input_dim') must be set in BaseModelConfig to build the encoder automatically."
                 )
-            encoder = EncoderMLP(model_config)
+            encoders = [EncoderMLP(model_config)]
             self.model_config.uses_default_encoder = True
         else:
             self.model_config.uses_default_encoder = False
 
-        self.encoder = check_encoder(encoder)
+        self.encoders = check_encoder(encoders)
         self.decoder = check_decoder(decoder)
         # self.device = None
 
@@ -131,20 +132,20 @@ class BaseAE(L.LightningModule):
         """
         pass
 
-    def _get_encoder_config(self) -> Dict[str, Any]:
+    def _get_encoder_config(self, encoder: BaseEncoder) -> Dict[str, Any]:
         """Get encoder configuration for JSON serialization."""
-        if hasattr(self.encoder, "get_config"):
-            return self.encoder.get_config()
+        if hasattr(encoder, "get_config"):
+            return encoder.get_config()
         else:
             # Create a basic configuration with class info
             return {
-                "class_name": self.encoder.__class__.__name__,
-                "module_name": self.encoder.__class__.__module__,
+                "class_name": encoder.__class__.__name__,
+                "module_name": encoder.__class__.__module__,
                 "params": {
-                    "input_dim": getattr(self.encoder, "input_dim", self.input_dim),
-                    "latent_dim": getattr(self.encoder, "latent_dim", self.latent_dim),
+                    "input_dim": getattr(encoder, "input_dim", self.input_dim),
+                    "latent_dim": getattr(encoder, "latent_dim", self.latent_dim),
                     # Add other common parameters that might be needed
-                    "hidden_dims": getattr(self.encoder, "hidden_dims", []),
+                    "hidden_dims": getattr(encoder, "hidden_dims", []),
                 }
             }
 
@@ -190,14 +191,22 @@ class BaseAE(L.LightningModule):
         #     json.dump(model_config, f, indent=4)
 
         # # Save encoder and decoder configurations as JSON and pkl
-        if hasattr(self, "encoder"):
+        if hasattr(self, "encoders"):
             # json
-            encoder_config = self._get_encoder_config()
+            encoder_config = self._get_encoder_config(self.encoders[0])
             with open(os.path.join(model_dir, "encoder_config.json"), "w") as f:
                 json.dump(encoder_config, f, indent=4)
 
             # Save encoder weights separately
-            torch.save(self.encoder.state_dict(), os.path.join(model_dir, "encoder_weights.pt"))
+            for idx, encoder in enumerate(self.encoders):
+                encoder_weights = encoder.state_dict()
+                if isinstance(encoder, BaseEncoder):
+                    encoder_name = encoder.__class__.__name__.lower()
+                else:
+                    encoder_name = f"encoder_{idx}"
+                torch.save(encoder_weights, os.path.join(model_dir, f"{encoder_name}_weights.pt"))
+
+            # torch.save(self.encoder.state_dict(), os.path.join(model_dir, "encoder_weights.pt"))
 
             # # pkl
             # with open(os.path.join(model_dir, "encoder.pkl"), "wb") as fp:
@@ -314,12 +323,12 @@ class BaseAE(L.LightningModule):
         return model_weights
 
     @classmethod
-    def _load_custom_encoder_from_folder(cls, dir_path: str) -> BaseEncoder:
+    def _load_custom_encoder_from_folder(cls, dir_path: str, encoder_weights_fn: str) -> BaseEncoder:
         """Loads custom encoder from a folder."""
         cls._check_python_version_from_folder(dir_path=dir_path)
 
         # Try loading from JSON config first (new method)
-        if "encoder_config.json" in os.listdir(dir_path) and "encoder_weights.pt" in os.listdir(dir_path):
+        if "encoder_config.json" in os.listdir(dir_path) and encoder_weights_fn in os.listdir(dir_path):
             logger.info("Loading encoder from JSON configuration and weights")
             try:
                 # Load encoder configuration
@@ -330,7 +339,7 @@ class BaseAE(L.LightningModule):
                 encoder = cls._instantiate_model_from_config(encoder_config)
 
                 # Load encoder weights
-                encoder_weights = torch.load(os.path.join(dir_path, "encoder_weights.pt"), map_location="cpu")
+                encoder_weights = torch.load(os.path.join(dir_path, encoder_weights_fn), map_location="cpu")
                 encoder.load_state_dict(encoder_weights)
 
                 return encoder
@@ -375,20 +384,26 @@ class BaseAE(L.LightningModule):
                     )
                 with open(os.path.join(dir_path, "decoder.pkl"), "rb") as fp:
                     return CPU_Unpickler(fp).load()
+        return None
 
     @classmethod
     def load_from_folder(cls, dir_path: str) -> "BaseAE":
         """Loads the model from a specified folder."""
         model_config = cls._load_model_config_from_folder(dir_path)
         model_weights = cls._load_model_weights_from_folder(dir_path)
-        encoder = None
+        encoders = []
         if not model_config.uses_default_encoder:
-            encoder = cls._load_custom_encoder_from_folder(dir_path)
+            file_list = [i.lower() for i in os.listdir(dir_path)]
+            for encoder_type in ['EncoderMLP', 'EncoderSGNN']:  # Add other encoder types as needed
+                encoder_weights_fn = f"{encoder_type.lower()}_weights.pt"
+                if encoder_weights_fn in file_list:
+                    encoders.append(cls._load_custom_encoder_from_folder(dir_path, encoder_weights_fn))
+            # encoders = cls._load_custom_encoder_from_folder(dir_path)
         decoder = None
         if not model_config.uses_default_decoder:
             decoder = cls._load_custom_decoder_from_folder(dir_path)
 
-        model = cls(model_config, encoder=encoder, decoder=decoder)
+        model = cls(model_config, encoders=encoders, decoder=decoder)
         model.load_state_dict(model_weights)
         return model
 
@@ -419,13 +434,20 @@ class BaseAE(L.LightningModule):
         return self.model_config
 
 
-def check_encoder(encoder: BaseEncoder) -> BaseEncoder:
+def check_encoder(encoders: list[BaseEncoder]) -> list[BaseEncoder]:
     """Checks if the encoder is compatible with this model."""
-    if not issubclass(type(encoder), BaseEncoder):
-        raise BadInheritanceError(
-            "Encoder must inherit from BaseEncoder (...models.base_architectures.BaseEncoder)."
-        )
-    return encoder
+    assert isinstance(encoders, list), "Encoder must be a list instance of BaseEncoder."
+    if len(encoders) == 0:
+        raise ValueError("Encoder must be a non-empty list of BaseEncoder instances.")
+    if len(encoders) > 2:
+        raise ValueError("Encoder must be a list of 1 or 2 BaseEncoder instances.")
+
+    for idx, encoder in enumerate(encoders):
+        if not issubclass(type(encoder), BaseEncoder):
+            raise BadInheritanceError(
+                f"The {idx} encoder ({type(encoder)}) is not inherited from BaseEncoder (...models.base_architectures.BaseEncoder)."
+            )
+    return encoders
 
 
 def check_decoder(decoder: BaseDecoder) -> BaseDecoder:

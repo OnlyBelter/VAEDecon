@@ -179,8 +179,6 @@ class PPIEncoder(L.LightningModule):
         :param gene_hidden_dim:
         :param num_layers:
         :param drop_p:
-        :param gene_features: the means and stds of the gene expression values across cell types, used as gene features
-
         """
         super().__init__()
         layers = [

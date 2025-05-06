@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import warnings
 from pathlib import Path
-from typing import Dict, Any, Type, Union, TypeVar
+from typing import Dict, Any, Type, Union, TypeVar, Sequence
 import torch
 from torch.utils.data import DataLoader
 
@@ -11,7 +11,7 @@ from ..utility import check_dir
 from ..data import GEPDataset
 from ..models import AutoModel
 from ..models.gnn import EncoderGNN, EncoderSGNN
-from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding
+from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding, BaseEncoder
 from ..models.vae import VAE, VAEConfig
 from ..trainers import BaseTrainerConfig, BaseTrainerL
 from ..pipelines import TrainingPipeline
@@ -20,25 +20,29 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
 # Define type variables for better type hinting
-T_Encoder = TypeVar('T_Encoder', bound=Union[EncoderMLP, EncoderGNN, EncoderSGNN])
+T_Encoder = TypeVar('T_Encoder', bound=BaseEncoder)
 T_Decoder = TypeVar('T_Decoder', bound=DecoderMLP)
 
 
-def create_model(model_config: VAEConfig, encoder_cls: Type[T_Encoder], decoder_cls: Type[T_Decoder]) -> VAE:
+def create_model(model_config: VAEConfig, encoder_cls_list: list[Type[T_Encoder]], decoder_cls: Type[T_Decoder]) -> VAE:
     """Creates the VAE model."""
     position_encoding = PositionalEncoding(
         d_model=model_config.latent_dim,
         dropout=0,
         max_len=model_config.n_cell_types
     )
-    encoder = encoder_cls(
-        args=model_config,
-        position_encoding=position_encoding,
-    )
+    encoders = []
+    for encoder_cls in encoder_cls_list:
+        kwargs = {
+            "args": model_config,
+            "position_encoding": position_encoding
+        }
+        encoders.append(encoder_cls(**kwargs))
+
     decoder = decoder_cls(args=model_config)
     model = VAE(
         model_config=model_config,
-        encoder=encoder,
+        encoders=encoders,
         decoder=decoder,
     )
 
