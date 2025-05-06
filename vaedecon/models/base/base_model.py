@@ -192,18 +192,18 @@ class BaseAE(L.LightningModule):
 
         # # Save encoder and decoder configurations as JSON and pkl
         if hasattr(self, "encoders"):
-            # json
-            encoder_config = self._get_encoder_config(self.encoders[0])
-            with open(os.path.join(model_dir, "encoder_config.json"), "w") as f:
-                json.dump(encoder_config, f, indent=4)
-
-            # Save encoder weights separately
             for idx, encoder in enumerate(self.encoders):
-                encoder_weights = encoder.state_dict()
                 if isinstance(encoder, BaseEncoder):
                     encoder_name = encoder.__class__.__name__.lower()
                 else:
                     encoder_name = f"encoder_{idx}"
+                # json
+                encoder_config = self._get_encoder_config(encoder)
+                with open(os.path.join(model_dir, f"{encoder_name}_config.json"), "w") as f:
+                    json.dump(encoder_config, f, indent=4)
+                # Save encoder weights separately
+                encoder_weights = encoder.state_dict()
+
                 torch.save(encoder_weights, os.path.join(model_dir, f"{encoder_name}_weights.pt"))
 
             # torch.save(self.encoder.state_dict(), os.path.join(model_dir, "encoder_weights.pt"))
@@ -326,13 +326,14 @@ class BaseAE(L.LightningModule):
     def _load_custom_encoder_from_folder(cls, dir_path: str, encoder_weights_fn: str) -> BaseEncoder:
         """Loads custom encoder from a folder."""
         cls._check_python_version_from_folder(dir_path=dir_path)
-
+        encoder_config_fn = encoder_weights_fn.replace("_weights.pt", "_config.json")
+        file_list_in_dir = os.listdir(dir_path)
         # Try loading from JSON config first (new method)
-        if "encoder_config.json" in os.listdir(dir_path) and encoder_weights_fn in os.listdir(dir_path):
+        if encoder_config_fn in file_list_in_dir and encoder_weights_fn in file_list_in_dir:
             logger.info("Loading encoder from JSON configuration and weights")
             try:
                 # Load encoder configuration
-                with open(os.path.join(dir_path, "encoder_config.json"), "r") as f:
+                with open(os.path.join(dir_path, encoder_config_fn), "r") as f:
                     encoder_config = json.load(f)
 
                 # Instantiate encoder from config
@@ -346,12 +347,13 @@ class BaseAE(L.LightningModule):
             except Exception as e:
                 logger.warning(f"Failed to load encoder from JSON config: {e}. Falling back to pickle.")
 
-        if "encoder.pkl" not in os.listdir(dir_path):
+        elif "encoder.pkl" not in os.listdir(dir_path):
             raise FileNotFoundError(
                 f"Missing 'encoder.pkl' in{dir_path}. Cannot load encoder."
             )
-        with open(os.path.join(dir_path, "encoder.pkl"), "rb") as fp:
-            return CPU_Unpickler(fp).load()
+        else:
+            with open(os.path.join(dir_path, "encoder.pkl"), "rb") as fp:
+                return CPU_Unpickler(fp).load()
 
     @classmethod
     def _load_custom_decoder_from_folder(cls, dir_path: str) -> BaseDecoder:
