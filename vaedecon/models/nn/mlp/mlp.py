@@ -212,9 +212,7 @@ class DecoderMLP(BaseDecoder):
             `output_layer_levels` arguments are available under the keys `reconstruction_layer_i`
             where i is the layer's level.
         """
-        output = ModelOutput()
-
-        # max_depth = self.depth
+        z = z.to(self.device)  # B, n_genes
 
         if output_layer_levels is not None:
             assert all(
@@ -233,7 +231,7 @@ class DecoderMLP(BaseDecoder):
         out = z.reshape(-1, 1, self.latent_dim)
         # print('z.shape', z.shape)
 
-        latent_output = None
+        output = ModelOutput()
         for i, layer in enumerate(self.layers):
             out = layer['linear'](out)
             out = layer['norm'](out)
