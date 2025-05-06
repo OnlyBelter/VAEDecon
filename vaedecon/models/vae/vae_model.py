@@ -188,7 +188,7 @@ class VAE(BaseAE):
             x=x, logvar_list=logvar_list, y=y, mu_list=mu_list,
             dd_alpha=dd_alpha, recon_x_conv=recon_x_conv,
             beta=self.model_config.loss_coefficient['beta'],
-            mu_prior=mu_prior,
+            mu_prior=mu_prior.to(self.device),
             gamma=self.model_config.loss_coefficient['gamma'],
             recon_gene_mean= recon_gene_mean,
             recon_gene_std= recon_gene_std,
