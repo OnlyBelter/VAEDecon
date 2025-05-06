@@ -156,7 +156,8 @@ class VAE(BaseAE):
         if self.model_config.scaling_by_constant:
             recon_x_all_types = recon_x_all_types * 20.0
         recon_x_all_types = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
-        recon_x_conv = torch.matmul(recon_x_all_types, cell_prop.reshape(-1, n_cell_types, 1))  # (batch_size, n_genes, 1)
+        cell_prop = cell_prop.reshape(-1, n_cell_types, 1).to(self.device)
+        recon_x_conv = torch.matmul(recon_x_all_types, cell_prop)  # (batch_size, n_genes, 1)
 
         # Compare the means and stds of each gene among reconstructed GEPs across cell types
         recon_gene_mean = recon_x_all_types.mean(dim=0)  # (n_genes, n_cell_types)
