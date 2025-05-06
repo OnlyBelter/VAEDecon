@@ -86,8 +86,8 @@ class EncoderMLP(BaseEncoder):
             `output_layer_levels` arguments are available under the keys `embedding_layer_i` where
             i is the layer's level.
         """
-        output = ModelOutput()
 
+        x = x.to(self.device)  # B, n_genes
         # max_depth = self.depth
         if self.position_encoding is not None:
             self.position_encoding = self.position_encoding.to(x.device)
@@ -106,6 +106,7 @@ class EncoderMLP(BaseEncoder):
             # else:
             #     max_depth = max(output_layer_levels)
 
+        output = ModelOutput()
         out = x.view(x.size(0), -1)  # flatten the input
         for i, layer in enumerate(self.layers):
             out = layer['linear'](out)
