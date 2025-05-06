@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import anndata as an
 from typing import Union
+from pathlib import Path
 from scipy.sparse import csr_matrix
 from sklearn import preprocessing as pp
 from .pub_func import (log_exp2cpm, read_df, non_log2log_cpm,
@@ -350,3 +351,65 @@ def get_gene_mean_std_across_cell_types(sct_dataset_fp: str, result_fp, gene_lis
         if scaling_by_constant is True:
             ct2ave = ct2ave / 20
         ct2ave.to_csv(result_fp, float_format='%.3f')
+
+
+def load_or_compute_gene_mean_std(
+    sct_gep_fp: str,
+    gene_list: list[str],
+    cell_type_fp: str,
+    input_gene_list_fp: str,
+    scaling_by_constant: bool,
+    log_fn=print,
+) -> pd.DataFrame:
+    """
+    1) Determine the gene‐mean/std filename based on `scaling_by_constant`
+    2) If it exists and perfectly matches `gene_list`, load & return it
+    3) Otherwise, (re)compute it via `get_gene_mean_std_across_cell_types`
+       and then load & return it
+    """
+    base_dir = Path(sct_gep_fp).parent
+    fname = (
+        "gene_mean_std_log2p1_scaled.csv"
+        if scaling_by_constant
+        else "gene_mean_std_log2p1.csv"
+    )
+    out_fp = base_dir / fname
+
+    def file_matches(df: pd.DataFrame) -> bool:
+        # exact same genes, same order
+        return (
+            list(df.index) == gene_list
+            and df.shape[0] == len(gene_list)
+        )
+
+    if out_fp.exists():
+        df = pd.read_csv(out_fp, index_col=0)
+        if file_matches(df):
+            log_fn(f"> Using existing gene‐mean/std file: {out_fp}")
+            return df
+        else:
+            log_fn(
+                "> Existing gene‐mean/std file does not match current gene list, "
+                "recomputing..."
+            )
+
+    else:
+        log_fn(f"> No precomputed file found at {out_fp}, computing now...")
+
+    # (re)compute
+    log_fn("> Computing means & stds of each gene across cell types …")
+    get_gene_mean_std_across_cell_types(
+        result_fp=str(out_fp),
+        gene_list_fp=input_gene_list_fp,
+        cell_type_fp=cell_type_fp,
+        sct_dataset_fp=sct_gep_fp,
+        scaling_by_constant=scaling_by_constant,
+    )
+
+    # load and return
+    df = pd.read_csv(out_fp, index_col=0)
+    if not file_matches(df):
+        raise RuntimeError(
+            f"After computation, {out_fp} still does not match the expected gene list!"
+        )
+    return df
