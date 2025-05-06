@@ -59,7 +59,7 @@ class VAE(BaseAE):
         self.anchor_vectors = self.make_orthonormal_anchors(latent_dim=latent_dim)
         self.register_buffer("anchors", self.anchor_vectors)
         # Learn a logit for each cell type to weight orthonormal anchors in the latent space
-        self.logits = nn.Parameter(torch.zeros(n_cell_types, latent_dim, device=self.device))
+        logits = nn.Parameter(torch.zeros(n_cell_types, latent_dim))
         # Gene features (mean and std) for each gene across cell types buffer
         if not os.path.exists(model_config.gene_mean_std_fp):
             raise FileNotFoundError(f"Gene features file not found: {model_config.gene_mean_std_fp}")
@@ -69,6 +69,7 @@ class VAE(BaseAE):
         # gf_mat = gf_df.loc[self.keep_genes].values  # shape = (n_genes, n_feats)
         self.register_buffer('g_mean', torch.tensor(g_mean, dtype=torch.float32))
         self.register_buffer('g_std', torch.tensor(g_std, dtype=torch.float32))
+        self.register_buffer('logits', logits)  # (n_cell_types, latent_dim)
 
         # Calculate gene weights based on the mean expression values across cell types
         w = torch.ones_like(self.g_mean, device=self.device)
@@ -121,13 +122,6 @@ class VAE(BaseAE):
             )
             cell_prop = torch.mean(torch.stack(prop_list, dim=0), dim=0)  # (batch_size, n_cell_types)
 
-        # encoder_output = self.encoder(x=x, y=y)
-        # mu_list, logvar_list, cell_prop = (
-        #     encoder_output.mu_list,
-        #     encoder_output.logvar_list,
-        #     encoder_output.cell_prop,
-        # )
-        # stack the mu_list and logvar_list to (batch_size, latent_dim, n_cell_types)
         mu_types = torch.stack(mu_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
         log_var_types = torch.stack(logvar_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
         # pred_cell_prop = None
@@ -156,7 +150,7 @@ class VAE(BaseAE):
         if self.model_config.scaling_by_constant:
             recon_x_all_types = recon_x_all_types * 20.0
         recon_x_all_types = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
-        cell_prop = cell_prop.reshape(-1, n_cell_types, 1).to(self.device)
+        cell_prop = cell_prop.reshape(-1, n_cell_types, 1).to(device)
         recon_x_conv = torch.matmul(recon_x_all_types, cell_prop)  # (batch_size, n_genes, 1)
 
         # Compare the means and stds of each gene among reconstructed GEPs across cell types
@@ -179,7 +173,7 @@ class VAE(BaseAE):
         recon_x_conv = recon_x_conv.reshape(x.shape)
 
         # get learned logit for each cell type
-        anchor_weights = F.softmax(self.logits, dim=-1).to(self.device)  # (n_cell_types, latent_dim)
+        anchor_weights = F.softmax(self.logits, dim=-1)  # (n_cell_types, latent_dim)
         mu_prior = anchor_weights @ self.anchors  # (n_cell_types, latent_dim)
 
         (loss, kld_z, kld_p, recon_loss_conv, repulsion_loss,
@@ -188,7 +182,7 @@ class VAE(BaseAE):
             x=x, logvar_list=logvar_list, y=y, mu_list=mu_list,
             dd_alpha=dd_alpha, recon_x_conv=recon_x_conv,
             beta=self.model_config.loss_coefficient['beta'],
-            mu_prior=mu_prior.to(self.device),
+            mu_prior=mu_prior,
             gamma=self.model_config.loss_coefficient['gamma'],
             recon_gene_mean= recon_gene_mean,
             recon_gene_std= recon_gene_std,
@@ -283,7 +277,8 @@ class VAE(BaseAE):
         logvar = torch.stack(logvar_list, dim=1)  # (batch_size, n_cell_types, latent_dim)
         var = logvar.exp()  # (batch_size, n_cell_types, latent_dim)
         if mu_prior is not None:
-            mu_prior = mu_prior.unsqueeze(0)  # (1, n_cell_types, latent_dim) -> broadcast to (batch_size, n_cell_types, latent_dim)
+            # (n_cell_types, latent_dim) -> (1, n_cell_types, latent_dim), then later it can broadcast to (batch_size, n_cell_types, latent_dim)
+            mu_prior = mu_prior.unsqueeze(0).to(self.device)
             diff = mu - mu_prior  # (batch_size, n_cell_types, latent_dim)
             kld_bt = -0.5 * torch.sum(1 + logvar - diff.pow(2) - var, dim=-1)  # sum over latent_dim
         else:
