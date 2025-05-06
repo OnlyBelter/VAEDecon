@@ -179,7 +179,7 @@ class VAE(BaseAE):
         recon_x_conv = recon_x_conv.reshape(x.shape)
 
         # get learned logit for each cell type
-        anchor_weights = F.softmax(self.logits, dim=-1)  # (n_cell_types, latent_dim)
+        anchor_weights = F.softmax(self.logits, dim=-1).to(self.device)  # (n_cell_types, latent_dim)
         mu_prior = anchor_weights @ self.anchors  # (n_cell_types, latent_dim)
 
         (loss, kld_z, kld_p, recon_loss_conv, repulsion_loss,
