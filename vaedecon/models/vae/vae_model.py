@@ -71,7 +71,7 @@ class VAE(BaseAE):
         self.register_buffer('g_std', torch.tensor(g_std, dtype=torch.float32))
 
         # Calculate gene weights based on the mean expression values across cell types
-        w = torch.ones_like(self.g_mean)
+        w = torch.ones_like(self.g_mean, device=self.device)
         if self.model_config.loss_coefficient['weighting_gene_by_exp']:
             weight_clamp_range = self.model_config.loss_coefficient['weight_clamp_range']
             # construct weights for each gene across cell types, (batch_size, n_genes, n_cell_types)
@@ -223,9 +223,6 @@ class VAE(BaseAE):
                       beta=1.0,
                       gamma=0.1,
                       eps=1e-6,
-                      weight_type: str = "batch",  # "batch" or "global"
-                      global_gene_mean: Optional[torch.Tensor] = None,
-                      low_weight_coef: Optional[torch.Tensor] = 1.0,  # strength of up-weighting
                       recon_gene_mean: Optional[torch.Tensor] = None,
                       recon_gene_std: Optional[torch.Tensor] = None,
     ):
@@ -242,9 +239,6 @@ class VAE(BaseAE):
             beta: Weight for the KL divergence term.
             gamma: Weight for the repulsion loss.
             eps: Small value to avoid division by zero.
-            weight_type: Type of gene weight to use for the reconstruction loss, low expressed genes will be given a higher weight.
-            global_gene_mean: Pre-computed global mean for each gene when using "global" weight type.
-            low_weight_coef: Coefficient to control the strength of up-weighting low-expressed genes.
             recon_gene_mean: Reconstructed gene means for each cell type across the whole batch.
             recon_gene_std: Reconstructed gene standard deviations for each cell type across the whole batch.
         Returns:
