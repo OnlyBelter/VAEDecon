@@ -273,8 +273,8 @@ class VAE(BaseAE):
 
         # --- Gaussian KL divergence loss for GEPs ---
         # Prior: Gaussian distribution (mean=0, std=1)
-        mu = torch.stack(mu_list, dim=1)  # (batch_size, n_cell_types, latent_dim)
-        logvar = torch.stack(logvar_list, dim=1)  # (batch_size, n_cell_types, latent_dim)
+        mu = torch.stack(mu_list, dim=1).to(self.device)  # (batch_size, n_cell_types, latent_dim)
+        logvar = torch.stack(logvar_list, dim=1).to(self.device)  # (batch_size, n_cell_types, latent_dim)
         var = logvar.exp()  # (batch_size, n_cell_types, latent_dim)
         if mu_prior is not None:
             # (n_cell_types, latent_dim) -> (1, n_cell_types, latent_dim), then later it can broadcast to (batch_size, n_cell_types, latent_dim)
