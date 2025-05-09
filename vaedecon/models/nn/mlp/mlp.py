@@ -122,9 +122,10 @@ class EncoderMLP(BaseEncoder):
         # mu_all_types = self.fc_mu(out)  # (batch_size, latent_dim * n_cell_types)
         mu_list = [mu(out) for mu in self.fc_mu_list]
         # combine the mu_list into a tensor
-        # embedding_all_types = torch.stack(mu_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
+        mu_all_types = torch.stack(mu_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
         # mu_all_types = mu_all_types.view((-1, self.latent_dim, self.n_cell_types))
         logvar_list = [logvar(out) for logvar in self.fc_logvar_list]
+        logvar_all_types = torch.stack(logvar_list, dim=2)   # (batch_size, latent_dim, n_cell_types)
         # log_var = self.log_var(out)
         # TODO: getting cell proportions from DeSide
         if self.predict_cell_prop:
@@ -144,10 +145,13 @@ class EncoderMLP(BaseEncoder):
             position_encoding_cell_type = torch.matmul(self.position_encoding(), exists)
             # mu_all_types = [mu_all_types[:, :, i] + position_encoding_cell_type[i, :].unsqueeze(1) for i in range(self.n_cell_types)]
 
-        output['mu_list'] = mu_list
-        # output['mu_all_types'] = mu_all_types
+        # output['mu_list'] = mu_list
+        output['mu_all_types'] = mu_all_types
+        output['logvar_all_types'] = logvar_all_types
+        output['mu_mean'] = mu_all_types.mean(dim=-1)
+        output['logvar_mean'] = logvar_all_types.mean(dim=-1)
         # output['log_var'] = log_var
-        output['logvar_list'] = logvar_list
+        # output['logvar_list'] = logvar_list
         output['cell_type_existed'] = (cell_prop >= 0.01).float()  # (B, n_cell_types)
         output['cell_prop'] = cell_prop
 
