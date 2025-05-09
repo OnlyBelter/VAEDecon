@@ -49,9 +49,9 @@ class EncoderMLP(BaseEncoder):
             input_size = hidden_dim_size
 
         # self.layers = layers
-        self.depth = len(self.layers)
+        # self.depth = len(self.layers)
 
-        # self.embedding = nn.Linear(in_features=self.hidden_dims[-1],
+        # self.fc_mu = nn.Linear(in_features=self.hidden_dims[-1],
         #                            out_features=args.latent_dim * args.n_cell_types)
         self.fc_mu_list = nn.ModuleList(
             [nn.Linear(self.hidden_dims[-1], self.latent_dim) for _ in range(self.n_cell_types)]
@@ -119,12 +119,13 @@ class EncoderMLP(BaseEncoder):
                     output[f"embedding_layer_{i+1}"] = out
 
         # using the proposed structure of latent space
-        # embedding_all_types = self.embedding(out)  # (batch_size, latent_dim, n_cell_types)
+        # mu_all_types = self.fc_mu(out)  # (batch_size, latent_dim * n_cell_types)
         mu_list = [mu(out) for mu in self.fc_mu_list]
         # combine the mu_list into a tensor
         # embedding_all_types = torch.stack(mu_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
-        # embedding_all_types = embedding_all_types.view((-1, self.latent_dim, self.n_cell_types))
+        # mu_all_types = mu_all_types.view((-1, self.latent_dim, self.n_cell_types))
         logvar_list = [logvar(out) for logvar in self.fc_logvar_list]
+        # log_var = self.log_var(out)
         # TODO: getting cell proportions from DeSide
         if self.predict_cell_prop:
             # output["cell_prop"] = self.cell_prop(cell_embedding_before_mu).view((-1, self.n_cell_types, 1))
@@ -141,9 +142,11 @@ class EncoderMLP(BaseEncoder):
         if self.position_encoding is not None:
             exists = (cell_prop >= 0.01).float()  # (B, n_cell_types)
             position_encoding_cell_type = torch.matmul(self.position_encoding(), exists)
-            mu_list = [mu_list[i] + position_encoding_cell_type[i, :].unsqueeze(1) for i in range(self.n_cell_types)]
+            # mu_all_types = [mu_all_types[:, :, i] + position_encoding_cell_type[i, :].unsqueeze(1) for i in range(self.n_cell_types)]
 
         output['mu_list'] = mu_list
+        # output['mu_all_types'] = mu_all_types
+        # output['log_var'] = log_var
         output['logvar_list'] = logvar_list
         output['cell_type_existed'] = (cell_prop >= 0.01).float()  # (B, n_cell_types)
         output['cell_prop'] = cell_prop
@@ -189,8 +192,8 @@ class DecoderMLP(BaseDecoder):
             nn.ModuleDict({
                 'linear': nn.Linear(self.hidden_dims[-1], np.prod(self.input_dim)),
                 'norm': nn.Identity(),
-                'activation': nn.Softplus(beta=100, threshold=1),  # make sure the output is positive
-                'dropout': nn.Dropout(p=self.dropout_rate[i]) if (
+                'activation': nn.ReLU(),  # make sure the output is >= 0
+                'dropout': nn.Dropout(p=self.dropout_rate[-1]) if (
                         self.dropout_rate[-1] > 0) else nn.Identity(),
             })
         )
@@ -212,7 +215,7 @@ class DecoderMLP(BaseDecoder):
             `output_layer_levels` arguments are available under the keys `reconstruction_layer_i`
             where i is the layer's level.
         """
-        z = z.to(self.device)  # B, n_genes
+        z = z.to(self.device)  # B, latent_dim
 
         if output_layer_levels is not None:
             assert all(
@@ -243,6 +246,7 @@ class DecoderMLP(BaseDecoder):
                     output[f"reconstruction_layer_{i+1}"] = out
 
         # out = torch.clamp(self.relu(out), max=1.0)
+        out = torch.where(out >= 1, 1 - 1e-2, out)  # clamp the output to [0, 0.99], since it is scaled by a constant (default is 20)
         output["reconstruction"] = out
         return output
 

@@ -105,7 +105,9 @@ class VAE(BaseAE):
         for encoder in self.encoders:
             out = encoder(x=x, y=y)
             mu_lists.append(out.mu_list)
+            # mu_lists.append(out.mu_all_types)
             logvar_lists.append(out.logvar_list)
+            # logvar_lists.append(out.log_var)
             prop_list.append(out.cell_prop)
             if self.model_config.predict_cell_prop:
                 dd_alpha_list.append(out.dd_alpha)
@@ -124,6 +126,8 @@ class VAE(BaseAE):
 
         mu_types = torch.stack(mu_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
         log_var_types = torch.stack(logvar_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
+        # mu_types = mu_list  # (batch_size, latent_dim, n_cell_types)
+        # log_var = logvar_list  # (batch_size, latent_dim), all cell types shared
         # pred_cell_prop = None
         dd_alpha = torch.zeros(self.model_config.n_cell_types)
         if self.model_config.predict_cell_prop:
@@ -131,12 +135,13 @@ class VAE(BaseAE):
                 dd_alpha = dd_alpha_list[0]
             else:  # two encoders
                 dd_alpha = torch.mean(torch.stack(dd_alpha_list, dim=0), dim=0) # (batch_size, n_cell_types)
-        n_cell_types = len(mu_list)
+        n_cell_types = mu_types.shape[2]
 
         # reconstructing GEPs for all cell types
         # Sample latent type representations for each cell type
         z_type_list = [
-            reparameterize_gaussian(mu_list[i], logvar_list[i])
+            # reparameterize_gaussian(mu_types[:, :, i], log_var)
+            reparameterize_gaussian(mu_types[:, :, i], log_var_types[:, :, i])
             for i in range(n_cell_types)
         ]  # list of tensors (batch_size, latent_dim)
         # Decode each latent type representation to its corresponding GEP
@@ -150,15 +155,15 @@ class VAE(BaseAE):
         if self.model_config.scaling_by_constant:
             recon_x_all_types = recon_x_all_types * 20.0
         recon_x_all_types = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
-        cell_prop = cell_prop.reshape(-1, n_cell_types, 1).to(device)
-        recon_x_conv = torch.matmul(recon_x_all_types, cell_prop)  # (batch_size, n_genes, 1)
+        cell_prop = cell_prop.reshape(-1, n_cell_types, 1).to(device)  # (batch_size, n_cell_types, 1)
+        recon_x_conv = torch.bmm(recon_x_all_types, cell_prop)  # (batch_size, n_genes, 1)
 
         # Compare the means and stds of each gene among reconstructed GEPs across cell types
         recon_gene_mean = recon_x_all_types.mean(dim=0)  # (n_genes, n_cell_types)
         recon_gene_std = recon_x_all_types.std(dim=0)  # (n_genes, n_cell_types)
         # Convert to the same format as the gene features
-        recon_gene_mean = non_log2log_cpm_tensor(recon_gene_mean, transpose=True) / 20.0
-        recon_gene_std = non_log2log_cpm_tensor(recon_gene_std, transpose=True) / 20.0
+        recon_gene_mean = torch.log2(recon_gene_mean + 1) / 20.0
+        recon_gene_std = torch.log2(recon_gene_std + 1) / 20.0
 
         # if y is not None:
         #     recon_x_conv = torch.matmul(recon_x_all_types, y.reshape(-1, n_cell_types, 1))
@@ -167,19 +172,21 @@ class VAE(BaseAE):
         # else:
         #     raise ValueError("y or pred_cell_prop must be provided.")
         # convert recon_x_conv to log2(TPM + 1) format
-        recon_x_conv = non_log2log_cpm_tensor(recon_x_conv, transpose=True)  # TODO, check here!
+        recon_x_conv = recon_x_conv.squeeze()  # (batch_size, n_genes))
+        recon_x_conv = non_log2log_cpm_tensor(recon_x_conv, transpose=False)  # (batch_size, n_genes)
         if self.model_config.scaling_by_constant:
             recon_x_conv = recon_x_conv / 20.0
         recon_x_conv = recon_x_conv.reshape(x.shape)
 
         # get learned logit for each cell type
         anchor_weights = F.softmax(self.logits, dim=-1)  # (n_cell_types, latent_dim)
-        mu_prior = anchor_weights @ self.anchors  # (n_cell_types, latent_dim)
+        # mu_prior = anchor_weights @ self.anchors  # (n_cell_types, latent_dim)
+        mu_prior = None  # (n_cell_types, latent_dim)
 
-        (loss, kld_z, kld_p, recon_loss_conv, repulsion_loss,
+        (loss, kld_z, kld_p, recon_loss_conv,
          gene_mean_loss, gene_std_loss) = self.loss_function(
             # recon_x=recon_x, x=x, mu=mu, log_var=log_var, y=y,
-            x=x, logvar_list=logvar_list, y=y, mu_list=mu_list,
+            x=x, logvar_list=log_var_types, y=y, mu_list=mu_types,
             dd_alpha=dd_alpha, recon_x_conv=recon_x_conv,
             beta=self.model_config.loss_coefficient['beta'],
             mu_prior=mu_prior,
@@ -196,6 +203,7 @@ class VAE(BaseAE):
             # z=z,
             # mu=mu,
             mu_deconv=mu_types,
+            # log_var=log_var,
             log_var=log_var_types,
             cell_prop_loss=kld_p,
             kld=kld_z,
@@ -210,8 +218,8 @@ class VAE(BaseAE):
 
     def loss_function(self, x: torch.Tensor,
                       recon_x_conv: Optional[torch.Tensor] = None,
-                      mu_list: List[torch.Tensor] = None,
-                      logvar_list: List[torch.Tensor] = None,
+                      mu_list: torch.Tensor = None,
+                      logvar_list: torch.Tensor = None,
                       y: Optional[torch.Tensor] = None,
                       dd_alpha: Optional[torch.Tensor] = None,
                       mu_prior: Optional[torch.Tensor] = None,
@@ -240,14 +248,15 @@ class VAE(BaseAE):
             A tuple containing the total loss, KL divergence loss, cell proportion loss, and reconstruction loss.
         """
         batch_size, n_genes = x.shape
+        n_cell_types = mu_list.shape[2]
 
         # --- Reconstruction loss ---
-        flat_x = x.reshape(batch_size, -1)  # (batch_size, n_genes)
-        flat_recon_x_conv = recon_x_conv.reshape(batch_size, -1)  # (batch_size, n_genes)
+        # flat_x = x.reshape(batch_size, -1)  # (batch_size, n_genes)
+        # flat_recon_x_conv = recon_x_conv.reshape(batch_size, -1)  # (batch_size, n_genes)
         if self.model_config.reconstruction_loss == "mse":
-            recon_loss_by_conv = F.mse_loss(flat_recon_x_conv, flat_x, reduction="none")  # (batch_size, n_genes)
+            recon_loss_by_conv = F.mse_loss(recon_x_conv, x, reduction="none")  # (batch_size, n_genes)
         elif self.model_config.reconstruction_loss == "bce":
-            recon_loss_by_conv = F.binary_cross_entropy(flat_recon_x_conv, flat_x, reduction="none")
+            recon_loss_by_conv = F.binary_cross_entropy(recon_x_conv, x, reduction="none")
         else:
             raise ValueError(
                 f"Reconstruction loss {self.model_config.reconstruction_loss} is not implemented"
@@ -273,43 +282,54 @@ class VAE(BaseAE):
 
         # --- Gaussian KL divergence loss for GEPs ---
         # Prior: Gaussian distribution (mean=0, std=1)
-        mu = torch.stack(mu_list, dim=1).to(self.device)  # (batch_size, n_cell_types, latent_dim)
-        logvar = torch.stack(logvar_list, dim=1).to(self.device)  # (batch_size, n_cell_types, latent_dim)
-        var = logvar.exp()  # (batch_size, n_cell_types, latent_dim)
-        if mu_prior is not None:
-            # (n_cell_types, latent_dim) -> (1, n_cell_types, latent_dim), then later it can broadcast to (batch_size, n_cell_types, latent_dim)
-            mu_prior = mu_prior.unsqueeze(0).to(self.device)
-            diff = mu - mu_prior  # (batch_size, n_cell_types, latent_dim)
-            kld_bt = -0.5 * torch.sum(1 + logvar - diff.pow(2) - var, dim=-1)  # sum over latent_dim
-        else:
-            kld_bt = -0.5 * torch.sum(1 + logvar - mu.pow(2) - var, dim=-1)
-        kld_z_types = kld_bt.sum(dim=-1)  # sum over n_cell_types
+        # mu = torch.stack(mu_list, dim=1).to(self.device)  # (batch_size, n_cell_types, latent_dim)
+        # logvar = torch.stack(logvar_list, dim=1).to(self.device)  # (batch_size, n_cell_types, latent_dim)
+        # mu_mean = mu_list.mean(dim=-1) # (batch_size, latent_dim)
+        # logvar_mean = logvar_list.mean(dim=-1)   # (batch_size, latent_dim)
+        # var_mean = logvar_mean.exp()  # (batch_size, latent_dim)
+        # logvar_mean = torch.log(var_mean).to(self.device)
+        # logvar_mean = logvar_list.mean(dim=-1).to(self.device)  # (batch_size, latent_dim)
+        # var = logvar_mean.exp()  # (batch_size, n_cell_types, latent_dim)
+        # if mu_prior is not None:
+        #     # (n_cell_types, latent_dim) -> (1, n_cell_types, latent_dim), then later it can broadcast to (batch_size, n_cell_types, latent_dim)
+        #     mu_prior = mu_prior.unsqueeze(0).to(self.device)
+        #     diff = mu - mu_prior  # (batch_size, n_cell_types, latent_dim)
+        #     kld_bt = -0.5 * torch.sum(1 + logvar - diff.pow(2) - var, dim=-1)  # sum over latent_dim
+        # else:
+        ## kld = - torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
+        kld_z_per_type = -0.5 * torch.sum(1 + logvar_list - mu_list.pow(2) - logvar_list.exp(),
+                                          dim=2)  # [batch_size, latent_dim]
+        kld_z_types = kld_z_per_type.sum(dim=1)  # Sum over latent dim, [batch_size]
+        # kld_z_types = -0.5 * torch.sum(1 + logvar_mean - mu_mean.pow(2) - var_mean, dim=-1)  # sum over latent_dim
 
-        # --- Repulsion loss ---
-        n_cell_types, latent_dim = mu.shape[1], mu.shape[2]
-        # using broadcasting to calculate the pairwise distance
-        diff = mu.unsqueeze(2) - mu.unsqueeze(1)  # (batch_size, n_cell_types, n_cell_types, latent_dim)
-        dist2 = torch.sum(diff ** 2, dim=-1)  # (batch_size, n_cell_types, n_cell_types)
-        # remove the diagonal elements (self-repulsion)
-        mask = ~ torch.eye(n_cell_types, device=x.device, dtype=torch.bool).unsqueeze(0)  # (1, n_cell_types, n_cell_types)
-        inv_dist = torch.where(mask,
-                               1.0 / (dist2 + eps),  # avoid division by zero)
-                               torch.zeros_like(dist2))
-        # repulsion loss
-        repulsion_loss = inv_dist.sum(dim=(1, 2))  # sum over each (i, j) pair, (batch_size,)
+        # kld_z_types = kld_bt.sum(dim=-1)  # sum over n_cell_types
+        # kld_z_types = kld_bt
+
+        # # --- Repulsion loss ---
+        # # n_cell_types, latent_dim = mu.shape[1], mu.shape[2]
+        # # using broadcasting to calculate the pairwise distance
+        # diff = mu_list.unsqueeze(2) - mu_list.unsqueeze(1)  # (batch_size, n_cell_types, n_cell_types, latent_dim)
+        # dist2 = torch.sum(diff ** 2, dim=-1)  # (batch_size, n_cell_types, n_cell_types)
+        # # remove the diagonal elements (self-repulsion)
+        # mask = ~torch.eye(n_cell_types, device=x.device, dtype=torch.bool).unsqueeze(0)  # (1, n_cell_types, n_cell_types)
+        # inv_dist = torch.where(mask,
+        #                        1.0 / (dist2 + eps),  # avoid division by zero)
+        #                        torch.zeros_like(dist2))
+        # # repulsion loss
+        # repulsion_loss = inv_dist.sum(dim=(1, 2))  # sum over each (i, j) pair, (batch_size,)
 
         # print('recon_loss_by_decoder.shape', recon_loss_by_decoder.shape, 'kld.shape', kld.shape,
         #       'cell_prop_loss.shape', cell_prop_loss.shape)
         # lo = self.model_config.loss_coefficient
         total_loss = (recon_loss_by_conv
                 + beta * (kld_z_types + kld_p)
-                + gamma * repulsion_loss
+                # + gamma * repulsion_loss
                 + gene_mean_loss
                 + gene_std_loss
-        ).mean(dim=0)
+        ).mean(dim=0)  # average over batch size, scalar
 
         return (total_loss, kld_z_types.mean(dim=0), kld_p.mean(dim=0),
-                recon_loss_by_conv.mean(dim=0), repulsion_loss.mean(dim=0), gene_mean_loss, gene_std_loss)
+                recon_loss_by_conv.mean(dim=0), gene_mean_loss, gene_std_loss)
 
     def compute_gene_weights(
             self,
@@ -318,11 +338,11 @@ class VAE(BaseAE):
             clamp_range: Tuple[float, float] = (0.5, 2.0),
     ) -> torch.Tensor:
         """
-        Compute per-gene weights for a batch of expression profiles.
+        Compute per-gene weights for a batch of expression profiles, higher weights for low variance genes.
 
         Args:
             low_weight_coef:
-                          Exponent to amplify low-expression genes (>1.0 stronger).
+                          Exponent to give more restrict constraint for low variance genes.
             eps:          Small constant to avoid div-by-zero.
             clamp_range:  (min, max) after normalization.
 
@@ -330,8 +350,8 @@ class VAE(BaseAE):
             w: (batch_size, n_genes) normalized, clamped, exponentiated weights.
         """
 
-        # 1) choose raw weight w_g based on type for bulk GEPs
-        w_g = 1.0 / (self.g_mean + eps)  # (n_genes, n_cell_types)
+        # 1) choose raw weight w_g based on the variance of gene expression in each cell type
+        w_g = 1.0 / (self.g_std + eps)  # (n_genes, n_cell_types)
 
         # 2) normalize so that average weight = 1
         w_g = w_g / w_g.mean(dim=0, keepdim=True)

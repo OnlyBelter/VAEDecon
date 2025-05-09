@@ -138,7 +138,10 @@ class GEPDataset(Dataset):
             all_data.append(gep_data)
             all_cell_prop.append(cell_prop)
         # merge multiple datasets and rescale each dataset based on the intersection of genes
-        self.gep_data = pd.concat(all_data, axis=0, join='inner')  # merge multiple datasets by rows
+        self.gep_data = pd.concat(all_data, axis=0, join='inner')  # merge multiple datasets by rows (n_samples, n_genes)
+        self.cell_prop = pd.concat(all_cell_prop, axis=0, join='inner')  # merge multiple datasets by rows (n_samples, n_cell_types)
+        assert len(self.gep_data) == len(self.cell_prop)
+        assert np.all(self.gep_data.index == self.cell_prop.index)  # check the order of samples
         if gene_list_file is not None:  # filter the data based on the gene list, for test sets
             gene_list = load_gene_list(gene_list_file)
             self.gep_data = self.gep_data.loc[:, self.gep_data.columns.isin(gene_list)]
@@ -156,7 +159,7 @@ class GEPDataset(Dataset):
         self.data = torch.from_numpy(self.data)
         if scaling_by_constant:
             self.data = self.data / 20.0
-        self.cell_prop = pd.concat(all_cell_prop, axis=0)
+
         self.cell_types = self.cell_prop.columns.to_list()
         self.gene_list = self.gep_data.columns.to_list()
         self.labels = torch.tensor(self.cell_prop.values, dtype=torch.float32)

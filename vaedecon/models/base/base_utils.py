@@ -58,9 +58,9 @@ class CPU_Unpickler(pickle.Unpickler):
 
 def reparameterize_gaussian(mu, logvar):
     """Samples from a Gaussian distribution (N(0, I)) using the reparameterization trick."""
-    std = torch.exp(0.5 * logvar)
-    eps = torch.randn_like(std)
-    return mu + eps * logvar
+    std = torch.exp(0.5 * logvar)  # sigma
+    eps = torch.randn_like(std)  # epsilon ~ N(0, 1)
+    return mu + std * eps  # reparameterization trick, z = mu + sigma * epsilon
 
 
 def reparameterize_dirichlet(alpha):

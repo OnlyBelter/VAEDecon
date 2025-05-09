@@ -576,7 +576,7 @@ def non_log2log_cpm_tensor(exp: torch.Tensor, result_file_path: str = None,
     :return: log2(CPM + 1) or save the result to file, samples by genes if transpose is True, otherwise genes by samples
     """
     dim0, dim1 = (1, 2)  # expected shape: batch_size, n_cell_type, n_gene
-    if len(exp.shape) == 2:  # if the shape is 2, it means genes by samples
+    if len(exp.shape) == 2:  # if the length of the shape is 2, it means genes by samples
         dim0 = 0
         dim1 = 1
     if transpose:
