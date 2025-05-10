@@ -16,11 +16,12 @@ It contains:
 
 from .base_config import BaseModelConfig
 from .base_model import BaseAE
-from .base_utils import reparameterize_gaussian, reparameterize_dirichlet, ModelOutput
+from .base_utils import reparameterize_gaussian, reparameterize_dirichlet, ModelOutput, set_seed
 
 __all__ = [
     "BaseModelConfig",
     "BaseAE",
     "reparameterize_gaussian",
     "reparameterize_dirichlet",
-    "ModelOutput",]
+    "ModelOutput",
+    "set_seed",]

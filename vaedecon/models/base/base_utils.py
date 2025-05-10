@@ -10,6 +10,8 @@ except ImportError:
     import pickle
 import torch
 from torch.distributions import Gamma
+import random
+import numpy as np
 
 logger = logging.getLogger(__name__)
 console = logging.StreamHandler()
@@ -76,3 +78,19 @@ def reparameterize_dirichlet(alpha):
     # Normalize the samples to sum to 1 to get Dirichlet samples
     p = gamma_samples / gamma_samples.sum(dim=1, keepdim=True)
     return p
+
+
+def set_seed(seed: int):
+    """
+    Functions setting the seed for reproducibility on ``random``, ``numpy``,
+    and ``torch``
+
+    Args:
+
+        seed (int): The seed to be applied
+    """
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
