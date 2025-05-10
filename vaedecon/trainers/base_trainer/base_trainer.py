@@ -57,8 +57,9 @@ class PLTrainer(L.LightningModule):
         """Performs a single training step."""
         output = self(batch)
         self.loss_monitor(step='train', output=output,
-                          # loss_types=('loss', 'kld', 'recon_loss_conv', 'gene_mean_loss', 'gene_std_loss'))
-                          loss_types=('loss', 'kld', 'recon_loss_conv'))
+                          loss_types=('loss', 'kld', 'recon_loss_conv',
+                                      'gene_mean_loss', 'gene_std_loss', 'repulsion_loss'
+                                      ))
         return output.loss
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
@@ -125,13 +126,15 @@ class PLTrainer(L.LightningModule):
             output (ModelOutput): The model output containing the loss values.
         """
         for loss_type in loss_types:
-            loss_name = loss_type
-            if step == 'train' and loss_type == 'loss':
-                loss_name = 'train_loss'
-            elif step == 'val' and loss_type == 'loss':
-                loss_name = 'val_loss'
-            self.log(loss_name, output.get(loss_type), on_step=True if step=='train' else False,
-                     on_epoch=True, prog_bar=True, logger=True)
+            if loss_type in output.keys():
+                loss_name = loss_type
+                if step == 'train' and loss_type == 'loss':
+                    loss_name = 'train_loss'
+                elif step == 'val' and loss_type == 'loss':
+                    loss_name = 'val_loss'
+                self.log(loss_name, output.get(loss_type), on_step=True if step=='train' else False,
+                         on_epoch=True if step=='val' else False,
+                         prog_bar=True, logger=True)
 
 
 def get_dataloader(

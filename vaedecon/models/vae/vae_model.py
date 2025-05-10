@@ -53,35 +53,35 @@ class VAE(BaseAE):
         assert self.n_encoders in (1, 2), 'Only 1 or 2 encoders are supported.'
 
         self.model_name = "VAE"
-        # latent_dim = model_config.latent_dim
-        # n_cell_types = model_config.n_cell_types
-        # # (latent_dim, latent_dim), orthonormal row vectors in latent space
-        # self.anchor_vectors = self.make_orthonormal_anchors(latent_dim=latent_dim)
-        # self.register_buffer("anchors", self.anchor_vectors)
-        # # Learn a logit for each cell type to weight orthonormal anchors in the latent space
-        # logits = nn.Parameter(torch.zeros(n_cell_types, latent_dim))
-        # # Gene features (mean and std) for each gene across cell types buffer
-        # if not os.path.exists(model_config.gene_mean_std_fp):
-        #     raise FileNotFoundError(f"Gene features file not found: {model_config.gene_mean_std_fp}")
-        # gf_df = pd.read_csv(model_config.gene_mean_std_fp, index_col=0)
-        # g_mean = gf_df.loc[:, [col for col in gf_df.columns if col.endswith("avg")]].values  # shape = (n_genes, n_cell_types)
-        # g_std = gf_df.loc[:, [col for col in gf_df.columns if col.endswith("std")]].values  # shape = (n_genes, n_cell_types)
-        # # gf_mat = gf_df.loc[self.keep_genes].values  # shape = (n_genes, n_feats)
-        # self.register_buffer('g_mean', torch.tensor(g_mean, dtype=torch.float32))
-        # self.register_buffer('g_std', torch.tensor(g_std, dtype=torch.float32))
-        # self.register_buffer('logits', logits)  # (n_cell_types, latent_dim)
-        #
-        # # Calculate gene weights based on the mean expression values across cell types
-        # w = torch.ones_like(self.g_mean, device=self.device)
-        # if self.model_config.loss_coefficient['weighting_gene_by_exp']:
-        #     weight_clamp_range = self.model_config.loss_coefficient['weight_clamp_range']
-        #     # construct weights for each gene across cell types, (batch_size, n_genes, n_cell_types)
-        #     w = self.compute_gene_weights(
-        #         low_weight_coef=1.0,
-        #         eps=1e-6,
-        #         clamp_range=weight_clamp_range,
-        #     )
-        # self.register_buffer('w', torch.tensor(w, dtype=torch.float32))  # (n_genes, n_cell_types)
+        latent_dim = model_config.latent_dim
+        n_cell_types = model_config.n_cell_types
+        # (latent_dim, latent_dim), orthonormal row vectors in latent space
+        self.anchor_vectors = self.make_orthonormal_anchors(latent_dim=latent_dim)
+        self.register_buffer("anchors", self.anchor_vectors)
+        # Learn a logit for each cell type to weight orthonormal anchors in the latent space
+        logits = nn.Parameter(torch.zeros(n_cell_types, latent_dim))
+        # Gene features (mean and std) for each gene across cell types buffer
+        if not os.path.exists(model_config.gene_mean_std_fp):
+            raise FileNotFoundError(f"Gene features file not found: {model_config.gene_mean_std_fp}")
+        gf_df = pd.read_csv(model_config.gene_mean_std_fp, index_col=0)
+        g_mean = gf_df.loc[:, [col for col in gf_df.columns if col.endswith("avg")]].values  # shape = (n_genes, n_cell_types)
+        g_std = gf_df.loc[:, [col for col in gf_df.columns if col.endswith("std")]].values  # shape = (n_genes, n_cell_types)
+        # gf_mat = gf_df.loc[self.keep_genes].values  # shape = (n_genes, n_feats)
+        self.register_buffer('g_mean', torch.tensor(g_mean, dtype=torch.float32))
+        self.register_buffer('g_std', torch.tensor(g_std, dtype=torch.float32))
+        self.register_buffer('logits', logits)  # (n_cell_types, latent_dim)
+
+        # Calculate gene weights based on the mean expression values across cell types
+        w = torch.ones_like(self.g_mean, device=self.device)
+        if self.model_config.loss_coefficient['weighting_gene_by_exp']:
+            weight_clamp_range = self.model_config.loss_coefficient['weight_clamp_range']
+            # construct weights for each gene across cell types, (batch_size, n_genes, n_cell_types)
+            w = self.compute_gene_weights(
+                low_weight_coef=1.0,
+                eps=1e-6,
+                clamp_range=weight_clamp_range,
+            )
+        self.register_buffer('w', torch.tensor(w, dtype=torch.float32))  # (n_genes, n_cell_types)
 
 
     def forward(self, inputs: DatasetOutput, **kwargs) -> ModelOutput:
@@ -125,6 +125,8 @@ class VAE(BaseAE):
             mu_types, log_var_types, mu_mean, logvar_mean = self._poe_fuse_per_celltype(
                 mu_lists=mu_list,
                 logvar_lists=logvar_list,
+                mu_mean_list=mu_mean_list,
+                logvar_mean_list=logvar_mean_list,
             )
             cell_prop = torch.mean(torch.stack(prop_list, dim=0), dim=0)  # (batch_size, n_cell_types)
 
@@ -164,12 +166,12 @@ class VAE(BaseAE):
         y = y.reshape(-1, n_cell_types, 1).to(device)  # (batch_size, n_cell_types, 1)
         recon_x_conv = torch.bmm(recon_x_all_types, y)  # (batch_size, n_genes, 1)
 
-        # # Compare the means and stds of each gene among reconstructed GEPs across cell types
-        # recon_gene_mean = recon_x_all_types.mean(dim=0)  # (n_genes, n_cell_types)
-        # recon_gene_std = recon_x_all_types.std(dim=0)  # (n_genes, n_cell_types)
-        # # Convert to the same format as the gene features
-        # recon_gene_mean = torch.log2(recon_gene_mean + 1) / 20.0
-        # recon_gene_std = torch.log2(recon_gene_std + 1) / 20.0
+        # Compare the means and stds of each gene among reconstructed GEPs across cell types
+        recon_gene_mean = recon_x_all_types.mean(dim=0)  # (n_genes, n_cell_types)
+        recon_gene_std = recon_x_all_types.std(dim=0)  # (n_genes, n_cell_types)
+        # Convert to the same format as the gene features
+        recon_gene_mean = torch.log2(recon_gene_mean + 1) / 20.0
+        recon_gene_std = torch.log2(recon_gene_std + 1) / 20.0
 
         # if y is not None:
         #     recon_x_conv = torch.matmul(recon_x_all_types, y.reshape(-1, n_cell_types, 1))
@@ -192,26 +194,23 @@ class VAE(BaseAE):
         (loss, kld_z,
          # kld_p,
          recon_loss_conv,
-         # gene_mean_loss,
-         # gene_std_loss
+         gene_mean_loss,
+         gene_std_loss,
+         repulsion_loss,
          ) = self.loss_function(
             # recon_x=recon_x, x=x, mu=mu, log_var=log_var, y=y,
             x=x, y=y,
-            # logvar_types=log_var_types, mu_types=mu_types,
+            logvar_types=log_var_types, mu_types=mu_types,
             # dd_alpha=dd_alpha,
             recon_x_conv=recon_x_conv,
             beta=self.model_config.loss_coefficient['beta'],
             mu_prior=mu_prior,
             gamma=self.model_config.loss_coefficient['gamma'],
-            # recon_gene_mean= recon_gene_mean,
-            # recon_gene_std= recon_gene_std,
+            recon_gene_mean= recon_gene_mean,
+            recon_gene_std= recon_gene_std,
             logvar_mean=logvar_mean,
             mu_mean=mu_mean,
         )
-        # (loss, kld_z, cell_prop_loss, recon_loss_conv) = self.loss_function_old(
-        #     x=x, mu=mu_mean, log_var=logvar_mean, y=y,
-        #     pred_cell_prop=cell_prop, recon_x_conv=recon_x_conv
-        # )
 
         output = ModelOutput(
             # recon_loss=recon_loss,
@@ -229,15 +228,16 @@ class VAE(BaseAE):
             recon_x_conv=recon_x_conv,
             recon_loss_conv=recon_loss_conv,
             recon_x_all_types=recon_x_all_types,
-            # gene_mean_loss=gene_mean_loss,
-            # gene_std_loss=gene_std_loss,
+            gene_mean_loss=gene_mean_loss,
+            gene_std_loss=gene_std_loss,
+            repulsion_loss=repulsion_loss,
         )
         return output
 
     def loss_function(self, x: torch.Tensor,
                       recon_x_conv: Optional[torch.Tensor] = None,
-                      # mu_types: torch.Tensor = None,
-                      # logvar_types: torch.Tensor = None,
+                      mu_types: torch.Tensor = None,
+                      logvar_types: torch.Tensor = None,
                       y: Optional[torch.Tensor] = None,
                       dd_alpha: Optional[torch.Tensor] = None,
                       mu_prior: Optional[torch.Tensor] = None,
@@ -268,7 +268,7 @@ class VAE(BaseAE):
             A tuple containing the total loss, KL divergence loss, cell proportion loss, and reconstruction loss.
         """
         # batch_size, n_genes = x.shape
-        # n_cell_types = mu_types.shape[2]
+        batch_size, latent_dim, n_cell_types = mu_types.shape
 
         # --- Reconstruction loss ---
         # flat_x = x.reshape(batch_size, -1)  # (batch_size, n_genes)
@@ -285,20 +285,20 @@ class VAE(BaseAE):
         # recon_loss_by_conv = (recon_loss_by_conv * w).sum(dim=-1)  # (batch_size,)
         recon_loss_by_conv = recon_loss_by_conv.sum(dim=-1)  # (batch_size,)  # sum over genes without weights
 
-        # # --- Representation loss for gene means and stds ---
-        # # Sum over all genes first, then mean over cell types
-        # gene_mean_loss = F.mse_loss(recon_gene_mean, self.g_mean, reduction="none")
-        # gene_mean_loss = (gene_mean_loss * self.w).sum(dim=0).mean(dim=0)  # a scalar
-        # gene_std_loss = F.mse_loss(recon_gene_std, self.g_std, reduction="none").sum(dim=0).mean(dim=0)  # a scalar
+        # --- Representation loss for gene means and stds ---
+        # Sum over all genes first, then mean over cell types
+        gene_mean_loss = F.mse_loss(recon_gene_mean, self.g_mean, reduction="none")
+        gene_mean_loss = (gene_mean_loss * self.w).sum(dim=0).mean(dim=0)  # a scalar
+        gene_std_loss = F.mse_loss(recon_gene_std, self.g_std, reduction="none").sum(dim=0).mean(dim=0)  # a scalar
 
-        # # --- KL divergence loss for cellular proportions ---
-        # # Prior: Uniform Dirichlet distribution (all alpha = 1)
-        # kld_p = torch.zeros(batch_size, device=x.device)
-        # if y is not None and self.model_config.predict_cell_prop:
-        #     prior_alpha = torch.ones_like(dd_alpha)
-        #     prior_dist_p = Dirichlet(prior_alpha)
-        #     posterior_dist_p = Dirichlet(dd_alpha)
-        #     kld_p = kl_divergence(prior_dist_p, posterior_dist_p).sum(dim=-1)
+        # --- KL divergence loss for cellular proportions ---
+        # Prior: Uniform Dirichlet distribution (all alpha = 1)
+        kld_p = torch.zeros(batch_size, device=x.device)
+        if y is not None and self.model_config.predict_cell_prop:
+            prior_alpha = torch.ones_like(dd_alpha)
+            prior_dist_p = Dirichlet(prior_alpha)
+            posterior_dist_p = Dirichlet(dd_alpha)
+            kld_p = kl_divergence(prior_dist_p, posterior_dist_p).sum(dim=-1)
 
         # --- Gaussian KL divergence loss for GEPs ---
         # Prior: Gaussian distribution (mean=0, std=1)
@@ -322,48 +322,46 @@ class VAE(BaseAE):
         # kld_z_types = kld_z_per_type.sum(dim=1)  # Sum over latent dim, [batch_size]
         # kld_z_types = -0.5 * torch.sum(1 + logvar_mean - mu_mean.pow(2) - logvar_mean.exp(), dim=-1)  # sum over latent_dim
 
-        # TODO, [TESTING], the following part using mu_mean and logvar_mean works well for KL divergence
         log_var = logvar_mean.reshape(-1, self.model_config.latent_dim)  # batch_size x latent_dim
         # Since we decomposed bulk GEP into cell type-specific GEPs,
         # we need to sum over the embeddings of all cell types
         mu = mu_mean.reshape(-1, self.model_config.latent_dim)
         kld_z_types = - 0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
 
-
-        # kld_z_types = kld_bt.sum(dim=-1)  # sum over n_cell_types
-        # kld_z_types = kld_bt
-
-        # # --- Repulsion loss ---
-        # # n_cell_types, latent_dim = mu.shape[1], mu.shape[2]
-        # # using broadcasting to calculate the pairwise distance
-        # diff = mu_list.unsqueeze(2) - mu_list.unsqueeze(1)  # (batch_size, n_cell_types, n_cell_types, latent_dim)
-        # dist2 = torch.sum(diff ** 2, dim=-1)  # (batch_size, n_cell_types, n_cell_types)
-        # # remove the diagonal elements (self-repulsion)
-        # mask = ~torch.eye(n_cell_types, device=x.device, dtype=torch.bool).unsqueeze(0)  # (1, n_cell_types, n_cell_types)
-        # inv_dist = torch.where(mask,
-        #                        1.0 / (dist2 + eps),  # avoid division by zero)
-        #                        torch.zeros_like(dist2))
-        # # repulsion loss
-        # repulsion_loss = inv_dist.sum(dim=(1, 2))  # sum over each (i, j) pair, (batch_size,)
+        # --- Repulsion loss ---
+        # n_cell_types, latent_dim = mu.shape[1], mu.shape[2]
+        # using broadcasting to calculate the pairwise distance
+        mu_types_permuted = mu_types.permute(0, 2, 1)   # (batch_size, n_cell_types, latent_dim)
+        # (B, N, 1, L) - (B, 1, N, L) = (B, N, N, L)
+        diff = mu_types_permuted.unsqueeze(2) - mu_types_permuted.unsqueeze(1)  # (batch_size, n_cell_types, n_cell_types, latent_dim)
+        dist2 = torch.sum(diff ** 2, dim=-1)  # (batch_size, n_cell_types, n_cell_types)
+        # remove the diagonal elements (self-repulsion)
+        mask = ~torch.eye(n_cell_types, device=x.device, dtype=torch.bool).unsqueeze(0)  # (1, n_cell_types, n_cell_types)
+        inv_dist = torch.where(mask,
+                               1.0 / (dist2 + eps),  # avoid division by zero)
+                               torch.zeros_like(dist2))
+        # repulsion loss
+        repulsion_loss = inv_dist.sum(dim=(1, 2))  # sum over each (i, j) pair, (batch_size,)
 
         # print('recon_loss_by_decoder.shape', recon_loss_by_decoder.shape, 'kld.shape', kld.shape,
         #       'cell_prop_loss.shape', cell_prop_loss.shape)
-        lo = self.model_config.loss_coefficient
+        # lo = self.model_config.loss_coefficient
         total_loss = (
-                lo['recon_convolution'] * recon_loss_by_conv
-                # + beta * (kld_z_types + kld_p)
-                + lo['kld'] * kld_z_types
-                # + gamma * repulsion_loss
-                # + gene_mean_loss
-                # + gene_std_loss
+                recon_loss_by_conv
+                + beta * (kld_z_types + kld_p)
+                # + lo['kld'] * kld_z_types
+                + gamma * repulsion_loss
+                + gene_mean_loss
+                + gene_std_loss
         ).mean(dim=0)  # average over batch size, scalar
 
         return (total_loss,
                 kld_z_types.mean(dim=0),
                 # kld_p.mean(dim=0),
                 recon_loss_by_conv.mean(dim=0),
-                # gene_mean_loss,
-                # gene_std_loss
+                gene_mean_loss.mean(dim=0),
+                gene_std_loss.mean(dim=0),
+                repulsion_loss.mean(dim=0),
                 )
 
     def compute_gene_weights(
@@ -400,73 +398,6 @@ class VAE(BaseAE):
 
         return w_g
 
-    def loss_function_old(self, x: torch.Tensor, mu: torch.Tensor,
-                      log_var: torch.Tensor, y: Optional[torch.Tensor] = None,
-                      pred_cell_prop: Optional[torch.Tensor] = None,
-                      recon_x_conv: Optional[torch.Tensor] = None):
-        """Calculates the loss for the VAE.
-
-        Args:
-            x: Input data.
-            mu: Mean of the latent space.
-            log_var: Log variance of the latent space.
-            y: Cell proportions of the input data.
-            pred_cell_prop: Predicted cell proportions.
-            recon_x_conv: Reconstructed data from cell-type specific GEPs.
-
-        Returns:
-            A tuple containing the total loss, KL divergence loss, cell proportion loss, and reconstruction loss.
-        """
-        # print('recon_x.shape', recon_x.shape, 'x.shape', x.shape, 'mu.shape', mu.shape,
-        #       'log_var.shape', log_var.shape, 'y.shape', y.shape, 'pred_cell_prop.shape', pred_cell_prop.shape)
-        # recon_x_by_decoder = recon_x
-        # recon_x_by_conv = recon_x_conv
-        if self.model_config.reconstruction_loss == "mse":
-            recon_loss_by_conv = F.mse_loss(
-                recon_x_conv.reshape(x.shape[0], -1),  # batch_size x features (gene expression values)
-                x.reshape(x.shape[0], -1),
-                reduction="none",
-            ).sum(dim=-1)
-        elif self.model_config.reconstruction_loss == "bce":
-            recon_loss_by_conv = F.binary_cross_entropy(
-                recon_x_conv.reshape(x.shape[0], -1),
-                x.reshape(x.shape[0], -1),
-                reduction="none",
-            ).sum(dim=-1)
-        else:
-            raise ValueError(
-                f"Reconstruction loss {self.model_config.reconstruction_loss} not implemented"
-            )
-
-        log_var = log_var.reshape(-1, self.model_config.latent_dim)  # batch_size x latent_dim
-        # Since we decomposed bulk GEP into cell type-specific GEPs,
-        # we need to sum over the embeddings of all cell types
-        mu = mu.reshape(-1, self.model_config.latent_dim)
-        kld = - torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
-
-        # cell proportion loss
-        cell_prop_loss = torch.zeros_like(kld)
-        if y is not None and pred_cell_prop is not None:
-            cell_prop_loss = F.mse_loss(
-                pred_cell_prop.reshape(y.shape[0], -1),  # batch_size x features (cell proportions)
-                y.reshape(y.shape[0], -1),
-                reduction="none"
-            ).sum(dim=-1)
-
-        # print('recon_loss_by_decoder.shape', recon_loss_by_decoder.shape, 'kld.shape', kld.shape,
-        #       'cell_prop_loss.shape', cell_prop_loss.shape)
-        lo = self.model_config.loss_coefficient
-        total_loss = (
-                lo['recon_convolution'] * recon_loss_by_conv
-                + lo['kld'] * kld
-                + lo['cell_prop'] * cell_prop_loss
-        ).mean(dim=0)
-
-        return (total_loss,
-                kld.mean(dim=0),
-                cell_prop_loss.mean(dim=0),
-                recon_loss_by_conv.mean(dim=0))
-
     @staticmethod
     def make_orthonormal_anchors(latent_dim, radius=1.0):
         """
@@ -483,8 +414,10 @@ class VAE(BaseAE):
     def _poe_fuse_per_celltype(
         mu_lists: List[torch.Tensor],
         logvar_lists: List[torch.Tensor],
+        mu_mean_list: List[torch.Tensor],
+        logvar_mean_list: List[torch.Tensor],
         eps: float = 1e-6,
-        ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        ) -> Tuple[List[torch.Tensor], List[torch.Tensor], torch.Tensor, torch.Tensor]:
         """
         Perform product of experts (PoE) fusion for the mean and log variance of the latent space.
 
@@ -511,4 +444,6 @@ class VAE(BaseAE):
 
             fused_mu.append(mu_poe)
             fused_logvar.append(lv_poe)
-        return fused_mu, fused_logvar
+        mu_mean = torch.stack(mu_mean_list, dim=0).mean(dim=0)
+        logvar_mean = torch.stack(logvar_mean_list, dim=0).mean(dim=0)
+        return fused_mu, fused_logvar, mu_mean, logvar_mean
