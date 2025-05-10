@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, Type, Union, Sequence
 import cloudpickle
 import json
 import torch
+import torch.nn as nn
 import pandas as pd
 import lightning as L
 from ...data.datasets import BaseDataset, DatasetOutput
@@ -67,7 +68,8 @@ class BaseAE(L.LightningModule):
         else:
             self.model_config.uses_default_encoder = False
 
-        self.encoders = check_encoder(encoders)
+        encoders = check_encoder(encoders)
+        self.encoders = nn.ModuleList(encoders)
         self.decoder = check_decoder(decoder)
         # self.device = None
 
@@ -191,7 +193,8 @@ class BaseAE(L.LightningModule):
         #     json.dump(model_config, f, indent=4)
 
         # # Save encoder and decoder configurations as JSON and pkl
-        if hasattr(self, "encoders"):
+        if hasattr(self, "encoders"):  # encoders is a list of encoders
+            assert isinstance(self.encoders, nn.ModuleList), 'Encoders must be a nn.ModuleList in Pytorch.'
             for idx, encoder in enumerate(self.encoders):
                 if isinstance(encoder, BaseEncoder):
                     encoder_name = encoder.__class__.__name__.lower()
@@ -205,6 +208,22 @@ class BaseAE(L.LightningModule):
                 encoder_weights = encoder.state_dict()
 
                 torch.save(encoder_weights, os.path.join(model_dir, f"{encoder_name}_weights.pt"))
+
+        if hasattr(self, "encoder"):  # encoders is a single encoder
+            if isinstance(self.encoder, BaseEncoder):
+                encoder_name = self.encoder.__class__.__name__.lower()
+            else:
+                raise TypeError(
+                    f"Encoder must be a BaseEncoder instance, but got {type(self.encoder)}"
+                )
+            # json
+            encoder_config = self._get_encoder_config(self.encoder)
+            with open(os.path.join(model_dir, f"{encoder_name}_config.json"), "w") as f:
+                json.dump(encoder_config, f, indent=4)
+            # Save encoder weights separately
+            encoder_weights = self.encoder.state_dict()
+
+            torch.save(encoder_weights, os.path.join(model_dir, f"{encoder_name}_weights.pt"))
 
             # torch.save(self.encoder.state_dict(), os.path.join(model_dir, "encoder_weights.pt"))
 
@@ -394,9 +413,10 @@ class BaseAE(L.LightningModule):
         model_config = cls._load_model_config_from_folder(dir_path)
         model_weights = cls._load_model_weights_from_folder(dir_path)
         encoders = []
+        encoder_types = ['EncoderMLP', 'EncoderSGNN']
         if not model_config.uses_default_encoder:
             file_list = [i.lower() for i in os.listdir(dir_path)]
-            for encoder_type in ['EncoderMLP', 'EncoderSGNN']:  # Add other encoder types as needed
+            for encoder_type in encoder_types:  # Add other encoder types as needed
                 encoder_weights_fn = f"{encoder_type.lower()}_weights.pt"
                 if encoder_weights_fn in file_list:
                     encoders.append(cls._load_custom_encoder_from_folder(dir_path, encoder_weights_fn))
@@ -404,6 +424,14 @@ class BaseAE(L.LightningModule):
         decoder = None
         if not model_config.uses_default_decoder:
             decoder = cls._load_custom_decoder_from_folder(dir_path)
+        if len(encoders) == 0:
+            raise TypeError(f"No encoders found in {dir_path} with type: {', '.join(encoder_types)}. Please add more types to the list.")
+        # elif len(encoders) == 1:
+        #     encoders = encoders[0]
+        elif len(encoders) > 1:
+            raise TypeError(
+                f"Multiple encoders found in {dir_path}. Please provide a single encoder."
+            )
 
         model = cls(model_config, encoders=encoders, decoder=decoder)
         model.load_state_dict(model_weights)

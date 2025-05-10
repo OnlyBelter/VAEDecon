@@ -15,7 +15,7 @@ class VAEConfig(BaseModelConfig):
     """
 
     # reconstruction_loss: Literal["bce", "mse"] = "mse"
-    using_positional_encoding: bool = True
+    using_positional_encoding: bool = False
     # the file path of gene list in the training set (after preprocessing,
     # such as interaction from multiple datasets) and for GEP-level reconstruction
     input_gene_list_fp: str = None
