@@ -428,10 +428,10 @@ class BaseAE(L.LightningModule):
             raise TypeError(f"No encoders found in {dir_path} with type: {', '.join(encoder_types)}. Please add more types to the list.")
         # elif len(encoders) == 1:
         #     encoders = encoders[0]
-        elif len(encoders) > 1:
-            raise TypeError(
-                f"Multiple encoders found in {dir_path}. Please provide a single encoder."
-            )
+        # elif len(encoders) > 1:
+        #     raise TypeError(
+        #         f"Multiple encoders found in {dir_path}. Please provide a single encoder."
+        #     )
 
         model = cls(model_config, encoders=encoders, decoder=decoder)
         model.load_state_dict(model_weights)

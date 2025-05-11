@@ -65,15 +65,16 @@ def reparameterize_gaussian(mu, logvar):
     return mu + std * eps  # reparameterization trick, z = mu + sigma * epsilon
 
 
-def reparameterize_dirichlet(alpha):
+def reparameterize_dirichlet(alpha, device):
     """
     Use the Gamma distribution reparameterization trick for Dirichlet.
     Args:
         alpha (torch.Tensor): The Dirichlet parameters. (batch_size, n_cell_types)
+        device (torch.device): The device to use for the computation.
     Returns: samples from Dirichlet distribution.
     Requires PyTorch 1.8+ for Gamma.rsample().
     """
-    gamma_dis = Gamma(concentration=alpha, rate=torch.tensor(1.0, device=alpha.device))
+    gamma_dis = Gamma(concentration=alpha, rate=torch.tensor(1.0, device=device))
     gamma_samples = gamma_dis.rsample()  # shape: (batch_size, n_cell_types)
     # Normalize the samples to sum to 1 to get Dirichlet samples
     p = gamma_samples / gamma_samples.sum(dim=1, keepdim=True)

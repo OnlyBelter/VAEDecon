@@ -24,7 +24,7 @@ T_Encoder = TypeVar('T_Encoder', bound=BaseEncoder)
 T_Decoder = TypeVar('T_Decoder', bound=DecoderMLP)
 
 
-def create_model(model_config: VAEConfig, encoder_cls_list: list[Type[T_Encoder]], decoder_cls: Type[T_Decoder]) -> VAE:
+def create_model(model_config: VAEConfig, encoder_cls_name_list: list[str], decoder_cls: Type[T_Decoder]) -> VAE:
     """Creates the VAE model."""
     position_encoding = PositionalEncoding(
         d_model=model_config.latent_dim,
@@ -32,7 +32,15 @@ def create_model(model_config: VAEConfig, encoder_cls_list: list[Type[T_Encoder]
         max_len=model_config.n_cell_types
     )
     encoders = []
-    for encoder_cls in encoder_cls_list:
+    for encoder_cls_name in encoder_cls_name_list:
+        encoder_cls_name = encoder_cls_name.lower()
+        if encoder_cls_name == "EncoderSGNN".lower():
+            encoder_cls = EncoderSGNN
+        elif encoder_cls_name == "EncoderMLP".lower():
+            encoder_cls = EncoderMLP
+        else:
+            raise NotImplementedError(encoder_cls_name)
+
         kwargs = {
             "args": model_config,
             "position_encoding": position_encoding

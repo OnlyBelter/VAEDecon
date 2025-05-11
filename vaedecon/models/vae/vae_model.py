@@ -123,10 +123,10 @@ class VAE(BaseAE):
             )
         else:  # two encoders
             mu_types, log_var_types, mu_mean, logvar_mean = self._poe_fuse_per_celltype(
-                mu_lists=mu_list,
-                logvar_lists=logvar_list,
-                mu_mean_list=mu_mean_list,
-                logvar_mean_list=logvar_mean_list,
+                mu_lists_celltype=mu_list,
+                logvar_lists_celltype=logvar_list,
+                mu_list_overall=mu_mean_list,
+                logvar_list_overall=logvar_mean_list,
             )
             cell_prop = torch.mean(torch.stack(prop_list, dim=0), dim=0)  # (batch_size, n_cell_types)
 
@@ -162,9 +162,9 @@ class VAE(BaseAE):
         if self.model_config.scaling_by_constant:
             recon_x_all_types = recon_x_all_types * 20.0
         recon_x_all_types = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
-        # cell_prop = cell_prop.reshape(-1, n_cell_types, 1).to(device)  # (batch_size, n_cell_types, 1)
-        y = y.reshape(-1, n_cell_types, 1).to(device)  # (batch_size, n_cell_types, 1)
-        recon_x_conv = torch.bmm(recon_x_all_types, y)  # (batch_size, n_genes, 1)
+        cell_prop = cell_prop.reshape(-1, n_cell_types, 1).to(device)  # (batch_size, n_cell_types, 1)
+        # y = y.reshape(-1, n_cell_types, 1).to(device)  # (batch_size, n_cell_types, 1)
+        recon_x_conv = torch.bmm(recon_x_all_types, cell_prop)  # (batch_size, n_genes, 1)
 
         # Compare the means and stds of each gene among reconstructed GEPs across cell types
         recon_gene_mean = recon_x_all_types.mean(dim=0)  # (n_genes, n_cell_types)
@@ -329,19 +329,22 @@ class VAE(BaseAE):
         kld_z_types = - 0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
 
         # --- Repulsion loss ---
-        # n_cell_types, latent_dim = mu.shape[1], mu.shape[2]
-        # using broadcasting to calculate the pairwise distance
-        mu_types_permuted = mu_types.permute(0, 2, 1)   # (batch_size, n_cell_types, latent_dim)
-        # (B, N, 1, L) - (B, 1, N, L) = (B, N, N, L)
-        diff = mu_types_permuted.unsqueeze(2) - mu_types_permuted.unsqueeze(1)  # (batch_size, n_cell_types, n_cell_types, latent_dim)
-        dist2 = torch.sum(diff ** 2, dim=-1)  # (batch_size, n_cell_types, n_cell_types)
-        # remove the diagonal elements (self-repulsion)
-        mask = ~torch.eye(n_cell_types, device=x.device, dtype=torch.bool).unsqueeze(0)  # (1, n_cell_types, n_cell_types)
-        inv_dist = torch.where(mask,
-                               1.0 / (dist2 + eps),  # avoid division by zero)
-                               torch.zeros_like(dist2))
-        # repulsion loss
-        repulsion_loss = inv_dist.sum(dim=(1, 2))  # sum over each (i, j) pair, (batch_size,)
+        if gamma > 0:
+            # n_cell_types, latent_dim = mu.shape[1], mu.shape[2]
+            # using broadcasting to calculate the pairwise distance
+            mu_types_permuted = mu_types.permute(0, 2, 1)   # (batch_size, n_cell_types, latent_dim)
+            # (B, N, 1, L) - (B, 1, N, L) = (B, N, N, L)
+            diff = mu_types_permuted.unsqueeze(2) - mu_types_permuted.unsqueeze(1)  # (batch_size, n_cell_types, n_cell_types, latent_dim)
+            dist2 = torch.sum(diff ** 2, dim=-1)  # (batch_size, n_cell_types, n_cell_types)
+            # remove the diagonal elements (self-repulsion)
+            mask = ~torch.eye(n_cell_types, device=x.device, dtype=torch.bool).unsqueeze(0)  # (1, n_cell_types, n_cell_types)
+            inv_dist = torch.where(mask,
+                                   1.0 / (dist2 + eps),  # avoid division by zero)
+                                   torch.zeros_like(dist2))
+            # repulsion loss
+            repulsion_loss = inv_dist.sum(dim=(1, 2))  # sum over each (i, j) pair, (batch_size,)
+        else:
+            repulsion_loss = torch.zeros(batch_size, device=x.device)
 
         # print('recon_loss_by_decoder.shape', recon_loss_by_decoder.shape, 'kld.shape', kld.shape,
         #       'cell_prop_loss.shape', cell_prop_loss.shape)
@@ -411,39 +414,157 @@ class VAE(BaseAE):
         return radius * q.t()
 
     @staticmethod
-    def _poe_fuse_per_celltype(
-        mu_lists: List[torch.Tensor],
-        logvar_lists: List[torch.Tensor],
-        mu_mean_list: List[torch.Tensor],
-        logvar_mean_list: List[torch.Tensor],
-        eps: float = 1e-6,
-        ) -> Tuple[List[torch.Tensor], List[torch.Tensor], torch.Tensor, torch.Tensor]:
+    def _poe_fuse_core(
+            mu_list: List[torch.Tensor],
+            logvar_list: List[torch.Tensor],
+            eps: float = 1e-8,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Perform product of experts (PoE) fusion for the mean and log variance of the latent space.
+        Core Product of Experts (PoE) fusion for a list of mean and log variance tensors.
+        Assumes all input tensors in the lists have the same shape.
 
         Args:
-            mu_lists: List of means from different encoders.
-            logvar_lists: List of log variances from different encoders.
-            eps: Small value to avoid division by zero.
+            mu_list: List of mean tensors from different experts.
+                     Each tensor shape, e.g., (batch_size, latent_dim, n_cell_types)
+                     or (batch_size, latent_dim).
+            logvar_list: List of log variance tensors from different experts.
+                         Matching shapes to elements in mu_list.
+            eps: Small value for numerical stability.
 
         Returns:
-            Fused mean and log variance.
+            A tuple containing:
+            - fused_mu: PoE fused mean tensor, same shape as input tensors.
+            - fused_logvar: PoE fused log variance tensor, same shape as input tensors.
         """
-        # PoE fusion
-        fused_mu, fused_logvar = [], []
-        for mu1, lv1, mu2, lv2 in zip(mu_lists[0], logvar_lists[0], mu_lists[1], logvar_lists[1]):
-            # PoE fusion for each cell type
-            prec1 = torch.exp(-lv1)  # precision, (batch_size, latent_dim)
-            prec2 = torch.exp(-lv2)
+        if not mu_list or not logvar_list:
+            raise ValueError("Input lists for PoE fusion cannot be empty.")
+        if len(mu_list) != len(logvar_list):
+            raise ValueError(
+                "Mismatch in the number of experts for mus and logvars."
+            )
+        if len(mu_list) == 1:  # Only one expert, no fusion needed
+            return mu_list[0], logvar_list[0]
 
-            # fused precision
-            mu_poe = (mu1 * prec1 + mu2 * prec2) / (prec1 + prec2 + eps)
+        # Stack expert parameters along a new dimension (dim=0)
+        # If inputs are (B, L, C), mus_stacked becomes (num_experts, B, L, C)
+        mus_stacked = torch.stack(mu_list, dim=0)
+        logvars_stacked = torch.stack(logvar_list, dim=0)
 
-            # fused log variance
-            lv_poe = -torch.log(prec1 + prec2 + eps)
+        # Calculate precisions: P_i = 1 / sigma_i^2 = exp(-logvar_i)
+        precisions_stacked = torch.exp(-logvars_stacked)
 
-            fused_mu.append(mu_poe)
-            fused_logvar.append(lv_poe)
-        mu_mean = torch.stack(mu_mean_list, dim=0).mean(dim=0)
-        logvar_mean = torch.stack(logvar_mean_list, dim=0).mean(dim=0)
-        return fused_mu, fused_logvar, mu_mean, logvar_mean
+        # Sum of precisions from all experts: P_poe = sum(P_i)
+        # Shape: (B, L, C) or (B, L) depending on input shapes
+        sum_of_precisions = torch.sum(precisions_stacked, dim=0)
+
+        # Fused log variance: logvar_poe = -log(P_poe + eps)
+        fused_logvar = -torch.log(sum_of_precisions + eps)
+
+        # Weighted sum of means by their precisions: sum(mu_i * P_i)
+        sum_of_weighted_mus = torch.sum(mus_stacked * precisions_stacked, dim=0)
+
+        # Fused mean: mu_poe = sum(mu_i * P_i) / (P_poe + eps)
+        fused_mu = sum_of_weighted_mus / (sum_of_precisions + eps)
+
+        return fused_mu, fused_logvar
+
+    # @staticmethod
+    # def _poe_fuse_per_celltype(
+    #     mu_lists: List[torch.Tensor],
+    #     logvar_lists: List[torch.Tensor],
+    #     mu_mean_list: List[torch.Tensor],
+    #     logvar_mean_list: List[torch.Tensor],
+    #     eps: float = 1e-6,
+    #     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    #     """
+    #     Perform product of experts (PoE) fusion for the mean and log variance of the latent space.
+    #
+    #     Args:
+    #         mu_lists: List of means from different encoders. Each element: (batch_size, latent_dim, n_cell_types).
+    #         logvar_lists: List of log variances from different encoders. Each element: (batch_size, latent_dim, n_cell_types).
+    #         eps: Small value to avoid division by zero.
+    #
+    #     Returns:
+    #         Fused mean and log variance.
+    #     """
+    #     # PoE fusion
+    #     fused_mu, fused_logvar = [], []
+    #     for mu1, lv1, mu2, lv2 in zip(mu_lists[0], logvar_lists[0], mu_lists[1], logvar_lists[1]):
+    #         # PoE fusion for each cell type
+    #         prec1 = torch.exp(-lv1)  # precision, (batch_size, latent_dim)
+    #         prec2 = torch.exp(-lv2)
+    #
+    #         # fused precision
+    #         mu_poe = (mu1 * prec1 + mu2 * prec2) / (prec1 + prec2 + eps)
+    #
+    #         # fused log variance
+    #         lv_poe = -torch.log(prec1 + prec2 + eps)
+    #
+    #         fused_mu.append(mu_poe)
+    #         fused_logvar.append(lv_poe)
+    #     # Each mu_mean_list: (batch_size, latent_dim)
+    #     mu_mean = torch.stack(mu_mean_list, dim=2).mean(dim=2)  # (batch_size, latent_dim)
+    #     logvar_mean = torch.stack(logvar_mean_list, dim=2).mean(dim=2)
+    #     fused_mu = torch.stack(fused_mu, dim=0)  # (batch_size, latent_dim, n_cell_types)
+    #     fused_logvar = torch.stack(fused_logvar, dim=0)  # (batch_size, latent_dim, n_cell_types)
+    #     return fused_mu, fused_logvar, mu_mean, logvar_mean
+
+    def _poe_fuse_per_celltype(
+            self,
+            mu_lists_celltype: List[torch.Tensor],
+            logvar_lists_celltype: List[torch.Tensor],
+            mu_list_overall: List[torch.Tensor],
+            logvar_list_overall: List[torch.Tensor],
+            eps: float = 1e-8,  # Using a slightly smaller eps is common
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Perform Product of Experts (PoE) fusion for per-celltype latent space parameters
+        from multiple experts and computes a simple average for overall (e.g., mean over celltypes)
+        latent space parameters.
+
+        Args:
+            mu_lists_celltype: List of mean tensors from different experts, for per-celltype data.
+                               Each tensor shape: (batch_size, latent_dim, n_cell_types).
+            logvar_lists_celltype: List of log variance tensors from different experts, for per-celltype data.
+                                   Each tensor shape: (batch_size, latent_dim, n_cell_types).
+            mu_list_overall: List of mean tensors (e.g., already averaged over celltypes before this call)
+                             from different experts. Each tensor shape: (batch_size, latent_dim).
+            logvar_list_overall: List of log variance tensors (overall) from different experts.
+                                 Each tensor shape: (batch_size, latent_dim).
+            eps: Small value for numerical stability in PoE.
+
+        Returns:
+            A tuple containing:
+            - fused_mu_celltype: PoE fused mean for per-celltype data
+                                 Shape: (batch_size, latent_dim, n_cell_types).
+            - fused_logvar_celltype: PoE fused log variance for per-celltype data
+                                     Shape: (batch_size, latent_dim, n_cell_types).
+            - avg_mu_overall: Averaged mean of overall means
+                              Shape: (batch_size, latent_dim).
+            - avg_logvar_overall: Averaged log variance of overall logvars
+                                  Shape: (batch_size, latent_dim).
+        """
+        # --- PoE fusion for per-celltype parameters ---
+        # These lists must not be empty for the helper, handled by _poe_fuse_core
+        fused_mu_celltype, fused_logvar_celltype = self._poe_fuse_core(
+            mu_list=mu_lists_celltype,
+            logvar_list=logvar_lists_celltype,
+            eps=eps
+        )
+
+        # --- Averaging for overall parameters ---
+        if not mu_list_overall or not logvar_list_overall:
+            raise ValueError("Overall mean/logvar lists cannot be empty for averaging.")
+
+        if len(mu_list_overall) == 1:  # Only one expert for overall params
+            avg_mu_overall = mu_list_overall[0]
+            avg_logvar_overall = logvar_list_overall[0]
+        else:
+            # Stack for averaging: (num_experts, batch_size, latent_dim)
+            mu_overall_stacked = torch.stack(mu_list_overall, dim=0)
+            avg_mu_overall = torch.mean(mu_overall_stacked, dim=0)
+
+            logvar_overall_stacked = torch.stack(logvar_list_overall, dim=0)
+            avg_logvar_overall = torch.mean(logvar_overall_stacked, dim=0)
+
+        return fused_mu_celltype, fused_logvar_celltype, avg_mu_overall, avg_logvar_overall

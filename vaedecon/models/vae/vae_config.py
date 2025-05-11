@@ -1,4 +1,6 @@
-from vaedecon.models.base.base_config import BaseModelConfig
+from typing import Type
+from ...models.base.base_config import BaseModelConfig
+from ..nn.base_architectures import BaseEncoder
 
 
 class VAEConfig(BaseModelConfig):
@@ -34,3 +36,4 @@ class VAEConfig(BaseModelConfig):
     decoder_dropout_rate: list[float] = [0.1, 0.1, 0.1]
     predict_cell_prop: bool = False  # whether to predict cell type proportions
     gene_mean_std_fp: str = None  # the file path of the mean and std of gene expression values across cell types in the SCT dataset
+    encoders: list[str] = None

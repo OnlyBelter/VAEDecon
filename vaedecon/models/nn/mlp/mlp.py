@@ -124,7 +124,7 @@ class EncoderMLP(BaseEncoder):
         logvar_list = [logvar(out) for logvar in self.fc_logvar_list]
         # combine the mu_list into a tensor
         mu_all_types = torch.stack(mu_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
-        mu_mean = torch.mean(mu_all_types, dim=2, keepdim=True)  # (batch_size, latent_dim)
+        mu_mean = torch.mean(mu_all_types, dim=2)  # (batch_size, latent_dim)
         # mu_all_types = mu_all_types.view((-1, self.latent_dim, self.n_cell_types))
         logvar_all_types = torch.stack(logvar_list, dim=2)   # (batch_size, latent_dim, n_cell_types)
         # log_var = self.log_var(out)
@@ -197,7 +197,7 @@ class DecoderMLP(BaseDecoder):
             nn.ModuleDict({
                 'linear': nn.Linear(self.hidden_dims[-1], np.prod(self.input_dim)),
                 'norm': nn.Identity(),
-                'activation': nn.ReLU(),  # make sure the output is >= 0
+                'activation': nn.Softplus(threshold=1),  # make sure the output is > 0
                 'dropout': nn.Dropout(p=self.dropout_rate[-1]) if (
                         self.dropout_rate[-1] > 0) else nn.Identity(),
             })
@@ -251,7 +251,7 @@ class DecoderMLP(BaseDecoder):
                     output[f"reconstruction_layer_{i+1}"] = out
 
         # out = torch.clamp(self.relu(out), max=1.0)
-        out = torch.where(out >= 1, 1 - 1e-2, out)  # clamp the output to [0, 0.99], since it is scaled by a constant (default is 20)
+        # out = torch.where(out >= 1, 1 - 1e-2, out)  # clamp the output to [0, 0.99], since it is scaled by a constant (default is 20)
         output["reconstruction"] = out
         return output
 
