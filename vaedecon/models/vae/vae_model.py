@@ -11,6 +11,7 @@ from typing import Optional, List, Tuple, Union, Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.cpu import current_device
 # from sympy.core.facts import deduce_alpha_implications
 from torch.distributions import Normal, Dirichlet, Gamma, kl_divergence
 
@@ -51,6 +52,7 @@ class VAE(BaseAE):
         # self.encoders = encoders
         self.n_encoders = len(self.encoders)
         assert self.n_encoders in (1, 2), 'Only 1 or 2 encoders are supported.'
+        self.device_param = nn.Parameter(torch.empty(0))  # To easily get the device of the model
 
         self.model_name = "VAE"
         latent_dim = model_config.latent_dim
@@ -93,15 +95,19 @@ class VAE(BaseAE):
         Returns:
             An ModelOutput instance containing the model's output.
         """
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.to(device)
-        x = inputs["data"].to(device)
+        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        current_device = self.device_param.device
+        self.to(current_device)
+        x = inputs["data"].to(current_device)
+        batch_size = x.shape[0]
         y = inputs.get("labels")  # cell proportions of 16 cell types
         if y is not None:
-            y = y.to(device)
+            y = y.to(current_device)
 
         # Call all encoders, and collect the outputs
+        # prop_list is the predicted cell proportions if self.model_config.predict_cell_prop is True, otherwise it is y
         mu_list, logvar_list, prop_list, dd_alpha_list, mu_mean_list, logvar_mean_list = [], [], [], [], [], []
+        dd_alpha = torch.zeros(batch_size, self.model_config.n_cell_types, device=current_device)
         for encoder in self.encoders:
             out = encoder(x=x, y=y)
             mu_list.append(out.mu_all_types)
@@ -121,6 +127,8 @@ class VAE(BaseAE):
                 mu_mean_list[0],
                 logvar_mean_list[0],
             )
+            if self.model_config.predict_cell_prop:
+                dd_alpha = dd_alpha_list[0]  # (batch_size, n_cell_types)
         else:  # two encoders
             mu_types, log_var_types, mu_mean, logvar_mean = self._poe_fuse_per_celltype(
                 mu_lists_celltype=mu_list,
@@ -129,6 +137,8 @@ class VAE(BaseAE):
                 logvar_list_overall=logvar_mean_list,
             )
             cell_prop = torch.mean(torch.stack(prop_list, dim=0), dim=0)  # (batch_size, n_cell_types)
+            if self.model_config.predict_cell_prop:
+                dd_alpha = torch.mean(torch.stack(dd_alpha_list, dim=0), dim=0)
 
         # # mu_types = torch.stack(mu_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
         # # log_var_types = torch.stack(logvar_list, dim=2)  # (batch_size, latent_dim, n_cell_types)
@@ -162,7 +172,7 @@ class VAE(BaseAE):
         if self.model_config.scaling_by_constant:
             recon_x_all_types = recon_x_all_types * 20.0
         recon_x_all_types = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
-        cell_prop = cell_prop.reshape(-1, n_cell_types, 1).to(device)  # (batch_size, n_cell_types, 1)
+        cell_prop = cell_prop.reshape(-1, n_cell_types, 1).to(current_device)  # (batch_size, n_cell_types, 1)
         # y = y.reshape(-1, n_cell_types, 1).to(device)  # (batch_size, n_cell_types, 1)
         recon_x_conv = torch.bmm(recon_x_all_types, cell_prop)  # (batch_size, n_genes, 1)
 
@@ -191,17 +201,19 @@ class VAE(BaseAE):
         # mu_prior = anchor_weights @ self.anchors  # (n_cell_types, latent_dim)
         mu_prior = None  # (n_cell_types, latent_dim)
 
-        (loss, kld_z,
-         # kld_p,
+        (loss,
+         kld_z,
+         kld_p,
          recon_loss_conv,
          gene_mean_loss,
          gene_std_loss,
          repulsion_loss,
+         cell_prop_loss
          ) = self.loss_function(
             # recon_x=recon_x, x=x, mu=mu, log_var=log_var, y=y,
             x=x, y=y,
             logvar_types=log_var_types, mu_types=mu_types,
-            # dd_alpha=dd_alpha,
+            dd_alpha=dd_alpha,
             recon_x_conv=recon_x_conv,
             beta=self.model_config.loss_coefficient['beta'],
             mu_prior=mu_prior,
@@ -210,6 +222,7 @@ class VAE(BaseAE):
             recon_gene_std= recon_gene_std,
             logvar_mean=logvar_mean,
             mu_mean=mu_mean,
+            device=current_device,
         )
 
         output = ModelOutput(
@@ -222,7 +235,7 @@ class VAE(BaseAE):
             mu_deconv=mu_types,
             # log_var=log_var,
             log_var=log_var_types,
-            # cell_prop_loss=kld_p,
+            cell_prop_loss=cell_prop_loss,
             kld=kld_z,
             pred_cell_prop=cell_prop,
             recon_x_conv=recon_x_conv,
@@ -248,6 +261,7 @@ class VAE(BaseAE):
                       mu_mean: Optional[torch.Tensor] = None,
                       recon_gene_mean: Optional[torch.Tensor] = None,
                       recon_gene_std: Optional[torch.Tensor] = None,
+                      device: Optional[torch.device] = None,
                       ):
         """Calculates the loss for the VAE.
 
@@ -264,6 +278,7 @@ class VAE(BaseAE):
             eps: Small value to avoid division by zero.
             recon_gene_mean: Reconstructed gene means for each cell type across the whole batch.
             recon_gene_std: Reconstructed gene standard deviations for each cell type across the whole batch.
+            device: Device to perform the calculations on.
         Returns:
             A tuple containing the total loss, KL divergence loss, cell proportion loss, and reconstruction loss.
         """
@@ -293,12 +308,19 @@ class VAE(BaseAE):
 
         # --- KL divergence loss for cellular proportions ---
         # Prior: Uniform Dirichlet distribution (all alpha = 1)
-        kld_p = torch.zeros(batch_size, device=x.device)
+        kld_p = torch.zeros(batch_size, device=device)
         if y is not None and self.model_config.predict_cell_prop:
             prior_alpha = torch.ones_like(dd_alpha)
             prior_dist_p = Dirichlet(prior_alpha)
             posterior_dist_p = Dirichlet(dd_alpha)
             kld_p = kl_divergence(prior_dist_p, posterior_dist_p).sum(dim=-1)
+
+        # Cell proportions loss
+        cell_prop_loss = torch.zeros(batch_size, device=device)
+        if y is not None and self.model_config.predict_cell_prop:
+            normalized_dd_alpha = dd_alpha / torch.sum(dd_alpha, dim=-1, keepdim=True)  # (batch_size, n_cell_types)
+            cell_prop_loss = F.mse_loss(normalized_dd_alpha, y, reduction="none").sum(dim=-1)  # (batch_size,)
+
 
         # --- Gaussian KL divergence loss for GEPs ---
         # Prior: Gaussian distribution (mean=0, std=1)
@@ -348,11 +370,12 @@ class VAE(BaseAE):
 
         # print('recon_loss_by_decoder.shape', recon_loss_by_decoder.shape, 'kld.shape', kld.shape,
         #       'cell_prop_loss.shape', cell_prop_loss.shape)
-        # lo = self.model_config.loss_coefficient
+        lo = self.model_config.loss_coefficient
         total_loss = (
                 recon_loss_by_conv
                 + beta * (kld_z_types + kld_p)
                 # + lo['kld'] * kld_z_types
+                + lo['cell_prop'] * cell_prop_loss
                 + gamma * repulsion_loss
                 + gene_mean_loss
                 + gene_std_loss
@@ -360,11 +383,12 @@ class VAE(BaseAE):
 
         return (total_loss,
                 kld_z_types.mean(dim=0),
-                # kld_p.mean(dim=0),
+                kld_p.mean(dim=0),
                 recon_loss_by_conv.mean(dim=0),
                 gene_mean_loss.mean(dim=0),
                 gene_std_loss.mean(dim=0),
                 repulsion_loss.mean(dim=0),
+                cell_prop_loss.mean(dim=0),
                 )
 
     def compute_gene_weights(

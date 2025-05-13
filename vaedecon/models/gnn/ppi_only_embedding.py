@@ -229,7 +229,7 @@ class EncoderSGNN(BaseEncoder):
             output['dd_alpha'] = dd_alpha
             cell_prop = reparameterize_dirichlet(dd_alpha, device=current_device)
         elif y is not None:
-            cell_prop = y.to(self.device)
+            cell_prop = y.to(current_device)
         else:
             raise NotImplementedError('If self.predict_cell_prop is False, '
                                       'y (cell proportions of cell types) must be provided. '

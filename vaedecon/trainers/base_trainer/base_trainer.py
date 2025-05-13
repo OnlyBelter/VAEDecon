@@ -58,7 +58,7 @@ class PLTrainer(L.LightningModule):
         output = self(batch)
         self.loss_monitor(step='train', output=output,
                           loss_types=('loss', 'kld', 'recon_loss_conv',
-                                      'gene_mean_loss', 'gene_std_loss', 'repulsion_loss'
+                                      'gene_mean_loss', 'gene_std_loss', 'repulsion_loss', 'cell_prop_loss'
                                       ))
         return output.loss
 
@@ -66,7 +66,7 @@ class PLTrainer(L.LightningModule):
         """Performs a single validation step."""
         output = self(batch)
         self.loss_monitor(step='val', output=output,
-                          loss_types=('loss', 'kld', 'recon_loss_conv'))
+                          loss_types=('loss', 'kld', 'recon_loss_conv', 'cell_prop_loss'))
         return output.loss
 
     def configure_optimizers(self) -> Dict[str, Any]:

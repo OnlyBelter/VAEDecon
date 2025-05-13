@@ -35,6 +35,7 @@ class EncoderMLP(BaseEncoder):
         else:
             self.position_encoding = None
         # self.n_channels = 1
+        self.device_param = nn.Parameter(torch.empty(0))  # To easily get the device of the model
 
         input_size = np.prod(self.input_dim)
         for i, hidden_dim_size in enumerate(self.hidden_dims):
@@ -86,11 +87,11 @@ class EncoderMLP(BaseEncoder):
             `output_layer_levels` arguments are available under the keys `embedding_layer_i` where
             i is the layer's level.
         """
-
-        x = x.to(self.device)  # B, n_genes
+        current_device = self.device_param.device
+        x = x.to(current_device)  # B, n_genes
         # max_depth = self.depth
         if self.position_encoding is not None:
-            self.position_encoding = self.position_encoding.to(x.device)
+            self.position_encoding = self.position_encoding.to(current_device)
 
         if output_layer_levels is not None:
             assert all(
@@ -133,9 +134,9 @@ class EncoderMLP(BaseEncoder):
             # output["cell_prop"] = self.cell_prop(cell_embedding_before_mu).view((-1, self.n_cell_types, 1))
             dd_alpha = F.softplus(self.fc_dd_alpha(out)) + eps
             output['dd_alpha'] = dd_alpha
-            cell_prop = reparameterize_dirichlet(dd_alpha)
+            cell_prop = reparameterize_dirichlet(dd_alpha, device=current_device)
         elif y is not None:
-            cell_prop = y.to(self.device)
+            cell_prop = y.to(current_device)
         else:
             raise NotImplementedError('If self.predict_cell_prop is False, '
                                       'y (cell proportions of cell types) must be provided. '
