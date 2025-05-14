@@ -244,6 +244,7 @@ class VAE(BaseAE):
             gene_mean_loss=gene_mean_loss,
             gene_std_loss=gene_std_loss,
             repulsion_loss=repulsion_loss,
+            kld_p=kld_p,  # kld for cellular proportions
         )
         return output
 
