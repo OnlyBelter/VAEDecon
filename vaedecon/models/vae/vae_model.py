@@ -269,8 +269,8 @@ class VAE(BaseAE):
         Args:
             x: Input data.
             recon_x_conv: Reconstructed data from cell-type-specific GEPs x cellular proportions.
-            # mu_types: List of cell type means.
-            # logvar_types: List of cell type log variances.
+            mu_types: List of cell type means.
+            logvar_types: List of cell type log variances.
             y: Cell proportions of the input data.
             dd_alpha: Dirichlet distribution parameters.
             mu_prior: Learnable prior means for the latent space.
@@ -314,13 +314,17 @@ class VAE(BaseAE):
             prior_alpha = torch.ones_like(dd_alpha)
             prior_dist_p = Dirichlet(prior_alpha)
             posterior_dist_p = Dirichlet(dd_alpha)
-            kld_p = kl_divergence(prior_dist_p, posterior_dist_p).sum(dim=-1)
+            # kld_p = kl_divergence(prior_dist_p, posterior_dist_p).sum(dim=-1)
+            # https://stats.stackexchange.com/a/370048
+            kld_p = kl_divergence(posterior_dist_p, prior_dist_p)
 
         # Cell proportions loss
         cell_prop_loss = torch.zeros(batch_size, device=device)
         if y is not None and self.model_config.predict_cell_prop:
             normalized_dd_alpha = dd_alpha / torch.sum(dd_alpha, dim=-1, keepdim=True)  # (batch_size, n_cell_types)
             cell_prop_loss = F.mse_loss(normalized_dd_alpha, y, reduction="none").sum(dim=-1)  # (batch_size,)
+            # Using KL divergence loss
+            # cell_prop_loss = F.kl_div(normalized_dd_alpha.log(), y, reduction='batchmean')  # (batch_size,)
 
 
         # --- Gaussian KL divergence loss for GEPs ---
@@ -349,6 +353,7 @@ class VAE(BaseAE):
         # Since we decomposed bulk GEP into cell type-specific GEPs,
         # we need to sum over the embeddings of all cell types
         mu = mu_mean.reshape(-1, self.model_config.latent_dim)
+        # https://stats.stackexchange.com/a/370048
         kld_z_types = - 0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
 
         # --- Repulsion loss ---
