@@ -11,18 +11,13 @@ from torch_geometric.utils import from_networkx
 from torch_geometric.nn import Sequential, SAGEConv
 import lightning as L
 
-from ..nn.base_architectures import BaseEncoder
-# from ..base import BaseModelConfig
 from ..vae.vae_config import VAEConfig
-from ...models.base import ModelOutput, reparameterize_dirichlet
+from ...models.base import (ModelOutput, reparameterize_dirichlet, LOGVAR_CLAMP_MIN,
+                            LOGVAR_CLAMP_MAX, EPS, NETWORK_CUTOFF, BaseEncoder)
 from ...models.nn.positional_encoding import PositionalEncoding
 # from .common_functions_for_gnn import build_network, nx_to_pyg_edge_index
 
-EPS = 1e-6
-# MAX_LOGSTD = 10
-LOGVAR_CLAMP_MIN = -10
-LOGVAR_CLAMP_MAX = 10
-NETWORK_CUTOFF = 0.5
+
 # EXPRESSION_CUTOFF = 0.0
 
 

@@ -10,8 +10,9 @@ from torch.utils.data import DataLoader
 from ..utility import check_dir
 from ..data import GEPDataset
 from ..models import AutoModel
+from ..models.base import BaseEncoder
 from ..models.gnn import EncoderGNN, EncoderSGNN
-from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding, BaseEncoder
+from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding
 from ..models.vae import VAE, VAEConfig
 from ..trainers import BaseTrainerConfig, BaseTrainerL
 from ..pipelines import TrainingPipeline

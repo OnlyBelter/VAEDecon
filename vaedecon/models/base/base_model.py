@@ -3,8 +3,9 @@ import logging
 import os
 import sys
 import importlib
+import numpy as np
 from http.cookiejar import LoadError
-from typing import Optional, Dict, Any, Type, Union, Sequence
+from typing import Optional, Dict, Any, List, Union, Sequence
 
 import cloudpickle
 import json
@@ -15,9 +16,9 @@ import lightning as L
 from ...data.datasets import BaseDataset, DatasetOutput
 from ...models.auto_model import AutoConfig
 # from ...models.vae import VAEConfig
-from ..nn import BaseDecoder, BaseEncoder, EncoderMLP
+# from ..nn import BaseDecoder, BaseEncoder
 # from ..gnn import EncoderSGNN
-from ..nn.default_architectures import Decoder_AE_MLP
+# from ..nn.default_architectures import Decoder_AE_MLP
 from .base_config import BaseModelConfig, EnvironmentConfig
 from ...customexception import BadInheritanceError
 from ...models.base.base_utils import (
@@ -31,6 +32,60 @@ logger = logging.getLogger(__name__)
 console = logging.StreamHandler()
 logger.addHandler(console)
 logger.setLevel(logging.INFO)
+
+
+class BaseDecoder(L.LightningModule):
+    """Base class for decoder neural networks in VAE architectures."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, z: torch.Tensor) -> Any:
+        """Forward pass of the decoder.
+
+        This method must be implemented in child classes. It processes the latent
+        representation and returns the reconstructed data.
+
+        Args:
+            z (torch.Tensor): Latent representation to be decoded
+
+        Returns:
+            ModelOutput: Reconstructed data
+
+        Note:
+            Reconstruction tensors should be in range [0, 1] with shape:
+            (batch_size, channels, ...)
+
+        Raises:
+            NotImplementedError: If not implemented in child class
+        """
+        raise NotImplementedError("Forward method must be implemented in child class")
+
+
+class BaseEncoder(L.LightningModule):
+    """Base class for encoder neural networks in VAE architectures."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor, knn_edge_index: Optional[Any], ppi_edge_index: Optional[Any]) -> Any:
+        """Forward pass of the encoder.
+
+        This method must be implemented in child classes. It processes the input data
+        and returns an encoded representation.
+
+        Args:
+            x (torch.Tensor): Input data to be encoded
+            knn_edge_index (Optional[torch.Tensor]): KNN edge index, only for GNN
+            ppi_edge_index (Optional[torch.Tensor]): PPI edge index, only for GNN
+
+        Returns:
+            ModelOutput: Encoded representation of the input
+
+        Raises:
+            NotImplementedError: If not implemented in child class
+        """
+        raise NotImplementedError("Forward method must be implemented in child class")
 
 
 class BaseAE(L.LightningModule):
@@ -63,6 +118,7 @@ class BaseAE(L.LightningModule):
                 raise AttributeError(
                     "Input dimension ('input_dim') must be set in BaseModelConfig to build the encoder automatically."
                 )
+            from ..nn import EncoderMLP
             encoders = [EncoderMLP(model_config)]
             self.model_config.uses_default_encoder = True
         else:
@@ -487,3 +543,53 @@ def check_decoder(decoder: BaseDecoder) -> BaseDecoder:
             "Decoder must inherit from BaseDecoder (...models.base_architectures.BaseDecoder)."
         )
     return decoder
+
+
+class Decoder_AE_MLP(BaseDecoder):
+    def __init__(self, args: BaseModelConfig):
+        BaseDecoder.__init__(self)
+
+        self.input_dim = args.input_dim
+
+        layers = nn.ModuleList()
+
+        layers.append(nn.Sequential(nn.Linear(args.latent_dim, 512), nn.ReLU()))
+
+        layers.append(
+            nn.Sequential(nn.Linear(512, int(np.prod(args.input_dim))), nn.Sigmoid())
+        )
+
+        self.layers = layers
+        self.depth = len(layers)
+
+    def forward(self, z: torch.Tensor, output_layer_levels: List[int] = None):
+        output = ModelOutput()
+
+        max_depth = self.depth
+
+        if output_layer_levels is not None:
+            assert all(
+                self.depth >= levels > 0 or levels == -1
+                for levels in output_layer_levels
+            ), (
+                f"Cannot output layer deeper than depth ({self.depth}). "
+                f"Got ({output_layer_levels})."
+            )
+
+            if -1 in output_layer_levels:
+                max_depth = self.depth
+            else:
+                max_depth = max(output_layer_levels)
+
+        out = z
+
+        for i in range(max_depth):
+            out = self.layers[i](out)
+
+            if output_layer_levels is not None:
+                if i + 1 in output_layer_levels:
+                    output[f"reconstruction_layer_{i+1}"] = out
+            if i + 1 == self.depth:
+                output["reconstruction"] = out.reshape((z.shape[0],) + self.input_dim)
+
+        return output

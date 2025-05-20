@@ -13,6 +13,12 @@ from torch.distributions import Gamma
 import random
 import numpy as np
 
+EPS = 1e-6
+# MAX_LOGSTD = 10
+LOGVAR_CLAMP_MIN = -10
+LOGVAR_CLAMP_MAX = 10
+NETWORK_CUTOFF = 0.5
+
 logger = logging.getLogger(__name__)
 console = logging.StreamHandler()
 logger.addHandler(console)

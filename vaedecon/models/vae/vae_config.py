@@ -1,6 +1,5 @@
 from typing import Type
-from ...models.base.base_config import BaseModelConfig
-from ..nn.base_architectures import BaseEncoder
+from ...models.base import BaseModelConfig
 
 
 class VAEConfig(BaseModelConfig):

@@ -4,9 +4,7 @@ import torch
 import torch.nn as nn
 import scanpy as sc
 import torch.nn.functional as F
-from ..nn.base_architectures import BaseEncoder
-from ..base import BaseModelConfig
-from ...models.base.base_utils import ModelOutput
+from ..base import BaseModelConfig, ModelOutput, BaseEncoder
 from ...models.nn.positional_encoding import PositionalEncoding
 from typing import Optional
 from torch_geometric.nn import Sequential, GCNConv, TransformerConv, SAGEConv

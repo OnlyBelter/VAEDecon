@@ -15,8 +15,9 @@ It contains:
 """
 
 from .base_config import BaseModelConfig
-from .base_model import BaseAE
+from .base_model import BaseAE, BaseEncoder, BaseDecoder
 from .base_utils import reparameterize_gaussian, reparameterize_dirichlet, ModelOutput, set_seed
+from .base_utils import LOGVAR_CLAMP_MAX, LOGVAR_CLAMP_MIN, NETWORK_CUTOFF, EPS
 
 __all__ = [
     "BaseModelConfig",
@@ -24,4 +25,11 @@ __all__ = [
     "reparameterize_gaussian",
     "reparameterize_dirichlet",
     "ModelOutput",
-    "set_seed",]
+    "set_seed",
+    "BaseEncoder",
+    "BaseDecoder",
+    "LOGVAR_CLAMP_MAX",
+    "LOGVAR_CLAMP_MIN",
+    "NETWORK_CUTOFF",
+    "EPS",]
+

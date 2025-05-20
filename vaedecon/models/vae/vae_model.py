@@ -18,8 +18,8 @@ from torch.distributions import Normal, Dirichlet, Gamma, kl_divergence
 from ...data.datasets import DatasetOutput
 # from ...models.base.base_utils import ModelOutput
 
-from ...models.base import BaseAE, reparameterize_dirichlet, reparameterize_gaussian, ModelOutput
-from ...models.nn import BaseDecoder, BaseEncoder
+from ...models.base import BaseAE, reparameterize_dirichlet, reparameterize_gaussian, ModelOutput, BaseDecoder, BaseEncoder
+# from ...models.nn import BaseDecoder, BaseEncoder
 # from ...models.gnn import EncoderGNN, EncoderSGNN
 # from ...models.base.base_config import BaseModelConfig
 from .vae_config import VAEConfig
