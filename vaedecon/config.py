@@ -1,5 +1,7 @@
 import json
 import os
+import logging
+from pathlib import Path
 import warnings
 from dataclasses import asdict, field
 from typing import Any, Dict, Union
@@ -7,6 +9,11 @@ from typing import Any, Dict, Union
 from pydantic import ValidationError
 from pydantic import BaseModel, ConfigDict
 
+# Configure logging
+logger = logging.getLogger(__name__)
+console = logging.StreamHandler()
+logger.addHandler(console)
+logger.setLevel(logging.INFO)
 
 class BaseConfig(BaseModel):
     """This is the BaseConfig class that defines all the useful loading and saving methods
@@ -97,7 +104,32 @@ class BaseConfig(BaseModel):
             filename (str): the name of the file
 
         """
-        with open(
-            os.path.join(dir_path, f"{filename}.json"), "w", encoding="utf-8"
-        ) as fp:
-            fp.write(self.to_json_string())
+        dir_p = Path(dir_path)
+        dir_p.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
+
+        file_path = os.path.join(dir_p, f"{filename}.json")
+
+        compact_json_string = self.to_json_string()
+
+        try:
+            # Parse the compact JSON string back into a Python object
+            python_obj = json.loads(compact_json_string)
+
+            # Now dump this Python object to the file with indentation
+            with open(file_path, "w", encoding="utf-8") as fp:
+                json.dump(python_obj, fp, indent=4, ensure_ascii=False)
+            # print(f"Successfully saved indented JSON to {file_path}") # Optional logging
+
+        except json.JSONDecodeError as e:
+            # This can happen if self.to_json_string() doesn't return valid JSON
+            logger.error(f"Error: self.to_json_string() did not return a valid JSON string. {e}")
+            logger.warning(
+                f"Saving the original string from to_json_string() without indentation to {file_path} as a fallback.")
+            with open(file_path, "w", encoding="utf-8") as fp:
+                fp.write(compact_json_string)  # Save the original string if parsing fails
+        except AttributeError:
+            logger.error("Error: self.to_json_string() method not found or failed internally.")
+            raise  # Re-raise if the method itself is missing/problematic
+
+        # with open(file_path, "w", encoding="utf-8") as fp:
+        #     fp.write(self.to_json_string())

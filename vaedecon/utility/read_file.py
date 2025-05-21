@@ -4,68 +4,167 @@ import sys
 import numpy as np
 import pandas as pd
 import anndata as an
-from typing import Union
+from typing import Union, Optional, List
 from pathlib import Path
 from scipy.sparse import csr_matrix
 from sklearn import preprocessing as pp
 from .pub_func import (log_exp2cpm, read_df, non_log2log_cpm,
                        non_log2cpm, get_inx2cell_type, log_message)
 
+logger = logging.getLogger(__name__)
+
 
 class ReadH5AD(object):
     """
-    Read .h5ad file, usually the values are log2 transformed
+    Read .h5ad file and provides methods to access and process its data.
+    Values are typically log2 transformed (e.g., log2(TPM+1) or log2(CPM+1)).
 
-    :param file_path: the file path of .h5ad file, samples by genes, log2cpm1p format
-    :param show_info: whether to show the information of the dataset after reading
+    :param file_path: Path to the .h5ad file.
+    :param show_info: Whether to print dataset information upon loading.
     """
 
-    def __init__(self, file_path: str, show_info: bool = False):
-        """
-        """
-        self.dataset = an.read_h5ad(file_path)
+    def __init__(self, file_path: Union[str, Path], show_info: bool = False):
+        self.file_path = Path(file_path)
+        try:
+            # Consider using backed mode for very large files if you only ever access slices
+            # self.dataset = an.read_h5ad(self.file_path, backed='r')
+            self.dataset = an.read_h5ad(self.file_path)
+            logger.info(f"Successfully loaded: {self.file_path}")
+        except FileNotFoundError:
+            logger.error(f"H5AD file not found: {self.file_path}")
+            raise
+        except Exception as e:
+            logger.error(f"Error reading H5AD file {self.file_path}: {e}")
+            raise
+
         if show_info:
             print(self.dataset)
 
-    def get_df(self, result_file_path: str = None, convert_to_tpm: bool = False,
+    def get_df(self,
+               obs_names: Optional[List[str]] = None,
+               result_file_path: Optional[Union[str, Path]] = None,
+               convert_to_tpm: bool = False,  # Note: This implies input is log-transformed
                scaling_by_sample: bool = False) -> pd.DataFrame:
         """
-        Convert to DataFrame, samples by genes, log space (log2cpm1p)
+        Extracts data for specified observations (samples/cells), performs optional
+        transformations, and returns a Pandas DataFrame (samples by genes).
 
-        :param result_file_path:
-        :param convert_to_tpm: whether to convert log2cpm1p to TPM
-        :param scaling_by_sample: whether to scale the expression values of each sample to [0, 1] by 'min_max'
+        Args:
+            obs_names: Optional list of observation names (sample/cell IDs) to fetch.
+                       If None, all observations from self.dataset are processed.
+            result_file_path: Optional path to save the resulting DataFrame as a CSV.
+            convert_to_tpm: If True, attempts to convert data (assumed to be log-transformed
+                              counts like log2(X+1)) to TPM. Requires a valid log_exp2cpm function.
+            scaling_by_sample: If True, scales the expression values of each sample
+                               (row-wise) to the range [0, 1] using MinMaxScaler.
+
+        Returns:
+            A Pandas DataFrame. If obs_names are specified and none are found,
+            or if the initial dataset is empty, an empty DataFrame with appropriate
+            columns is returned.
         """
-        if type(self.dataset.X) == csr_matrix:
-            x_data = self.dataset.X.toarray().astype(np.float32)  # convert sparse matrix to dense matrix
+
+        if self.dataset.n_obs == 0:
+            logger.warning(f"Source AnnData object from {self.file_path} has 0 observations.")
+            return pd.DataFrame(columns=self.dataset.var_names.to_list())
+
+        adata_slice: an.AnnData
+
+        if obs_names is not None:
+            if not obs_names:  # Handle empty list explicitly
+                logger.warning("Empty obs_names list provided to get_df. Returning empty DataFrame.")
+                return pd.DataFrame(columns=self.dataset.var_names.to_list())
+
+            # Filter provided obs_names to those actually present in the AnnData object's index
+            valid_obs_mask = self.dataset.obs_names.isin(obs_names)
+            actual_obs_to_slice = self.dataset.obs_names[valid_obs_mask].to_list()
+
+            if not actual_obs_to_slice:
+                requested_preview = obs_names[:min(5, len(obs_names))]
+                logger.warning(
+                    f"None of the {len(obs_names)} provided obs_names (e.g., {requested_preview}) "
+                    f"were found in the dataset from {self.file_path}. Returning empty DataFrame."
+                )
+                return pd.DataFrame(columns=self.dataset.var_names.to_list())
+
+            logger.info(f"Subsetting AnnData for {len(actual_obs_to_slice)} requested observations.")
+            # Slicing AnnData usually returns a view. .copy() makes it an independent object in memory.
+            # This is crucial if you are only working with this subset for transformations.
+            adata_slice = self.dataset[actual_obs_to_slice, :].copy()
         else:
-            x_data = self.dataset.X.astype(np.float32)
+            # Process the entire dataset.
+            # Making a copy ensures that self.dataset remains unchanged by downstream processing.
+            adata_slice = self.dataset.copy()
+            logger.info(f"Processing all {self.dataset.n_obs} observations from {self.file_path}.")
 
+        if adata_slice.n_obs == 0:  # Safeguard if slicing resulted in empty
+            logger.warning("Resulting AnnData slice has 0 observations. Returning empty DataFrame.")
+            return pd.DataFrame(columns=self.dataset.var_names.to_list())
+
+        # Extract expression data .X
+        # Convert to dense NumPy array if sparse, ensure float32
+        if isinstance(adata_slice.X, csr_matrix):
+            x_data = adata_slice.X.toarray().astype(np.float32)
+        else:
+            # Ensure it's a new numpy array, not a view, and correct dtype
+            x_data = np.array(adata_slice.X, dtype=np.float32)
+
+        # Apply transformations
         if convert_to_tpm:
-            x_data = log_exp2cpm(x_data)
-        if scaling_by_sample:
-            scaler = pp.MinMaxScaler(feature_range=(0, 1), copy=True)
-            x_data = scaler.fit_transform(x_data.T).T
+            # Ensure log_exp2cpm function is available and correctly implemented
+            if 'log_exp2cpm' not in globals() and not hasattr(self, 'log_exp2cpm'):
+                logger.error("Function 'log_exp2cpm' is not defined but convert_to_tpm=True.")
+                raise NameError("Function 'log_exp2cpm' is not defined.")
+            try:
+                x_data = log_exp2cpm(x_data)  # This function needs to be robust
+            except Exception as e:
+                logger.error(f"Error during log_exp2cpm conversion: {e}")
+                raise
 
-        df = pd.DataFrame(data=x_data, index=self.dataset.obs.index,
-                          columns=self.dataset.var.index).round(3)
+        if scaling_by_sample:
+            logger.info("Applying MinMax scaling per sample (each row scaled to [0,1]).")
+            # MinMaxScaler scales features (columns). To scale samples (rows) using sklearn's
+            # scaler, we transpose, scale columns (which are now samples), and transpose back.
+            if x_data.shape[0] > 0 and x_data.shape[1] > 0:  # Scaler needs data
+                scaler = pp.MinMaxScaler(feature_range=(0, 1), copy=True)
+                x_data = scaler.fit_transform(x_data.T).T
+            elif x_data.shape[0] == 0:
+                logger.warning("No data to scale (0 samples).")
+            else:  # x_data.shape[1] == 0 (0 genes)
+                logger.warning("No data to scale (0 genes).")
+
+        # Create final DataFrame
+        df = pd.DataFrame(
+            data=x_data,
+            index=adata_slice.obs_names.to_list(),  # Use obs_names from the slice
+            columns=adata_slice.var_names.to_list()  # Use var_names from the slice (or original if not subsetting vars)
+        ).round(3)
+
         if result_file_path is not None:
-            df.to_csv(result_file_path, float_format='%.3f')
+            save_path = Path(result_file_path)
+            try:
+                save_path.parent.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
+                df.to_csv(save_path, float_format='%.3f')
+                logger.info(f"DataFrame (shape: {df.shape}) saved to {save_path}")
+            except Exception as e:
+                logger.error(f"Error saving DataFrame to {save_path}: {e}")
+
         return df
 
-    def get_cell_fraction(self) -> Union[None, pd.DataFrame]:
+    def get_cell_fraction(self) -> Optional[pd.DataFrame]:
         """
-        Get cell fraction, cells by cell types
+        Get cell fraction from .obs, (samples by cell types).
+        Returns None if .obs is empty or has no columns.
         """
-        if self.dataset.obs.shape[1] > 0:
-            return self.dataset.obs.round(3)
+        if self.dataset.n_obs > 0 and self.dataset.obs.shape[1] > 0:
+            return self.dataset.obs.copy().round(3)  # Return a copy
         else:
-            print('   There is no cell fraction in this .h5ad file')
+            logger.warning('No observation metadata (cell fractions) found in .obs or dataset is empty.')
             return None
 
-    def get_h5ad(self):
+    def get_h5ad(self) -> an.AnnData:
         """
-        Get the .h5ad file
+        Get the underlying AnnData object.
         """
         return self.dataset
 
@@ -322,7 +421,7 @@ def read_gene_set(gene_set_file_path: list, max_n_genes: int = 300) -> pd.DataFr
 
 
 def get_gene_mean_std_across_cell_types(sct_dataset_fp: str, result_fp, gene_list_fp,
-                                        cell_type_fp, scaling_by_constant: bool=True, log2p1: bool=True) -> tuple:
+                                        cell_type_fp, scaling_by_constant: bool=True, log2p1: bool=True) -> None:
     """Get the mean and std of gene expression values across cell types in the SCT dataset."""
     # sct_dataset_obj = ReadH5AD(sct_dataset_fp)
     # sct_dataset_df = sct_dataset_obj.get_df(convert_to_tpm=True)

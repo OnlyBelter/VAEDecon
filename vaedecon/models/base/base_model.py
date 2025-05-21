@@ -248,63 +248,63 @@ class BaseAE(L.LightningModule):
         # with open(os.path.join(model_dir, "model_architecture.json"), "w") as f:
         #     json.dump(model_config, f, indent=4)
 
-        # # Save encoder and decoder configurations as JSON and pkl
-        if hasattr(self, "encoders"):  # encoders is a list of encoders
-            assert isinstance(self.encoders, nn.ModuleList), 'Encoders must be a nn.ModuleList in Pytorch.'
-            for idx, encoder in enumerate(self.encoders):
-                if isinstance(encoder, BaseEncoder):
-                    encoder_name = encoder.__class__.__name__.lower()
-                else:
-                    encoder_name = f"encoder_{idx}"
-                # json
-                encoder_config = self._get_encoder_config(encoder)
-                with open(os.path.join(model_dir, f"{encoder_name}_config.json"), "w") as f:
-                    json.dump(encoder_config, f, indent=4)
-                # Save encoder weights separately
-                encoder_weights = encoder.state_dict()
-
-                torch.save(encoder_weights, os.path.join(model_dir, f"{encoder_name}_weights.pt"))
-
-        if hasattr(self, "encoder"):  # encoders is a single encoder
-            if isinstance(self.encoder, BaseEncoder):
-                encoder_name = self.encoder.__class__.__name__.lower()
-            else:
-                raise TypeError(
-                    f"Encoder must be a BaseEncoder instance, but got {type(self.encoder)}"
-                )
-            # json
-            encoder_config = self._get_encoder_config(self.encoder)
-            with open(os.path.join(model_dir, f"{encoder_name}_config.json"), "w") as f:
-                json.dump(encoder_config, f, indent=4)
-            # Save encoder weights separately
-            encoder_weights = self.encoder.state_dict()
-
-            torch.save(encoder_weights, os.path.join(model_dir, f"{encoder_name}_weights.pt"))
-
-            # torch.save(self.encoder.state_dict(), os.path.join(model_dir, "encoder_weights.pt"))
-
-            # # pkl
-            # with open(os.path.join(model_dir, "encoder.pkl"), "wb") as fp:
-            #     cloudpickle.register_pickle_by_value(inspect.getmodule(self.encoder))
-            #     cloudpickle.dump(self.encoder, fp)
-
-        if hasattr(self, "decoder"):
-            # json
-            decoder_config = self._get_decoder_config()
-            with open(os.path.join(model_dir, "decoder_config.json"), "w") as f:
-                json.dump(decoder_config, f, indent=4)
-
-            # Save decoder weights separately
-            torch.save(self.decoder.state_dict(), os.path.join(model_dir, "decoder_weights.pt"))
-
-            # pkl
-            with open(os.path.join(model_dir, "decoder.pkl"), "wb") as fp:
-                cloudpickle.register_pickle_by_value(inspect.getmodule(self.decoder))
-                cloudpickle.dump(self.decoder, fp)
-        # # Save model weights separately
-        torch.save(self.state_dict(), os.path.join(model_dir, "model_weights.pt"))
-        # model_dict = {"model_state_dict": self.state_dict()}
-        # torch.save(model_dict, os.path.join(model_dir, "model.pt"))
+        # # # Save encoder and decoder configurations as JSON and pkl
+        # if hasattr(self, "encoders"):  # encoders is a list of encoders
+        #     assert isinstance(self.encoders, nn.ModuleList), 'Encoders must be a nn.ModuleList in Pytorch.'
+        #     for idx, encoder in enumerate(self.encoders):
+        #         if isinstance(encoder, BaseEncoder):
+        #             encoder_name = encoder.__class__.__name__.lower()
+        #         else:
+        #             encoder_name = f"encoder_{idx}"
+        #         # json
+        #         encoder_config = self._get_encoder_config(encoder)
+        #         with open(os.path.join(model_dir, f"{encoder_name}_config.json"), "w") as f:
+        #             json.dump(encoder_config, f, indent=4)
+        #         # Save encoder weights separately
+        #         encoder_weights = encoder.state_dict()
+        #
+        #         torch.save(encoder_weights, os.path.join(model_dir, f"{encoder_name}_weights.pt"))
+        #
+        # if hasattr(self, "encoder"):  # encoders is a single encoder
+        #     if isinstance(self.encoder, BaseEncoder):
+        #         encoder_name = self.encoder.__class__.__name__.lower()
+        #     else:
+        #         raise TypeError(
+        #             f"Encoder must be a BaseEncoder instance, but got {type(self.encoder)}"
+        #         )
+        #     # json
+        #     encoder_config = self._get_encoder_config(self.encoder)
+        #     with open(os.path.join(model_dir, f"{encoder_name}_config.json"), "w") as f:
+        #         json.dump(encoder_config, f, indent=4)
+        #     # Save encoder weights separately
+        #     encoder_weights = self.encoder.state_dict()
+        #
+        #     torch.save(encoder_weights, os.path.join(model_dir, f"{encoder_name}_weights.pt"))
+        #
+        #     # torch.save(self.encoder.state_dict(), os.path.join(model_dir, "encoder_weights.pt"))
+        #
+        #     # # pkl
+        #     # with open(os.path.join(model_dir, "encoder.pkl"), "wb") as fp:
+        #     #     cloudpickle.register_pickle_by_value(inspect.getmodule(self.encoder))
+        #     #     cloudpickle.dump(self.encoder, fp)
+        #
+        # if hasattr(self, "decoder"):
+        #     # json
+        #     decoder_config = self._get_decoder_config()
+        #     with open(os.path.join(model_dir, "decoder_config.json"), "w") as f:
+        #         json.dump(decoder_config, f, indent=4)
+        #
+        #     # Save decoder weights separately
+        #     torch.save(self.decoder.state_dict(), os.path.join(model_dir, "decoder_weights.pt"))
+        #
+        #     # pkl
+        #     with open(os.path.join(model_dir, "decoder.pkl"), "wb") as fp:
+        #         cloudpickle.register_pickle_by_value(inspect.getmodule(self.decoder))
+        #         cloudpickle.dump(self.decoder, fp)
+        # # # Save model weights separately
+        # torch.save(self.state_dict(), os.path.join(model_dir, "model_weights.pt"))
+        # # model_dict = {"model_state_dict": self.state_dict()}
+        # # torch.save(model_dict, os.path.join(model_dir, "model.pt"))
 
         # Save training configuration if provided
         if training_config is not None and hasattr(training_config, "save_json"):

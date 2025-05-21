@@ -9,12 +9,12 @@ from torch.utils.data import DataLoader
 
 from ..utility import check_dir
 from ..data import GEPDataset
-from ..models import AutoModel
+from ..models import AutoModel, BaseAE, AutoConfig
 from ..models.base import BaseEncoder
 from ..models.gnn import EncoderGNN, EncoderSGNN
 from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding
 from ..models.vae import VAE, VAEConfig
-from ..trainers import BaseTrainerConfig, BaseTrainerL
+from ..trainers import BaseTrainerConfig, BaseTrainerL, PLTrainer
 from ..pipelines import TrainingPipeline
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -73,6 +73,7 @@ def train_model(
         model=model.to(device),
         trainer_cls=trainer_cls,
         result_dir=result_dir,
+        debug_model=config.debug_model,
         # n_early_stopping_patience=n_early_stopping_patience,
     )
     training_pipeline(train_data=train_set, eval_data=val_set)
@@ -86,10 +87,31 @@ def save_metadata(dataset: GEPDataset, model_config: VAEConfig) -> None:
     dataset.save_cell_types(Path(model_config.cell_type_fp))
 
 
-def load_trained_model(model_dir: str) -> AutoModel:
+def load_trained_model(model_dir: str) -> Union[AutoModel, BaseAE]:
     """Loads the trained model from the specified directory."""
-    trained_model = AutoModel.load_from_folder(model_dir)
-    return trained_model
+    try:
+        # find the model file in the directory by .ckpt ending
+        model_file = [f for f in os.listdir(model_dir) if f.endswith('.ckpt')]
+        model_file_path = os.path.join(model_dir, model_file[0])
+        model_config_path = os.path.join(model_dir, "model_config.json")
+        training_config_path = os.path.join(model_dir, "training_config.json")
+        model_config = AutoConfig.from_json_file(model_config_path)
+        training_config = BaseTrainerConfig.from_json_file(training_config_path)
+
+        model = create_model(model_config=model_config, encoder_cls_name_list=model_config.encoders,
+                             decoder_cls=DecoderMLP)
+        trained_model = PLTrainer.load_from_checkpoint(
+            checkpoint_path=model_file_path,
+            model=model,
+            training_config=training_config)
+        print('Model loaded from checkpoint:', model_file_path)
+        trained_model.eval()
+        trained_model.freeze()
+        return trained_model.model
+    except FileNotFoundError:
+        # if no .ckpt file found, load the model from the folder
+        trained_model = AutoModel.load_from_folder(model_dir)
+        return trained_model
 
 
 def evaluate_model(
@@ -155,7 +177,7 @@ def evaluate_model(
 
     pred_cell_prop_df = pd.DataFrame(
         pred_cell_prop_all,
-        index=test_set.gep_data.index,
+        index=test_set.get_sample_ids(),
         columns=cell_types,
     )
     pred_cell_prop_file_path = os.path.join(

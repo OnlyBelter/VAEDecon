@@ -2,6 +2,7 @@ import datetime
 import logging
 import os
 import json
+import platform
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -29,6 +30,79 @@ logger.addHandler(console)
 logger.setLevel(logging.INFO)
 
 
+def get_dataloader(
+    dataset: BaseDataset,
+    batch_size: int,
+    shuffle: bool,
+    num_workers: Optional[int] = None,
+    pin_memory: bool = True,
+    persistent_workers: Optional[bool] = None,  # Default to None, decides based on num_workers
+    collate_fn: Optional[callable] = None,
+) -> DataLoader:
+    """Creates a DataLoader for the given dataset with potentially optimized num_workers.
+
+    Args:
+        dataset: The dataset to load.
+        batch_size: How many samples per batch to load.
+        shuffle: Whether to shuffle the data at every epoch.
+        num_workers: Number of subprocesses to use for data loading.
+                     If None, a heuristic will be used. Defaults to None.
+        pin_memory: If True, copies Tensors into CUDA pinned memory before returning them.
+                    Useful when loading data to GPU.
+        persistent_workers: If True and num_workers > 0, workers will not be shut down
+                            after one epoch. Can speed up training.
+        collate_fn: Function to merge a list of samples to form a mini-batch.
+    """
+
+    if num_workers is None:
+        available_cpus = os.cpu_count()
+        if available_cpus:
+            # Heuristic: Use half the available CPUs, but cap it.
+            # On Windows, multi-processing for DataLoader can sometimes be slow or problematic
+            # if not handled carefully (e.g., in `if __name__ == '__main__':`).
+            # For CPU-bound __getitem__ (not your case if GEPDataset is preprocessed), more workers help.
+            # For IO-bound or already fast __getitem__, fewer workers or 0 can be better.
+            if platform.system() == "Windows":
+                # Often recommended to use 0 or 1 on Windows for stability/performance with PyTorch DataLoader
+                # unless the __getitem__ is significantly heavy.
+                num_workers = 0  # Safer default for Windows. Test if >0 helps your specific case.
+                logger.info(f"OS is Windows, num_workers defaulted to {num_workers}. "
+                            "Consider manual tuning if data loading is a bottleneck.")
+            else:
+                # A common heuristic: number of GPUs * 2 or 4, or num_cpus / 2
+                # Let's use a conservative approach:
+                num_workers = max(1, available_cpus // 2) if available_cpus > 2 else (1 if available_cpus > 0 else 0)
+                num_workers = min(num_workers, 10)  # Cap at 8 to avoid excessive resource usage
+
+            # If dataset is small and __getitem__ is trivial (e.g., pre-loaded tensors),
+            # num_workers > 0 might add overhead.
+            # For GEPDataset (once preprocessed and cached), data is in memory, so __getitem__ is fast.
+            # In such cases, num_workers=0 or 1 might be optimal.
+            # This heuristic is a general starting point; empirical testing is best.
+            logger.info(f"num_workers not specified, automatically set to {num_workers} "
+                        f"(available CPUs: {available_cpus}).")
+        else:
+            num_workers = 0  # Fallback if os.cpu_count() is not available
+            logger.info(f"Could not determine CPU count, defaulting num_workers to {num_workers}.")
+
+    # Decide on persistent_workers default
+    if persistent_workers is None:
+        persistent_workers = True if num_workers > 0 else False
+
+    # pin_memory is only effective when using CUDA
+    actual_pin_memory = pin_memory if torch.cuda.is_available() else False
+
+    return DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=shuffle,
+        collate_fn=collate_fn,
+        pin_memory=actual_pin_memory,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+    )
+
+
 class PLTrainer(L.LightningModule):
     """PyTorch Lightning-based trainer for BaseAE models."""
 
@@ -36,6 +110,7 @@ class PLTrainer(L.LightningModule):
         self,
         model: BaseAE,
         training_config: BaseTrainerConfig,
+        debug_model: Optional[bool] = False,
     ):
         """Initializes the PLTrainer.
 
@@ -47,6 +122,7 @@ class PLTrainer(L.LightningModule):
         self.model = model
         self.training_config = training_config
         self.model_name = model.model_name
+        self.debug_model = debug_model
         # self.save_hyperparameters(training_config)  # TODO
 
     def forward(self, inputs: Dict[str, Any], **kwargs) -> Any:
@@ -100,22 +176,22 @@ class PLTrainer(L.LightningModule):
         else:
             return {"optimizer": optimizer}
 
-    def predict(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        """Generates predictions from the model."""
-        self.model.eval()
-        with torch.no_grad():
-            model_out = self(inputs)
-            reconstructions = model_out.recon_x.cpu().detach()[
-                : min(inputs["data"].shape[0], 10)
-            ]
-            z_enc = model_out.z[: min(inputs["data"].shape[0], 10)]
-            z = torch.randn_like(z_enc)
-            normal_generation = self.model.decoder(z).reconstruction.detach().cpu()
-        return {
-            "true_data": inputs["data"][: min(inputs["data"].shape[0], 10)],
-            "reconstructions": reconstructions,
-            "generations": normal_generation,
-        }
+    # def predict(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    #     """Generates predictions from the model."""
+    #     self.model.eval()
+    #     with torch.no_grad():
+    #         model_out = self(inputs)
+    #         reconstructions = model_out.recon_x.cpu().detach()[
+    #             : min(inputs["data"].shape[0], 10)
+    #         ]
+    #         z_enc = model_out.z[: min(inputs["data"].shape[0], 10)]
+    #         z = torch.randn_like(z_enc)
+    #         normal_generation = self.model.decoder(z).reconstruction.detach().cpu()
+    #     return {
+    #         "true_data": inputs["data"][: min(inputs["data"].shape[0], 10)],
+    #         "reconstructions": reconstructions,
+    #         "generations": normal_generation,
+    #     }
 
     def loss_monitor(self, loss_types: tuple=('loss',), step: str='train', output: ModelOutput=None) -> None:
         """
@@ -132,25 +208,13 @@ class PLTrainer(L.LightningModule):
                     loss_name = 'train_loss'
                 elif step == 'val' and loss_type == 'loss':
                     loss_name = 'val_loss'
-                self.log(loss_name, output.get(loss_type), on_step=True if step=='train' else False,
-                         on_epoch=True if step=='val' else False,
-                         prog_bar=True, logger=True)
-
-
-def get_dataloader(
-    dataset: BaseDataset,
-    batch_size: int,
-    num_workers: int,
-    shuffle: bool,
-) -> DataLoader:
-    """Creates a DataLoader for the given dataset."""
-    return DataLoader(
-        dataset=dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        shuffle=shuffle,
-        collate_fn=collate_dataset_output,
-    )
+                if self.debug_model:
+                    self.log(loss_name, output.get(loss_type), on_step=True if step=='train' else False,
+                             on_epoch=True if step=='val' else False,
+                             prog_bar=True, logger=True)
+                else:
+                    self.log(loss_name, output.get(loss_type), on_step=False, on_epoch=True,
+                             prog_bar=True, logger=True)
 
 
 class BaseTrainerL:
@@ -164,6 +228,7 @@ class BaseTrainerL:
         eval_dataset: Optional[Union[BaseDataset, DataLoader]] = None,
         training_config: Optional[BaseTrainerConfig] = None,
         n_early_stopping_patience: int = 10,
+        debug_model: Optional[bool] = False,
     ):
         """Initializes the Trainer.
 
@@ -199,6 +264,7 @@ class BaseTrainerL:
                 batch_size=training_config.per_device_train_batch_size,
                 num_workers=training_config.train_dataloader_num_workers,
                 shuffle=True,
+                collate_fn=collate_dataset_output,
             )
 
         if eval_dataset is not None:
@@ -214,6 +280,7 @@ class BaseTrainerL:
                     batch_size=training_config.per_device_eval_batch_size,
                     num_workers=training_config.eval_dataloader_num_workers,
                     shuffle=False,
+                    collate_fn=collate_dataset_output,
                 )
         else:
             logger.info(
@@ -225,7 +292,7 @@ class BaseTrainerL:
         self.train_loader = train_loader
         self.eval_loader = eval_loader
 
-        self.pl_model = PLTrainer(model, training_config)
+        self.pl_model = PLTrainer(model, training_config, debug_model=debug_model)
 
         self.model_dir = result_dir
 
@@ -237,11 +304,10 @@ class BaseTrainerL:
 
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.model_dir,
-            filename="checkpoint_{epoch}",
-            every_n_epochs=self.training_config.steps_saving
-            if self.training_config.steps_saving
-            else 1,
-            save_top_k=0,
+            filename="best_model_epoch={epoch}",
+            monitor="val_loss",
+            mode="min",
+            save_top_k=1,
         )
         lr_monitor = LearningRateMonitor(logging_interval='epoch')
         csv_logger = CSVLogger(save_dir=self.model_dir, name="training_logs")

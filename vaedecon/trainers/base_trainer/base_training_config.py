@@ -1,6 +1,6 @@
 import os
 from dataclasses import field
-from typing import Union
+from typing import Union, Optional
 import torch.nn as nn
 from ...config import BaseConfig
 
@@ -52,8 +52,8 @@ class BaseTrainerConfig(BaseConfig):
     per_device_train_batch_size: int = 64
     per_device_eval_batch_size: int = 64
     num_epochs: int = 100
-    train_dataloader_num_workers: int = 0
-    eval_dataloader_num_workers: int = 0
+    train_dataloader_num_workers: Optional[int] = None  # None means it will be set depending on the system and cpus
+    eval_dataloader_num_workers: Optional[int] = None
     optimizer_cls: str = "Adam"
     optimizer_params: Union[dict, None] = None
     scheduler_cls: Union[str, None] = None
@@ -74,6 +74,7 @@ class BaseTrainerConfig(BaseConfig):
     # The number of epochs to wait before stopping the training if no improvement is observed.
     n_early_stopping_patience: int = 5
     devices: Union[int, str] = 1  # the number of gpus to use for training
+    debug_model: bool = False  # if True, the model will be trained on a small subset of the data for debugging purposes
 
     def __post_init__(self):
         """Check compatibility and sets up distributed training"""

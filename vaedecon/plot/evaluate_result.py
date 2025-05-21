@@ -858,10 +858,10 @@ def plot_single_cell_gep(
     query_inx = np.array([sample_ids.index(i) for i in query_ids])
     for i, cell_type in enumerate(cell_types):
         result_file_path = os.path.join(
-            sc_gep_result_dir, f"recon_sc_gep_{cell_type}_top{n_samples}_samples.csv"
+            sc_gep_result_dir, f"recon_sct_gep_{cell_type}_from_{n_samples}_bulksamples.csv"
         )
         result_file_path_ground_truth = os.path.join(
-            sc_gep_result_dir, f"sc_gep_{cell_type}_top{n_samples}_samples.csv"
+            sc_gep_result_dir, f"sct_gep_{cell_type}_from_{n_samples}_bulksamples.csv"
         )
         y = pd.read_csv(result_file_path_ground_truth, index_col=0)
         y = y.rename(columns=selected_sample2cell_id_mapping)

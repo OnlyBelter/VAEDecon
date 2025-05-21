@@ -1,5 +1,5 @@
 from .vae import VAE, VAEConfig
-from .auto_model import AutoModel
+from .auto_model import AutoModel, AutoConfig
 from .base import BaseAE, BaseModelConfig
 
 
@@ -9,4 +9,5 @@ __all__ = [
     "AutoModel",
     "BaseAE",
     "BaseModelConfig",
+    "AutoConfig",
 ]

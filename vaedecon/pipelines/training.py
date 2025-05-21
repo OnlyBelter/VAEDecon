@@ -94,7 +94,8 @@ class TrainingPipeline(Pipeline):
                  model: BaseAE = None,
                  trainer_cls: Type[BaseTrainerL] = None,
                  training_config=None,
-                 result_dir: str = None):
+                 result_dir: str = None,
+                 debug_model: Optional[bool] = False):
         super().__init__()
         if training_config is None:
             training_config = BaseTrainerConfig(name='VAETrainerConfig')
@@ -110,6 +111,7 @@ class TrainingPipeline(Pipeline):
         self.trainer_cls = trainer_cls
         self.n_early_stopping_patience = training_config.n_early_stopping_patience
         self.result_dir = result_dir  # model directory
+        self.debug_model = debug_model
         # self.final_output_dir = os.path.join(self.result_dir, "final_model")
 
     def _prepare_data(
@@ -174,6 +176,7 @@ class TrainingPipeline(Pipeline):
             eval_dataset=eval_dataset,
             training_config=self.training_config,
             n_early_stopping_patience=self.n_early_stopping_patience,
+            debug_model=self.debug_model,
         )
 
         self.trainer = trainer
