@@ -1,4 +1,5 @@
 import os
+import logging
 from typing import Optional, List
 
 import pandas as pd
@@ -17,8 +18,11 @@ from ...models.base import (ModelOutput, reparameterize_dirichlet, LOGVAR_CLAMP_
 from ...models.nn.positional_encoding import PositionalEncoding
 # from .common_functions_for_gnn import build_network, nx_to_pyg_edge_index
 
-
 # EXPRESSION_CUTOFF = 0.0
+logger = logging.getLogger(__name__)
+console = logging.StreamHandler()
+logger.addHandler(console)
+logger.setLevel(logging.INFO)
 
 
 class EncoderSGNN(BaseEncoder):
@@ -137,10 +141,11 @@ class EncoderSGNN(BaseEncoder):
             gene_hidden_dim=self.gene_hidden_dim,
             num_layers=self.num_layers,
             drop_p=self.drop_p,
-            num_genes=self.gnn_n_genes)
+            # num_genes=self.gnn_n_genes,
+            latent_dim=self.cell_latent_dim)
         # cell-level MLP -> mu/logvar/proportion heads
         self.cell_mlp = nn.Sequential(
-            nn.Linear(self.gnn_n_genes, self.embd_col_dim),  # Input is output of PPIEncoder
+            nn.Linear(self.gene_hidden_dim * self.cell_latent_dim, self.embd_col_dim),  # Input is output of PPIEncoder
             nn.LeakyReLU(inplace=True)
         )
         # self.gcc_mu_list = nn.ModuleList(
@@ -264,6 +269,22 @@ class EncoderSGNN(BaseEncoder):
 
         return output
 
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Runs the GNN and MLP layers to extract features before the final VAE heads.
+        """
+        current_device = self.device_param.device
+        x = x.to(current_device)
+
+        x_sub = x[:, self.input_gene_filter_indices]
+        x_sub = x_sub.unsqueeze(-1)
+        gf = self.gene_features.unsqueeze(0).expand(x_sub.shape[0], -1, -1)
+        node_features = torch.cat([x_sub, gf], dim=-1)
+
+        gene_embeddings_from_gnn = self.encoder(node_features, self.edge_index)
+        cell_embedding_before_heads = self.cell_mlp(gene_embeddings_from_gnn)
+        return cell_embedding_before_heads  # This is the tensor before gnn_dd_alpha etc.
+
     def get_config(self):
         return {"params": {"args": self.args.to_dict()},
                 "module_name": self.__class__.__module__,
@@ -275,27 +296,28 @@ class PPIEncoder(L.LightningModule):
     def __init__(self,
                  in_feats: int,
                  gene_hidden_dim: int,
-                 num_genes: int,
+                 latent_dim: int,
                  num_layers=3,
-                 drop_p=0.25):
+                 drop_p=0.1):
         """
         Construct a GNN encoder only using the PPI network.
         :param in_feats: The number of input features for each gene (1 for expression values, more for other features)
         :param gene_hidden_dim:
         :param num_layers:
         :param drop_p:
+        :param latent_dim: The number of output features for each gene after pooling
         """
         super().__init__()
         self.device_param = nn.Parameter(torch.empty(0))  # To easily get the device of the model
-        self.output_norm = nn.LayerNorm(num_genes)
+        # self.output_norm = nn.LayerNorm(num_genes)
 
         layers_list = []
-        current_dim = in_feats
+        current_sage_in_dim = in_feats
 
         for i in range(num_layers):
             # Last layer might have different activation or no activation if followed by another transform
-            is_last_layer_in_gnn_stack = (i == num_layers - 1)
-            sage_layer = SAGEConv(current_dim, gene_hidden_dim)
+            # is_last_layer_in_gnn_stack = (i == num_layers - 1)
+            sage_conv_module = SAGEConv(current_sage_in_dim, gene_hidden_dim)
             # For SAGEConv, output is (num_nodes, gene_hidden_dim).
             # If input is (batch_size, num_nodes, current_dim), PyG SAGEConv might expect
             # (batch_size * num_nodes, current_dim) and then reshape.
@@ -303,57 +325,38 @@ class PPIEncoder(L.LightningModule):
             # If x is (B, N, F_in), need to be careful.
             # Assuming input to SAGEConv will be (B * N, F_in)
 
-            block_layers = [
-                (sage_layer, 'x, edge_index -> x'),  # SAGEConv updates node features
-                (nn.Dropout(drop_p), 'x -> x'),  # Dropout layer
+            block_definition = [
+                (sage_conv_module, 'x, edge_index -> x1'),  # SAGEConv updates node features
+                (nn.Dropout(drop_p), 'x1 -> x2'),  # Dropout layer
             ]
-            if not is_last_layer_in_gnn_stack:
-                block_layers.append(nn.LeakyReLU(inplace=True))
-            # else:
+            if i < num_layers - 1:  # Apply activation only for all but the last layer
+                block_definition.append((nn.GELU(), 'x2 -> x_out'))
+            else:
+                block_definition.append((nn.Identity(), 'x2 -> x_out'))  # No activation for the last layer
                 # No activation or Softplus like before if needed, but often not for intermediate GNN layer.
                 # block_layers.append(nn.Softplus()) # As in original code for the last internal GNN layer
                                                     # but consider if this is the true "output" layer.
 
-            layers_list.append(Sequential('x, edge_index', block_layers))
-            current_dim = gene_hidden_dim # Update current_dim for the next layer
-
-        # layers = [
-        #     Sequential('x, edge_index', [
-        #     # First GraphSAGE layer with input dimension 1
-        #     # TODO: monitor: here will become to a 3 dimensional tensor
-        #     (SAGEConv(in_feats, gene_hidden_dim), 'x, edge_index -> x1'),
-        #     (nn.Dropout(drop_p), 'x1 -> x2'),
-        #     nn.LeakyReLU(inplace=True),
-        # ])]
-        # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # self.col_dim = col_dim
-        # self.gene_hidden_dim = gene_hidden_dim
-        # self.num_layers = num_layers
-        # self.gene_features = gene_features
-
-        # First, define the initial layer separately (input dimension is 1 for gene expression values, the features for each gene)
-
-        # # Then define the remaining layers
-        # for _ in range(num_layers - 1):
-        #     layers.append(Sequential('x, edge_index', [
-        #         # Subsequent GraphSAGE layers with input dimension self.col_dim
-        #         (SAGEConv(gene_hidden_dim, gene_hidden_dim), 'x, edge_index -> x1'),
-        #         (nn.Dropout(drop_p), 'x1 -> x2'),
-        #         nn.LeakyReLU(inplace=True) if _ != num_layers - 2 else nn.Softplus(),
-        #     ]))
+            layers_list.append(Sequential('x, edge_index', block_definition))
+            current_sage_in_dim = gene_hidden_dim # Update current_dim for the next layer
 
         # Combine the initial layer with subsequent layers
         self.gnn_layers = nn.ModuleList(layers_list)
 
-        # After GNN layers, features are (batch_size, n_genes, gene_hidden_dim)
-        # We need to get to (batch_size, n_genes) for the cell_mlp
+        # Transformation heads after GNN feature extraction
+        # 1. Project node features from gene_hidden_dim to k_dim
+        self.feature_projector = nn.Linear(gene_hidden_dim, gene_hidden_dim)
 
-        # # Final layer to reduce from (batch_size, num_genes, hidden_dim) to (batch_size, final_dim)
-        # # Attention-based pooling
-        # self.attention = nn.Sequential(
-        #     nn.Linear(gene_hidden_dim, 1, bias=False),
-        #     nn.Softmax(dim=2)
-        # )
+        # 2. Pool across the gene dimension (num_genes -> m_dim)
+        # Adaptive pooling is simple. It will pool the sequence of 'num_genes' to 'm_dim'.
+        # It expects input (Batch, Channels, Length_to_pool)
+        # Here, Channels = k_dim, Length_to_pool = num_genes
+        self.node_pooler = nn.AdaptiveAvgPool1d(output_size=latent_dim)
+        # Alternatives: nn.AdaptiveMaxPool1d(m_dim), or more complex attention/top-k pooling.
+
+        # 3. Optional LayerNorm on the final flattened output
+        self.output_norm = nn.LayerNorm(gene_hidden_dim * latent_dim)
+        self.final_activation = nn.GELU()  # Activation after pooling and flattening
 
     def forward(self, x: torch.Tensor, ppi_edge_index):
         """
@@ -373,14 +376,56 @@ class PPIEncoder(L.LightningModule):
         # knn_edge_index = knn_edge_index.to(self.device)
         embedded = x
 
-        for layer in self.gnn_layers:
-            embedded = layer(embedded, ppi_edge_index)  # Now embedded is (B*N, gene_hidden_dim)
+        for gnn_block in self.gnn_layers:
+            embedded = gnn_block(x=embedded, edge_index=ppi_edge_index)  # Now embedded is (B*N, gene_hidden_dim)
 
         # Reshape back to (batch_size, n_genes, gene_hidden_dim)
         embedded = embedded.view(batch_size, num_genes, -1)  # -1 infers gene_hidden_dim
 
-        embedded = embedded.sum(-1)  # sum over the gene features
-        # embedded = F.softmax(embedded, dim=-1)  # (batch_size, n_genes)， normalize to sum to 1 across genes
-        embedded = self.output_norm(embedded)
+        # 1. Project features of each node to gene_hidden_dim, same dimension as the GNN output
+        # Input: (B, num_genes, gene_hidden_dim) -> Output: (B, num_genes, gene_hidden_dim)
+        projected_node_features = self.feature_projector(embedded)
+        projected_node_features = F.gelu(projected_node_features)  # Activation after projection
 
-        return embedded
+        # 2. Pool from num_genes to latent_dim
+        # AdaptiveAvgPool1d expects input (Batch, Channels, Length_to_pool)
+        # So, permute (B, num_genes, latent_dim) to (B, latent_dim, num_genes)
+        permuted_for_pooling = projected_node_features.permute(0, 2, 1)
+
+        pooled_features: torch.Tensor
+        if current_device.type == 'mps':
+            input_length = permuted_for_pooling.shape[2]  # This is N_genes
+            # output_length for AdaptiveAvgPool1d is a single int (m_dim)
+            output_length = self.node_pooler.output_size if isinstance(self.node_pooler.output_size, int) else \
+            self.node_pooler.output_size[0]
+
+            if input_length % output_length != 0:
+                logger.debug(  # Using debug level as this might be frequent
+                    f"MPS device: AdaptiveAvgPool1d input length {input_length} "
+                    f"is not divisible by output_size {output_length}. "
+                    f"Moving tensor to CPU for this operation and back to {current_device}."
+                )
+                cpu_permuted_for_pooling = permuted_for_pooling.cpu()
+                cpu_pooled_features = self.node_pooler(cpu_permuted_for_pooling)
+                pooled_features = cpu_pooled_features.to(current_device)  # Move back
+            else:
+                # Input is divisible, attempt on MPS (though PyTorch issue #96056 suggests some divisible cases might also fail)
+                # If this still fails for divisible cases, you might need to always use CPU for MPS here.
+                pooled_features = self.node_pooler(permuted_for_pooling)
+        else:
+            # Not on MPS device, standard behavior
+            pooled_features = self.node_pooler(permuted_for_pooling)
+
+        # pooled_features = self.node_pooler(permuted_for_pooling)  # Output: (B, latent_dim, gene_hidden_dim)
+
+        # Permute back to have m_dim then k_dim for intuitive flattening
+        m_k_features = pooled_features.permute(0, 2, 1)  # Output: (B, gene_hidden_dim, latent_dim)
+
+        # 3. Flatten to (B, gene_hidden_dim * latent_dim)
+        output_flat = m_k_features.reshape(batch_size, -1)
+
+        # 4. Optional final LayerNorm and activation
+        output_processed = self.output_norm(output_flat)
+        output_processed = self.final_activation(output_processed)  # Added activation
+
+        return output_processed

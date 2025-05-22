@@ -12,7 +12,7 @@ from ..data import GEPDataset
 from ..models import AutoModel, BaseAE, AutoConfig
 from ..models.base import BaseEncoder
 from ..models.gnn import EncoderGNN, EncoderSGNN
-from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding
+from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding, EncoderHybrid
 from ..models.vae import VAE, VAEConfig
 from ..trainers import BaseTrainerConfig, BaseTrainerL, PLTrainer
 from ..pipelines import TrainingPipeline
@@ -33,19 +33,25 @@ def create_model(model_config: VAEConfig, encoder_cls_name_list: list[str], deco
         max_len=model_config.n_cell_types
     )
     encoders = []
+    kwargs: Dict[str, Any] = {
+        "args": model_config,
+        "position_encoding": position_encoding,
+    }
     for encoder_cls_name in encoder_cls_name_list:
         encoder_cls_name = encoder_cls_name.lower()
         if encoder_cls_name == "EncoderSGNN".lower():
             encoder_cls = EncoderSGNN
         elif encoder_cls_name == "EncoderMLP".lower():
             encoder_cls = EncoderMLP
+        elif encoder_cls_name == "EncoderHybrid".lower():
+            encoder_cls = EncoderHybrid
+            kwargs_for_hybrid = kwargs.copy()
+            kwargs_for_hybrid['mlp_encoder'] = EncoderMLP(**kwargs)
+            kwargs_for_hybrid['gnn_encoder'] = EncoderSGNN(**kwargs)
+            kwargs = kwargs_for_hybrid.copy()
         else:
             raise NotImplementedError(encoder_cls_name)
 
-        kwargs = {
-            "args": model_config,
-            "position_encoding": position_encoding
-        }
         encoders.append(encoder_cls(**kwargs))
 
     decoder = decoder_cls(args=model_config)

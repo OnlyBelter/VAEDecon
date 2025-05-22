@@ -7,10 +7,10 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vaedecon.models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
+from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
                                   LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
                                   BaseEncoder, BaseDecoder)
-from vaedecon.models.nn.positional_encoding import PositionalEncoding
+from ...models.nn.positional_encoding import PositionalEncoding
 # from ....models.base.base_utils import
 # from ..base_architectures import BaseDecoder, BaseEncoder
 # from ..utils import ResBlock
@@ -30,7 +30,7 @@ class EncoderMLP(BaseEncoder):
         self.using_positional_encoding = args.using_positional_encoding
 
         # Hidden dimension for the MLP body
-        self.hidden_dims = getattr(args, 'encoder_hidden_dims', [1024, 512, 512])
+        self.hidden_dims: List[int] = getattr(args, 'encoder_hidden_dims', [1024, 512, 512])
 
         self.dropout_rate = args.encoder_dropout_rate
         self.layers = nn.ModuleList()
@@ -42,7 +42,7 @@ class EncoderMLP(BaseEncoder):
         if self.using_positional_encoding:
             if position_encoding is None:
                 raise ValueError("If using positional encoding, the position_encoding parameter must be provided.")
-            self.position_encoding = position_encoding()
+            self.position_encoding = position_encoding
 
         # Build MLP layers
         current_input_size = np.prod(self.input_dim)
@@ -200,6 +200,17 @@ class EncoderMLP(BaseEncoder):
         output['cell_prop'] = cell_prop
 
         return output
+
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Runs the MLP layers to extract features before the final VAE heads.
+        """
+        current_device = self.device_param.device  # Ensure device_param is defined
+        x = x.to(current_device)
+        out = x.view(x.size(0), -1)  # flatten the input
+        for i, layer_block in enumerate(self.layers):
+            out = layer_block(out)
+        return out  # This is the tensor before fc_mu_logvar and fc_dd_alpha
 
     def get_config(self):
         return {"params": {"args": self.args.to_dict()},

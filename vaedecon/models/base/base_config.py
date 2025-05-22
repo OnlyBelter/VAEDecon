@@ -1,6 +1,7 @@
-from typing import Tuple, Union, Literal
+from typing import Tuple, Union, Literal, List, Optional
 
 import torch
+# from numba import Optional
 
 from vaedecon.config import BaseConfig
 # from ..nn.positional_encoding import PositionalEncoding
@@ -36,6 +37,8 @@ class BaseModelConfig(BaseConfig):
     ppi_file_path: str = ''  # file path to the PPI
     gene_hidden_dim: int = 10  # each gene expression value (or with other features) will be increased to this dimension (1d -> higher dimension)
     biogrid_flag: bool = False  # if True, the columns for net are set to ["Source", "Target"] only
+    fusion_hidden_dims: Union[Tuple[int, ...], None] = (1024,)  # hidden dimensions for the fusion model (MLP + SGNN)
+    fusion_dropout_rate: Union[Tuple[float, ...], None] = (0.1,)  # dropout rates for the fusion model (MLP + SGNN)
     # gene_list: list = [] # gene list in the input data
 
 

@@ -498,47 +498,6 @@ class VAE(BaseAE):
 
         return fused_mu, fused_logvar
 
-    # @staticmethod
-    # def _poe_fuse_per_celltype(
-    #     mu_lists: List[torch.Tensor],
-    #     logvar_lists: List[torch.Tensor],
-    #     mu_mean_list: List[torch.Tensor],
-    #     logvar_mean_list: List[torch.Tensor],
-    #     eps: float = 1e-6,
-    #     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    #     """
-    #     Perform product of experts (PoE) fusion for the mean and log variance of the latent space.
-    #
-    #     Args:
-    #         mu_lists: List of means from different encoders. Each element: (batch_size, latent_dim, n_cell_types).
-    #         logvar_lists: List of log variances from different encoders. Each element: (batch_size, latent_dim, n_cell_types).
-    #         eps: Small value to avoid division by zero.
-    #
-    #     Returns:
-    #         Fused mean and log variance.
-    #     """
-    #     # PoE fusion
-    #     fused_mu, fused_logvar = [], []
-    #     for mu1, lv1, mu2, lv2 in zip(mu_lists[0], logvar_lists[0], mu_lists[1], logvar_lists[1]):
-    #         # PoE fusion for each cell type
-    #         prec1 = torch.exp(-lv1)  # precision, (batch_size, latent_dim)
-    #         prec2 = torch.exp(-lv2)
-    #
-    #         # fused precision
-    #         mu_poe = (mu1 * prec1 + mu2 * prec2) / (prec1 + prec2 + eps)
-    #
-    #         # fused log variance
-    #         lv_poe = -torch.log(prec1 + prec2 + eps)
-    #
-    #         fused_mu.append(mu_poe)
-    #         fused_logvar.append(lv_poe)
-    #     # Each mu_mean_list: (batch_size, latent_dim)
-    #     mu_mean = torch.stack(mu_mean_list, dim=2).mean(dim=2)  # (batch_size, latent_dim)
-    #     logvar_mean = torch.stack(logvar_mean_list, dim=2).mean(dim=2)
-    #     fused_mu = torch.stack(fused_mu, dim=0)  # (batch_size, latent_dim, n_cell_types)
-    #     fused_logvar = torch.stack(fused_logvar, dim=0)  # (batch_size, latent_dim, n_cell_types)
-    #     return fused_mu, fused_logvar, mu_mean, logvar_mean
-
     def _poe_fuse_per_celltype(
             self,
             mu_lists_celltype: List[torch.Tensor],
