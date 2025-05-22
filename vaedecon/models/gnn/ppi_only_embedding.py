@@ -302,8 +302,8 @@ class PPIEncoder(L.LightningModule):
         """
         Construct a GNN encoder only using the PPI network.
         :param in_feats: The number of input features for each gene (1 for expression values, more for other features)
-        :param gene_hidden_dim:
-        :param num_layers:
+        :param gene_hidden_dim: the dimension of gene features
+        :param num_layers: The number of GNN layers
         :param drop_p:
         :param latent_dim: The number of output features for each gene after pooling
         """
@@ -347,12 +347,13 @@ class PPIEncoder(L.LightningModule):
         # 1. Project node features from gene_hidden_dim to k_dim
         self.feature_projector = nn.Linear(gene_hidden_dim, gene_hidden_dim)
 
-        # 2. Pool across the gene dimension (num_genes -> m_dim)
-        # Adaptive pooling is simple. It will pool the sequence of 'num_genes' to 'm_dim'.
-        # It expects input (Batch, Channels, Length_to_pool)
-        # Here, Channels = k_dim, Length_to_pool = num_genes
-        self.node_pooler = nn.AdaptiveAvgPool1d(output_size=latent_dim)
-        # Alternatives: nn.AdaptiveMaxPool1d(m_dim), or more complex attention/top-k pooling.
+        # 2. Using attention pooling across the gene dimension (num_genes -> m_dim)
+        # Attention Pooling
+        self.attention_queries = nn.Parameter(
+            torch.empty(1, latent_dim, gene_hidden_dim)
+        )
+        nn.init.xavier_uniform_(self.attention_queries)  # Initialize queries
+        self.attention_scale_factor = 1.0 / (gene_hidden_dim ** 0.5)
 
         # 3. Optional LayerNorm on the final flattened output
         self.output_norm = nn.LayerNorm(gene_hidden_dim * latent_dim)
@@ -387,39 +388,22 @@ class PPIEncoder(L.LightningModule):
         projected_node_features = self.feature_projector(embedded)
         projected_node_features = F.gelu(projected_node_features)  # Activation after projection
 
-        # 2. Pool from num_genes to latent_dim
-        # AdaptiveAvgPool1d expects input (Batch, Channels, Length_to_pool)
-        # So, permute (B, num_genes, latent_dim) to (B, latent_dim, num_genes)
-        permuted_for_pooling = projected_node_features.permute(0, 2, 1)
+        # 2. Pool from num_genes to latent_dim by attention pooling
+        # Q: (1, M, K) -> broadcasts to (B, M, K)
+        # K_transposed: (B, K, N_genes)
+        attention_scores = torch.matmul(
+            self.attention_queries,
+            projected_node_features.transpose(-2, -1)
+        ) * self.attention_scale_factor
+        # attention_scores shape: (B, M (num_attention_outputs), N_genes)
 
-        pooled_features: torch.Tensor
-        if current_device.type == 'mps':
-            input_length = permuted_for_pooling.shape[2]  # This is N_genes
-            # output_length for AdaptiveAvgPool1d is a single int (m_dim)
-            output_length = self.node_pooler.output_size if isinstance(self.node_pooler.output_size, int) else \
-            self.node_pooler.output_size[0]
+        attention_weights = F.softmax(attention_scores, dim=-1)
+        # attention_weights shape: (B, M, N_genes)
 
-            if input_length % output_length != 0:
-                logger.debug(  # Using debug level as this might be frequent
-                    f"MPS device: AdaptiveAvgPool1d input length {input_length} "
-                    f"is not divisible by output_size {output_length}. "
-                    f"Moving tensor to CPU for this operation and back to {current_device}."
-                )
-                cpu_permuted_for_pooling = permuted_for_pooling.cpu()
-                cpu_pooled_features = self.node_pooler(cpu_permuted_for_pooling)
-                pooled_features = cpu_pooled_features.to(current_device)  # Move back
-            else:
-                # Input is divisible, attempt on MPS (though PyTorch issue #96056 suggests some divisible cases might also fail)
-                # If this still fails for divisible cases, you might need to always use CPU for MPS here.
-                pooled_features = self.node_pooler(permuted_for_pooling)
-        else:
-            # Not on MPS device, standard behavior
-            pooled_features = self.node_pooler(permuted_for_pooling)
-
-        # pooled_features = self.node_pooler(permuted_for_pooling)  # Output: (B, latent_dim, gene_hidden_dim)
-
-        # Permute back to have m_dim then k_dim for intuitive flattening
-        m_k_features = pooled_features.permute(0, 2, 1)  # Output: (B, gene_hidden_dim, latent_dim)
+        # m_k_features = attention_weights @ V (projected_node_features)
+        # (B, M, N_genes) @ (B, N_genes, K) -> (B, M, K)
+        m_k_features = torch.matmul(attention_weights, projected_node_features)
+        # Output: (B, latent_dim, gene_hidden_dim)
 
         # 3. Flatten to (B, gene_hidden_dim * latent_dim)
         output_flat = m_k_features.reshape(batch_size, -1)
