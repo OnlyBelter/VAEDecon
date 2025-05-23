@@ -285,6 +285,7 @@ class VAE(BaseAE):
         """
         # batch_size, n_genes = x.shape
         batch_size, latent_dim, n_cell_types = mu_types.shape
+        lo = self.model_config.loss_coefficient
 
         # --- Reconstruction loss ---
         # flat_x = x.reshape(batch_size, -1)  # (batch_size, n_genes)
@@ -303,9 +304,13 @@ class VAE(BaseAE):
 
         # --- Representation loss for gene means and stds ---
         # Sum over all genes first, then mean over cell types
-        gene_mean_loss = F.mse_loss(recon_gene_mean, self.g_mean, reduction="none")
-        gene_mean_loss = (gene_mean_loss * self.w).sum(dim=0).mean(dim=0)  # a scalar
-        gene_std_loss = F.mse_loss(recon_gene_std, self.g_std, reduction="none").sum(dim=0).mean(dim=0)  # a scalar
+        if lo['gene_mean_std_weight'] != 0:
+            gene_mean_loss = F.mse_loss(recon_gene_mean, self.g_mean, reduction="none")
+            gene_mean_loss = (gene_mean_loss * self.w).sum(dim=0).mean(dim=0)  # a scalar
+            gene_std_loss = F.mse_loss(recon_gene_std, self.g_std, reduction="none").sum(dim=0).mean(dim=0)  # a scalar
+        else:
+            gene_mean_loss = torch.zeros(1, device=device)
+            gene_std_loss = torch.zeros(1, device=device)
 
         # --- KL divergence loss for cellular proportions ---
         # Prior: Uniform Dirichlet distribution (all alpha = 1)
@@ -374,17 +379,13 @@ class VAE(BaseAE):
         else:
             repulsion_loss = torch.zeros(batch_size, device=x.device)
 
-        # print('recon_loss_by_decoder.shape', recon_loss_by_decoder.shape, 'kld.shape', kld.shape,
-        #       'cell_prop_loss.shape', cell_prop_loss.shape)
-        lo = self.model_config.loss_coefficient
         total_loss = (
                 recon_loss_by_conv
                 + beta * (kld_z_types + kld_p)
                 # + lo['kld'] * kld_z_types
                 + lo['cell_prop'] * cell_prop_loss
                 + gamma * repulsion_loss
-                + gene_mean_loss
-                + gene_std_loss
+                + lo['gene_mean_std_weight'] * (gene_mean_loss + gene_std_loss)
         ).mean(dim=0)  # average over batch size, scalar
 
         return (total_loss,
