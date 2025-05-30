@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
+import warnings
 
 from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
                                   LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS, BaseEncoder)
@@ -112,7 +113,7 @@ class EncoderHybrid(BaseEncoder):
     def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None, eps: float = EPS) -> ModelOutput:
         current_device = self.device_param.device
         x = x.to(current_device)
-        if y is not None:
+        if y:
             y = y.to(current_device)
 
         # 1. Extract features from child encoders
@@ -154,10 +155,14 @@ class EncoderHybrid(BaseEncoder):
         if self.predict_cell_prop:
             dd_alpha_final = F.softplus(self.fc_dd_alpha(final_embedding)) + eps
             cell_prop_final = reparameterize_dirichlet(dd_alpha_final, device=current_device)
-        elif y is not None:
+        elif y:
             cell_prop_final = y  # Use ground truth y directly
         else:
-            raise ValueError('If self.predict_cell_prop is False, y (ground truth cell proportions) must be provided.')
+            cell_prop_final = None
+            warnings.warn('If self.predict_cell_prop is False, '
+                          'y (cell proportions of cell types) must be provided during training. '
+                          'It can be predicted by DeSide.')
+            # raise ValueError('If self.predict_cell_prop is False, y (ground truth cell proportions) must be provided.')
 
         # 6. Positional Encoding
         if self.using_positional_encoding and self.position_encoding_module is not None and cell_prop_final is not None:
@@ -192,6 +197,8 @@ class EncoderHybrid(BaseEncoder):
                 output_cell_prop = cell_prop_final.squeeze(-1)
             output['cell_prop'] = output_cell_prop
             output['cell_type_existed'] = (output_cell_prop >= 0.01).float()
+        else:
+            output['cell_prop'] = None
 
         return output
 
