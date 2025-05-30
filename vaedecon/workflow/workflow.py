@@ -7,7 +7,7 @@ from typing import Dict, Any, Type, Union, TypeVar, Sequence
 import torch
 from torch.utils.data import DataLoader
 
-from ..utility import check_dir
+from ..utility import check_dir, non_log2log_cpm
 from ..data import GEPDataset
 from ..models import AutoModel, BaseAE, AutoConfig
 from ..models.base import BaseEncoder
@@ -129,6 +129,8 @@ def evaluate_model(
         device: str,
         pred_cell_prop_file_path: str = None,
         val_batch_size: int = None,
+        save_reconstructed_geps: bool = False,
+        dataset_type: str = 'training',  # or test, tcga
 ) -> Dict[str, Any]:
     """Evaluates the trained model on the test set."""
     test_set_result_dir = os.path.join(result_dir, "test_set")
@@ -138,7 +140,10 @@ def evaluate_model(
     check_dir(Path(cell_prop_result_dir))
     check_dir(Path(gep_result_dir))
 
-    true_cell_prop = test_set.get_cell_prop()
+    if dataset_type != 'tcga':
+        true_cell_prop = test_set.get_cell_prop()
+    else:
+        true_cell_prop = pd.DataFrame()
     cell_types = pd.read_csv(model_config.cell_type_fp, index_col=0, header=None).index.to_list()
     test_set_loader = DataLoader(test_set, batch_size=val_batch_size, shuffle=False)
     if pred_cell_prop_file_path is not None and os.path.exists(pred_cell_prop_file_path):
@@ -157,10 +162,11 @@ def evaluate_model(
                 pred_cell_prop = pred_a["pred_cell_prop"]
                 pred_cell_prop = pred_cell_prop.squeeze().detach().cpu().numpy()
             else:
-                if 'labels' in batch.keys():
+                if 'labels' in batch.keys() and batch['labels']:
                     pred_cell_prop = batch["labels"].squeeze().detach().cpu().numpy()
                 else:
-                    raise FileExistsError('Cell property prediction file not found.')
+                    pred_cell_prop = []
+                    # raise FileExistsError('Cell property prediction file not found.')
 
                 # TODO, check the order of labels, using the ground truth as the predicted cell prop
                 # pred_a = trained_model({"data": test_set.data.float().to(device),
@@ -169,7 +175,7 @@ def evaluate_model(
                 # pred_a = trained_model(test_set_loader)
             pred_cell_prop_list.append(pred_cell_prop)
             pred_results.append(pred_a)
-    if pred_cell_prop_all is not None:
+    if pred_cell_prop_all is not None and pred_cell_prop_list[0]:
         pred_cell_prop_all = np.concatenate(pred_cell_prop_list, axis=0)
     pred_all_dict = {}
     for a_result in pred_results:
@@ -180,16 +186,26 @@ def evaluate_model(
     for key, value in pred_all_dict.items():
         if value[0] is not None and len(value[0].shape) > 0:
             pred_all_dict[key] = torch.cat(value, dim=0)
-
-    pred_cell_prop_df = pd.DataFrame(
-        pred_cell_prop_all,
-        index=test_set.get_sample_ids(),
-        columns=cell_types,
-    )
-    pred_cell_prop_file_path = os.path.join(
-        test_set_result_dir, "predicted_cell_prop.csv"
-    )
-    pred_cell_prop_df.to_csv(pred_cell_prop_file_path)
+    if pred_cell_prop_all is not None:
+        pred_cell_prop_df = pd.DataFrame(
+            pred_cell_prop_all,
+            index=test_set.get_sample_ids(),
+            columns=cell_types,
+        )
+        pred_cell_prop_file_path = os.path.join(
+            test_set_result_dir, "predicted_cell_prop.csv"
+        )
+        pred_cell_prop_df.to_csv(pred_cell_prop_file_path)
+    if save_reconstructed_geps:
+        recon_geps = pred_all_dict["recon_x_all_types"].detach().cpu().numpy()  # in TPM format
+        for i, ct in enumerate(cell_types):
+            current_ct_file_path = os.path.join(gep_result_dir, f'reconstructed_gep_{ct}_log2p1.csv')
+            if not os.path.exists(current_ct_file_path):
+                current_recon_ct = recon_geps[:, :, i]
+                current_recon_df = pd.DataFrame(data=current_recon_ct, index=test_set.get_sample_ids(),
+                                                columns=test_set.get_gene_list())
+                current_recon_df = non_log2log_cpm(current_recon_df, transpose=False)
+                current_recon_df.to_csv(current_ct_file_path, float_format='%.3f')
     return {
         "true_cell_prop": true_cell_prop,
         "pred_cell_prop_file_path": pred_cell_prop_file_path,

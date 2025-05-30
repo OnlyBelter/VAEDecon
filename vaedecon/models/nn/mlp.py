@@ -5,6 +5,7 @@ from typing import List, Optional, Union
 import torch
 import numpy as np
 import torch.nn as nn
+import warnings
 import torch.nn.functional as F
 
 from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
@@ -160,12 +161,13 @@ class EncoderMLP(BaseEncoder):
             dd_alpha = F.softplus(self.fc_dd_alpha(out)) + eps
             output['dd_alpha'] = dd_alpha
             cell_prop = reparameterize_dirichlet(dd_alpha, device=current_device)
-        elif y is not None:
+        elif y:
             cell_prop = y.to(current_device)
         else:
-            raise NotImplementedError('If self.predict_cell_prop is False, '
-                                      'y (cell proportions of cell types) must be provided. '
-                                      'It can be predicted by DeSide.')
+            cell_prop = None
+            warnings.warn('If self.predict_cell_prop is False, '
+                          'y (cell proportions of cell types) must be provided during training. '
+                          'It can be predicted by DeSide.')
         # Using position encoding to shift mu for each cell type, adding the positional encoding
         if self.using_positional_encoding and self.position_encoding is not None and cell_prop is not None:
             # Ensure cell_prop is (B, n_cell_types)
@@ -196,7 +198,8 @@ class EncoderMLP(BaseEncoder):
         output['mu_all_types'] = mu_all_types
         # output['log_var'] = log_var
         # output['logvar_list'] = logvar_list
-        output['cell_type_existed'] = (cell_prop >= 0.01).float()  # (B, n_cell_types)
+        if cell_prop is not None:
+            output['cell_type_existed'] = (cell_prop >= 0.01).float()  # (B, n_cell_types)
         output['cell_prop'] = cell_prop
 
         return output

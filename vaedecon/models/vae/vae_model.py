@@ -101,7 +101,7 @@ class VAE(BaseAE):
         x = inputs["data"].to(current_device)
         batch_size = x.shape[0]
         y = inputs.get("labels")  # cell proportions of 16 cell types
-        if y is not None:
+        if y:
             y = y.to(current_device)
 
         # Call all encoders, and collect the outputs
@@ -172,7 +172,11 @@ class VAE(BaseAE):
         if self.model_config.scaling_by_constant:
             recon_x_all_types = recon_x_all_types * 20.0
         recon_x_all_types = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
-        cell_prop = cell_prop.reshape(-1, n_cell_types, 1).to(current_device)  # (batch_size, n_cell_types, 1)
+        if cell_prop is not None:
+            cell_prop = cell_prop.reshape(-1, n_cell_types, 1).to(current_device)  # (batch_size, n_cell_types, 1)
+        else:
+            # This only used for model evaluation, will not be used for training
+            cell_prop = torch.zeros(size=(batch_size, n_cell_types, 1), device=current_device)
         # y = y.reshape(-1, n_cell_types, 1).to(device)  # (batch_size, n_cell_types, 1)
         recon_x_conv = torch.bmm(recon_x_all_types, cell_prop)  # (batch_size, n_genes, 1)
 
@@ -269,8 +273,8 @@ class VAE(BaseAE):
         Args:
             x: Input data.
             recon_x_conv: Reconstructed data from cell-type-specific GEPs x cellular proportions.
-            mu_types: List of cell type means.
-            logvar_types: List of cell type log variances.
+            mu_types: A matrix of cell type means. (B, Latent, C)
+            logvar_types: A matrix of cell type log variances. (B, Latent, C)
             y: Cell proportions of the input data.
             dd_alpha: Dirichlet distribution parameters.
             mu_prior: Learnable prior means for the latent space.
@@ -332,34 +336,25 @@ class VAE(BaseAE):
             # cell_prop_loss = F.kl_div(normalized_dd_alpha.log(), y, reduction='batchmean')  # (batch_size,)
 
 
-        # --- Gaussian KL divergence loss for GEPs ---
+        # --- Gaussian KL divergence loss for GEPs of each cell type ---
         # Prior: Gaussian distribution (mean=0, std=1)
-        # mu = torch.stack(mu_list, dim=1).to(self.device)  # (batch_size, n_cell_types, latent_dim)
-        # logvar = torch.stack(logvar_list, dim=1).to(self.device)  # (batch_size, n_cell_types, latent_dim)
-        # mu_mean = mu_list.mean(dim=-1) # (batch_size, latent_dim)
-        # logvar_mean = logvar_list.mean(dim=-1)   # (batch_size, latent_dim)
-        # var_mean = logvar_mean.exp()  # (batch_size, latent_dim)
-        # logvar_mean = torch.log(var_mean).to(self.device)
-        # logvar_mean = logvar_list.mean(dim=-1).to(self.device)  # (batch_size, latent_dim)
-        # var = logvar_mean.exp()  # (batch_size, n_cell_types, latent_dim)
-        # if mu_prior is not None:
-        #     # (n_cell_types, latent_dim) -> (1, n_cell_types, latent_dim), then later it can broadcast to (batch_size, n_cell_types, latent_dim)
-        #     mu_prior = mu_prior.unsqueeze(0).to(self.device)
-        #     diff = mu - mu_prior  # (batch_size, n_cell_types, latent_dim)
-        #     kld_bt = -0.5 * torch.sum(1 + logvar - diff.pow(2) - var, dim=-1)  # sum over latent_dim
-        # else:
-        ## kld = - torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
-        # kld_z_per_type = -0.5 * torch.sum(1 + logvar_types - mu_types.pow(2) - logvar_types.exp(),
-        #                                   dim=2)  # [batch_size, latent_dim]
-        # kld_z_types = kld_z_per_type.sum(dim=1)  # Sum over latent dim, [batch_size]
-        # kld_z_types = -0.5 * torch.sum(1 + logvar_mean - mu_mean.pow(2) - logvar_mean.exp(), dim=-1)  # sum over latent_dim
-
-        log_var = logvar_mean.reshape(-1, self.model_config.latent_dim)  # batch_size x latent_dim
-        # Since we decomposed bulk GEP into cell type-specific GEPs,
-        # we need to sum over the embeddings of all cell types
-        mu = mu_mean.reshape(-1, self.model_config.latent_dim)
-        # https://stats.stackexchange.com/a/370048
-        kld_z_types = - 0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
+        if lo['kld_type'] == 'sep':
+            kld_z_types = -0.5 * torch.sum(
+                1 + logvar_types - mu_types.pow(2) - logvar_types.exp(),
+                dim=1  # sum over latent_dim
+            ).sum(dim=-1)  # sum over n_cell_types
+        elif lo['kld_type'] == 'sample':
+            mu_reshaped = mu_types.transpose(1, 2).reshape(-1, latent_dim)
+            logvar_reshaped = logvar_types.transpose(1, 2).reshape(-1, latent_dim)
+            kld_z_types = - 0.5 * torch.sum(1 + logvar_reshaped - mu_reshaped.pow(2) - logvar_reshaped.exp(), dim=-1)
+            kld_z_types = kld_z_types.reshape(-1, n_cell_types).sum(dim=-1)
+        else:  # kld_type is ave
+            log_var = logvar_mean.reshape(-1, self.model_config.latent_dim)  # batch_size x latent_dim
+            # Since we decomposed bulk GEP into cell type-specific GEPs,
+            # we need to sum over the embeddings of all cell types
+            mu = mu_mean.reshape(-1, self.model_config.latent_dim)
+            # https://stats.stackexchange.com/a/370048
+            kld_z_types = - 0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
 
         # --- Repulsion loss ---
         if gamma > 0:

@@ -256,7 +256,7 @@ class GEPDataset(Dataset):
                  force_reprocess: bool = False):
         """
         Args:
-            file_paths: List of file paths containing the H5AD data.
+            file_paths: List of file paths containing the H5AD data, or .csv file in TPM format with shape (samples x genes)
             processed_data_dir: Directory to save/load preprocessed data.
             scaling_by_constant: If True, scales by 20.0. If float, scales by that value.
             gene_list_file: Path to a file containing the gene list for filtering.
@@ -315,10 +315,16 @@ class GEPDataset(Dataset):
         all_cell_prop_dfs = []
         for path_str in file_paths:
             log_message(f"Reading data from {path_str}")
-            h5ad_obj = ReadH5AD(path_str)  # Assuming ReadH5AD takes Path
-            gep_data_df = h5ad_obj.get_df(convert_to_tpm=True)
+            if path_str.endswith(".h5ad"):
+                h5ad_obj = ReadH5AD(path_str)  # Assuming ReadH5AD takes Path
+                gep_data_df = h5ad_obj.get_df(convert_to_tpm=True)
+                cell_prop_df = h5ad_obj.get_cell_fraction()
+            elif path_str.endswith(".csv"):
+                gep_data_df = pd.read_csv(path_str, index_col=0)
+                cell_prop_df = pd.DataFrame()  # No cellular proportion during evaluation, such as TCGA
+            else:
+                raise ValueError(f"Unrecognized file format: {path_str}")
             log_message(f"Raw data shape from {Path(path_str).name}: {gep_data_df.shape}")
-            cell_prop_df = h5ad_obj.get_cell_fraction()
             all_data_dfs.append(gep_data_df)
             all_cell_prop_dfs.append(cell_prop_df)
 
@@ -329,15 +335,18 @@ class GEPDataset(Dataset):
         self.gep_data_df = pd.concat(all_data_dfs, axis=0, join='inner')
         self.cell_prop_df = pd.concat(all_cell_prop_dfs, axis=0, join='inner')
         del all_data_dfs, all_cell_prop_dfs  # Free memory
-
-        assert len(self.gep_data_df) == len(self.cell_prop_df), "Sample count mismatch post-concat"
-        assert np.all(self.gep_data_df.index == self.cell_prop_df.index), "Sample ID/order mismatch post-concat"
+        if not self.cell_prop_df.empty:
+            assert len(self.gep_data_df) == len(self.cell_prop_df), "Sample count mismatch post-concat"
+            assert np.all(self.gep_data_df.index == self.cell_prop_df.index), "Sample ID/order mismatch post-concat"
 
         if gene_list_file is not None:
             target_genes = load_gene_list(Path(gene_list_file))
+            # align with the loaded gene list
+            gep_exp_obj = ReadExp(self.gep_data_df, exp_type='TPM')
+            gep_exp_obj.align_with_gene_list(gene_list=target_genes, fill_not_exist=True)
             # Keep only genes present in both the data and the target list
-            common_genes = self.gep_data_df.columns.intersection(target_genes)
-            self.gep_data_df = self.gep_data_df[common_genes]
+            # common_genes = self.gep_data_df.columns.intersection(target_genes)
+            self.gep_data_df = gep_exp_obj.get_exp()
             log_message(f"Data shape after common gene filtering: {self.gep_data_df.shape}")
 
         if remove_low_var_genes:
@@ -357,17 +366,23 @@ class GEPDataset(Dataset):
             self.data = self.data / scaling_value
 
         # Ensure labels align with the potentially filtered/reordered gep_data_df
-        self.labels = torch.from_numpy(self.cell_prop_df.loc[self.gep_data_df.index].values.astype(np.float32))
+        if not self.cell_prop_df.empty:
+            self.labels = torch.from_numpy(self.cell_prop_df.loc[self.gep_data_df.index].values.astype(np.float32))
+            self.cell_types = self.cell_prop_df.columns.to_list()  # Cell types don't change by gene filtering
+        else:
+            self.labels = []
+            self.cell_types = []
 
         self.gene_list = self.gep_data_df.columns.to_list()
-        self.cell_types = self.cell_prop_df.columns.to_list()  # Cell types don't change by gene filtering
         self.sample_ids = self.gep_data_df.index.to_list()
 
         # Save processed data to cache
         torch.save(self.data, self.cached_data_path)
-        torch.save(self.labels, self.cached_labels_path)
+        if self.labels is not None:
+            torch.save(self.labels, self.cached_labels_path)
         self._save_list_txt(self.gene_list, self.cached_gene_list_path)
-        self._save_list_txt(self.cell_types, self.cached_cell_types_path)
+        if self.cell_types is not None:
+            self._save_list_txt(self.cell_types, self.cached_cell_types_path)
         self._save_list_txt(self.sample_ids, self.cached_sample_ids_path)
         log_message(f"Finished processing and saved data to {self.processed_data_dir}")
 
@@ -406,7 +421,10 @@ class GEPDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict:
         x = self.data[index]
-        y = self.labels[index]
+        if self.labels:
+            y = self.labels[index]
+        else:
+            y = []
         return DatasetOutput(data=x, labels=y)  # Or simply {'data': x, 'labels': y}
 
     def save_gene_list(self, file_path: Union[str, Path]):
