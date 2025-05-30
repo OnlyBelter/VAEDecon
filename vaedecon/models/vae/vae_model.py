@@ -338,6 +338,8 @@ class VAE(BaseAE):
 
         # --- Gaussian KL divergence loss for GEPs of each cell type ---
         # Prior: Gaussian distribution (mean=0, std=1)
+        if not 'kld_type' in lo.keys():
+            lo['kld_type'] = 'ave'
         if lo['kld_type'] == 'sep':
             kld_z_types = -0.5 * torch.sum(
                 1 + logvar_types - mu_types.pow(2) - logvar_types.exp(),
