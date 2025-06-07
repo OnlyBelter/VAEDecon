@@ -176,7 +176,7 @@ def evaluate_model(
                 # pred_a = trained_model(test_set_loader)
             pred_cell_prop_list.append(pred_cell_prop)
             pred_results.append(pred_a)
-    if pred_cell_prop_all is not None and pred_cell_prop_list[0]:
+    if pred_cell_prop_all is not None and pred_cell_prop_list[0] is not None and pred_cell_prop_list[0].size > 0:
         pred_cell_prop_all = np.concatenate(pred_cell_prop_list, axis=0)
     pred_all_dict = {}
     for a_result in pred_results:
