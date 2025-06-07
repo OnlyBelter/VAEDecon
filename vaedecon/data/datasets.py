@@ -421,7 +421,7 @@ class GEPDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict:
         x = self.data[index]
-        if self.labels:
+        if self.labels is not None and len(self.labels) > 0:
             y = self.labels[index]
         else:
             y = []

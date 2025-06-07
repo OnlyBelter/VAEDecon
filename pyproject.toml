@@ -61,6 +61,7 @@ dependencies = [
     "lightning==2.5.1",
     "torch-geometric==2.6.1",
     "networkx>=3.1",
+    "igraph==0.11.8",
 
 #    'tensorrt',
 #    "sphinx_rtd_theme"

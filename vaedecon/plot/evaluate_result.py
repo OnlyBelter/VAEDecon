@@ -128,7 +128,7 @@ class ScatterPlot(object):
             plt.xlabel(x_label)
         else:
             plt.xlabel('y_true')
-        if y_label:
+        if y_label is not None and len(y_label) > 0:
             plt.ylabel(y_label)
         elif pred_by:
             plt.ylabel('Pred by {} (n={})'.format(pred_by, self.y.shape[0]))
@@ -300,7 +300,7 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
         plt.xlabel(x_label)
     else:
         plt.xlabel('y_true')
-    if y_label:
+    if y_label is not None and len(y_label) > 0:
         plt.ylabel(y_label)
     else:
         plt.ylabel('y_predicted')

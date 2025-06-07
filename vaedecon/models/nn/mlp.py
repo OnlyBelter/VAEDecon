@@ -161,7 +161,7 @@ class EncoderMLP(BaseEncoder):
             dd_alpha = F.softplus(self.fc_dd_alpha(out)) + eps
             output['dd_alpha'] = dd_alpha
             cell_prop = reparameterize_dirichlet(dd_alpha, device=current_device)
-        elif y:
+        elif y is not None and len(y) > 0:
             cell_prop = y.to(current_device)
         else:
             cell_prop = None

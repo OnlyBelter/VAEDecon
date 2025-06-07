@@ -101,7 +101,7 @@ class VAE(BaseAE):
         x = inputs["data"].to(current_device)
         batch_size = x.shape[0]
         y = inputs.get("labels")  # cell proportions of 16 cell types
-        if y:
+        if y is not None and len(y) > 0:
             y = y.to(current_device)
 
         # Call all encoders, and collect the outputs

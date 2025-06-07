@@ -113,7 +113,7 @@ class EncoderHybrid(BaseEncoder):
     def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None, eps: float = EPS) -> ModelOutput:
         current_device = self.device_param.device
         x = x.to(current_device)
-        if y:
+        if y is not None and len(y) > 0:
             y = y.to(current_device)
 
         # 1. Extract features from child encoders
@@ -155,7 +155,7 @@ class EncoderHybrid(BaseEncoder):
         if self.predict_cell_prop:
             dd_alpha_final = F.softplus(self.fc_dd_alpha(final_embedding)) + eps
             cell_prop_final = reparameterize_dirichlet(dd_alpha_final, device=current_device)
-        elif y:
+        elif y is not None and len(y) > 0:
             cell_prop_final = y  # Use ground truth y directly
         else:
             cell_prop_final = None
