@@ -162,7 +162,8 @@ def evaluate_model(
                 pred_cell_prop = pred_a["pred_cell_prop"]
                 pred_cell_prop = pred_cell_prop.squeeze().detach().cpu().numpy()
             else:
-                if 'labels' in batch.keys() and batch['labels']:
+                # if 'labels' in batch.keys() and batch['labels']:
+                if 'labels' in batch and batch['labels'] is not None and batch['labels'].numel() > 0:
                     pred_cell_prop = batch["labels"].squeeze().detach().cpu().numpy()
                 else:
                     pred_cell_prop = []
