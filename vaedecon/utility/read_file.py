@@ -459,6 +459,7 @@ def load_or_compute_gene_mean_std(
     input_gene_list_fp: str,
     scaling_by_constant: bool,
     log_fn=print,
+    out_fp=None,
 ) -> pd.DataFrame:
     """
     1) Determine the gene‐mean/std filename based on `scaling_by_constant`
@@ -466,13 +467,14 @@ def load_or_compute_gene_mean_std(
     3) Otherwise, (re)compute it via `get_gene_mean_std_across_cell_types`
        and then load & return it
     """
-    base_dir = Path(sct_gep_fp).parent
-    fname = (
-        "gene_mean_std_log2p1_scaled.csv"
-        if scaling_by_constant
-        else "gene_mean_std_log2p1.csv"
-    )
-    out_fp = base_dir / fname
+    # base_dir = Path(sct_gep_fp).parent
+    # fname = (
+    #     "gene_mean_std_log2p1_scaled.csv"
+    #     if scaling_by_constant
+    #     else "gene_mean_std_log2p1.csv"
+    # )
+    # out_fp = base_dir / fname
+    out_fp = out_fp
 
     def file_matches(df: pd.DataFrame) -> bool:
         # exact same genes, same order
