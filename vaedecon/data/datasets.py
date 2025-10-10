@@ -573,6 +573,8 @@ def find_sct_gep_of_bulk_sample(
 
     # Create a map from selected_cell_id to cell_type for efficient lookup
     cell_id_to_type_map = filtered_mapping_df.set_index('selected_cell_id')['cell_type']
+    # remove duplicated indices if any
+    cell_id_to_type_map = cell_id_to_type_map[~cell_id_to_type_map.index.duplicated(keep='first')].to_dict()
 
     for cell_type_target in cell_types:  # Iterate through requested cell types
         # Find which of the loaded and processed single cells belong to this cell_type_target

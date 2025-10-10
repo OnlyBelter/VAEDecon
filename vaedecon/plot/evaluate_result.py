@@ -278,7 +278,8 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
         _y = y_pred.loc[:, col]
         all_x.append(_x)
         all_y.append(_y)
-        plt.scatter(_x, _y, label=col, s=6, alpha=1 - 0.05 * i, rasterized=rasterized)
+        alpha = 1 - 0.05 * i if i < 10 else 0.5
+        plt.scatter(_x, _y, label=col, s=6, alpha=alpha, rasterized=rasterized)
         if annotation:
             x_left, x_right = plt.xlim()
             y_bottom, y_top = plt.ylim()
@@ -851,12 +852,15 @@ def plot_single_cell_gep(
     fig, axes = plt.subplots(nrows, ncols, sharex=False, sharey=False, figsize=(8, 8))
     plt.subplots_adjust(wspace=0.1, hspace=0.25)
 
-    selected_sample2cell_id = pd.read_csv(selected_sample2cell_id_file_path, index_col='selected_cell_id')
-    selected_sample2cell_id = selected_sample2cell_id.rename(columns={selected_sample2cell_id.columns[0]: 'sample_id'})
-    selected_sample2cell_id_mapping = selected_sample2cell_id['sample_id'].to_dict()
-    query_ids = list(set(selected_sample2cell_id_mapping.values()))
-    query_inx = np.array([sample_ids.index(i) for i in query_ids])
+    # cell ids may have duplicate records
+    selected_sample2cell_id = pd.read_csv(selected_sample2cell_id_file_path, index_col=0)
+    # selected_sample2cell_id = selected_sample2cell_id.rename(columns={selected_sample2cell_id.columns[0]: 'sample_id'})
+
     for i, cell_type in enumerate(cell_types):
+        selected_sample2cell_id_mapping = selected_sample2cell_id.loc[ selected_sample2cell_id['cell_type'] == cell_type,'selected_cell_id'].to_dict()
+        query_ids = list(set(selected_sample2cell_id_mapping.keys()))
+        query_inx = np.array([sample_ids.index(i) for i in query_ids])
+
         result_file_path = os.path.join(
             sc_gep_result_dir, f"recon_sct_gep_{cell_type}_from_{n_samples}_bulksamples.csv"
         )
@@ -864,7 +868,12 @@ def plot_single_cell_gep(
             sc_gep_result_dir, f"sct_gep_{cell_type}_from_{n_samples}_bulksamples.csv"
         )
         y = pd.read_csv(result_file_path_ground_truth, index_col=0)
-        y = y.rename(columns=selected_sample2cell_id_mapping)
+        # if y.shape[1] != len(query_ids):  # some cell ids are missing by deduplication
+        y = y.loc[:, [selected_sample2cell_id_mapping[i] for i in query_ids]]
+        y.columns = query_ids
+        # reverse the key and value in the dict
+        # cell_id2sample_id_mapping = {v: k for k, v in selected_sample2cell_id_mapping.items()}
+        # y = y.rename(columns=query_ids)
         if not os.path.exists(result_file_path):
             recon_sc_gep_ct = recon_sc_gep[query_inx, :, i]
             recon_sc_gep_ct_pd = pd.DataFrame(
