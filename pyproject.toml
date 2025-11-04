@@ -51,7 +51,7 @@ dependencies = [
     "sphinx>=6.0",
     "myst-parser>=0.13.6",
     "fsspec",
-    "h5py",
+    "h5py==3.9",
     "huggingface_hub",
 #    "sphinx_book_theme",
     "jinja2<3.1",
