@@ -74,7 +74,7 @@ def set_fig_style(font_family=None, font_size=None):
         plt.style.use(['science', 'no-latex'])
     except:
         print('No science style')
-        sns.set(palette='muted', font_scale=1.5)
+        sns.set_theme(palette='muted', font_scale=1.5)
 
     mpl.rcParams['figure.dpi'] = 300
     mpl.rcParams['figure.facecolor'] = 'white'
@@ -283,20 +283,22 @@ def cal_relative_error(y_true, y_pred, max_error=None, min_error=None):
     return relative_error
 
 
-def calculate_rmse(y_true: pd.DataFrame, y_pred: pd.DataFrame):
+def calculate_rmse(y_true: pd.DataFrame, y_pred: pd.DataFrame, n_decimal: int = 3):
     """
     https://scikit-learn.org/stable/modules/generated/sklearn.metrics.mean_squared_error.html
     calculate the RMSE of each cell type by columns
     :param y_true: a dataFrame
         shape: number of samples x number of cell types
     :param y_pred: a dataFrame
+    :param n_decimal: float number rounded to n_decimal
     :return:
     """
     if y_true.shape[1] == 1:  # only one feature
         multioutput = 'uniform_average'
     else:  # multiple cell types
         multioutput = 'raw_values'
-    return root_mean_squared_error(y_true=y_true, y_pred=y_pred, multioutput=multioutput)
+    rmse = root_mean_squared_error(y_true=y_true, y_pred=y_pred, multioutput=multioutput)
+    return round(rmse, n_decimal)
 
 
 def calculate_r2(y_true, y_pred):
@@ -624,16 +626,18 @@ def non_log2cpm_tensor(exp: torch.Tensor, sum_exp=1e6) -> torch.Tensor:
         return exp / torch.sum(exp, -1).reshape((batch_size, n_cell_type, 1)) * sum_exp
 
 
-def get_corr(df_col1, df_col2, return_p_value=False) -> Union[float, tuple]:
+def get_corr(df_col1, df_col2, return_p_value=False, n_decimal=3) -> Union[float, tuple]:
     """
     calculate the correlation between two columns of dataframe
     :param df_col1: series, column1
     :param df_col2: series, column2
     :param return_p_value: if return p-value
+    :param n_decimal: float number rounded to n_decimal
     :return:
     """
     # correlation = np.corrcoef(df_col1, df_col2)
     corr, p_value = stats.pearsonr(df_col1, df_col2)
+    corr = round(corr, n_decimal)
     if return_p_value:
         return corr, p_value
     else:
@@ -989,11 +993,12 @@ def do_umap_analysis(exp_df, n_components=5, n_neighbors=15, min_dist=0.1,
     return umap_model
 
 
-def get_ccc(x, y):
+def get_ccc(x, y, n_decimal=3):
     # Concordance Correlation Coefficient(CCC), https://en.wikipedia.org/wiki/Concordance_correlation_coefficient
     vx, cov_xy, cov_xy, vy = np.cov(x, y, bias=True).flatten()
     mx, my = x.mean(), y.mean()
-    return 2 * cov_xy / (vx + vy + (mx - my) ** 2)
+    ccc = 2 * cov_xy / (vx + vy + (mx - my) ** 2)
+    return round(ccc, n_decimal)
 
 
 def get_x_by_pathway_network(x: pd.DataFrame, pathway_network: bool, pathway_mask: pd.DataFrame = None):

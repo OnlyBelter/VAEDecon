@@ -368,26 +368,31 @@ def compare_y_y_pred_subplot(y_true, y_pred,
     y_max = y_top
     plt.plot([0, max(x_max, y_max)], [0, max(x_max, y_max)], linestyle='--', color='tab:gray')
     if show_metrics:  # show metrics in test set
-        all_x = np.concatenate(all_x)
+        all_x = np.concatenate(all_x)  # 1d ndarray
         all_y = np.concatenate(all_y)
         corr, p_value = get_corr(all_x, all_y, return_p_value=True)
         rmse = calculate_rmse(y_true=pd.DataFrame(all_x), y_pred=pd.DataFrame(all_y))
-        plt.text(0.32 * x_max, 0.15 * y_max, '$r={:.2f}$'.format(corr), fontsize=5)
+        ccc = get_ccc(x=all_x, y=all_y)
+        plt.text(0.32 * x_max, 0.25 * y_max, r'$r$={}'.format(corr), fontsize=5)
         if p_value < 0.001:
-            plt.text(0.65 * x_max, 0.15 * y_max, '(p<0.001)'.format(p_value), fontsize=5)
+            plt.text(0.55 * x_max, 0.25 * y_max, r'($p$<0.001)', fontsize=5)
         else:
-            plt.text(0.65 * x_max, 0.15 * y_max, '(p={:.3f})'.format(p_value), fontsize=5)
-        plt.text(0.32 * x_max, 0.05 * y_max, '$RMSE={:.3f}$'.format(rmse), fontsize=5)
+            plt.text(0.55 * x_max, 0.25 * y_max, r'($p$={})'.format(p_value), fontsize=5)
+        plt.text(0.32 * x_max, 0.15 * y_max, r'RMSE={}'.format(rmse), fontsize=5)
+        plt.text(0.32 * x_max, 0.05 * y_max, r'CCC={}'.format(ccc), fontsize=5)
     if x_label is not None:
-        plt.xlabel(x_label)
+        plt.xlabel(x_label, fontsize=5)
     else:
         plt.xlabel('')
-    plt.ylabel('')
+    if y_label is not None:
+        plt.ylabel(y_label, fontsize=5)
+    else:
+        plt.ylabel('')
     if show_legend:
         plt.legend(loc='upper left', fontsize=5, ncol=1)
     # plt.tight_layout()
     if result_file_dir is not None:
-        plt.savefig(os.path.join(result_file_dir, 'y_true_vs_y_pred_{}.svg'.format(dataset_name)), dpi=300)
+        plt.savefig(os.path.join(result_file_dir, f'y_true_vs_y_pred_{dataset_name}.svg'), dpi=300)
     else:
         return ax
 

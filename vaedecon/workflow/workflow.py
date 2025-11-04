@@ -156,6 +156,7 @@ def evaluate_model(
     with torch.no_grad():
         for batch in test_set_loader:
             pred_a = trained_model(batch)  # A ModelOutput including 11 elements
+            pred_cell_prop = []
             if model_config.predict_cell_prop:
                 # pred_a = trained_model(batch)
                 # pred_a = trained_model(test_set_loader)
@@ -163,21 +164,26 @@ def evaluate_model(
                 pred_cell_prop = pred_cell_prop.squeeze().detach().cpu().numpy()
             else:
                 # if 'labels' in batch.keys() and batch['labels']:
-                if 'labels' in batch and batch['labels'] is not None and batch['labels'].numel() > 0:
-                    pred_cell_prop = batch["labels"].squeeze().detach().cpu().numpy()
-                else:
-                    pred_cell_prop = []
-                    # raise FileExistsError('Cell property prediction file not found.')
+                if 'labels' in batch and batch['labels'] is not None:
+                    labels = batch['labels']
+                    if isinstance(labels, list):
+                        if len(labels) > 0:
+                            labels = torch.tensor(labels)
+                            pred_cell_prop = labels.squeeze().detach().cpu().numpy()
 
-                # TODO, check the order of labels, using the ground truth as the predicted cell prop
-                # pred_a = trained_model({"data": test_set.data.float().to(device),
-                #                         "labels": torch.from_numpy(pred_cell_prop).float().to(device)})
-
-                # pred_a = trained_model(test_set_loader)
             pred_cell_prop_list.append(pred_cell_prop)
             pred_results.append(pred_a)
-    if pred_cell_prop_all is not None and pred_cell_prop_list[0] is not None and pred_cell_prop_list[0].size > 0:
-        pred_cell_prop_all = np.concatenate(pred_cell_prop_list, axis=0)
+    if pred_cell_prop_all is not None and pred_cell_prop_list[0] is not None:
+        first_item = pred_cell_prop_list[0]
+        is_valid = False
+        if isinstance(first_item, np.ndarray):
+            is_valid = pred_cell_prop_list[0].size > 0
+        elif isinstance(first_item, torch.Tensor):
+            is_valid = first_item.numel() > 0
+        elif isinstance(first_item, list):
+            is_valid = len(first_item) > 0
+        if is_valid:
+            pred_cell_prop_all = np.concatenate(pred_cell_prop_list, axis=0)
     pred_all_dict = {}
     for a_result in pred_results:
         for key, value in a_result.items():
