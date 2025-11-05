@@ -1056,7 +1056,7 @@ def log_message(message, level='info'):
 
 def generate_time_signature(model_name: str, naming_postfix: str = None) -> str:
     _training_signature = (
-        str(datetime.datetime.now())[0:19].replace(" ", "_").replace(":", "-")
+        str(datetime.datetime.now())[0:16].replace(" ", "_").replace(":", "-")
     )
     if naming_postfix is not None:
         _training_signature = f"{_training_signature}_{naming_postfix}"
