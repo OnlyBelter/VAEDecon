@@ -1019,7 +1019,7 @@ def get_x_by_pathway_network(x: pd.DataFrame, pathway_network: bool, pathway_mas
 
 
 @rank_zero_only
-def set_output_dir(output_dir: str, model_name: str, naming_postfix: str = None) -> str:
+def set_output_dir(output_dir: str, naming_postfix: str = None) -> str:
     """Create folder by current timestamp"""
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
@@ -1027,16 +1027,7 @@ def set_output_dir(output_dir: str, model_name: str, naming_postfix: str = None)
             f"Created {output_dir} folder since did not exist.\n"
         )
 
-    _training_signature = (
-        str(datetime.datetime.now())[0:19].replace(" ", "_").replace(":", "-")
-    )
-    if naming_postfix is not None:
-        _training_signature = f"{_training_signature}_{naming_postfix}"
-
-    training_dir = os.path.join(
-        output_dir,
-        f"{model_name}_training_{_training_signature}",
-    )
+    training_dir = os.path.join(output_dir, naming_postfix)
 
     if not os.path.exists(training_dir):
         os.makedirs(training_dir, exist_ok=True)
@@ -1061,6 +1052,16 @@ def log_message(message, level='info'):
     else:
         logger.info(message)
         logger.warning(f'Unknown log level: {level}')
+
+
+def generate_time_signature(model_name: str, naming_postfix: str = None) -> str:
+    _training_signature = (
+        str(datetime.datetime.now())[0:19].replace(" ", "_").replace(":", "-")
+    )
+    if naming_postfix is not None:
+        _training_signature = f"{_training_signature}_{naming_postfix}"
+
+    return f"{model_name}_training_{_training_signature}"
 
 
 if __name__ == '__main__':
