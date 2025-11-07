@@ -1,0 +1,64 @@
+# VAEDecon Configuration File
+
+data:
+  data_dir: './datasets/'
+  scaling_by_constant: true
+  remove_low_var_genes: false
+  force_reprocess: false
+
+training:
+  output_dir: './output/vae'
+  naming_postfix: 'my_experiment'
+  learning_rate: 0.00015
+  batch_size: 1024
+  num_epochs: 1000
+  n_early_stopping_patience: 15
+  devices: 1
+  device: 'auto'
+  optimizer_cls: 'Adam'
+  steps_saving: 0
+  debug_model: false
+  train_split: 0.8
+  val_split: 0.2
+
+model:
+  input_dim: [1, 17834]
+  latent_dim: 10
+  n_cell_types: 16
+  encoder_hidden_dims: [2048, 1024, 1024, 512]
+  decoder_hidden_dims: [512, 1024, 1024, 2048]
+  encoder_dropout_rate: [0, 0.1, 0.1, 0]
+  decoder_dropout_rate: [0, 0.1, 0.1, 0]
+  fusion_hidden_dims: [512, 256]
+  fusion_dropout_rate: [0.1, 0]
+  encoders: ['EncoderHybrid']
+  predict_cell_prop: false
+  loss_coefficient:
+    cell_prop: 100
+    beta: 2
+    gamma: 0.005
+    kld_type: 'ave'
+    weighting_gene_by_exp: true
+    weight_clamp_range: [0.2, 5]
+    gene_mean_std_weight: 1
+  gnn_n_genes: 12596
+  gnn_inter_col_dim: 500
+  gnn_embd_col_dim: 30
+  gnn_lambda_cols: 1.0
+  gnn_num_layers: 3
+  gnn_drop_p: 0.25
+  gene_hidden_dim: 10
+  using_positional_encoding: false
+  scaling_by_constant: true
+
+evaluation:
+  n_samples: 3
+  plot_cell_proportions: true
+  plot_single_cell_gep: true
+  plot_bulk_gep: true
+  plot_latent_space: true
+  n_neighbors: 15
+  min_dist: 0.1
+  figsize: [3.5, 3.5]
+  rasterized: true
+  show_metrics: true

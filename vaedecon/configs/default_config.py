@@ -1,0 +1,668 @@
+"""
+Default configuration for VAEDecon
+"""
+from dataclasses import dataclass, field
+from ..models.vae.vae_config import VAEConfig
+from typing import List, Dict, Optional, Tuple, Any
+import os
+from pathlib import Path
+from pydantic import Field, field_validator, model_validator
+
+@dataclass
+class DataConfig:
+    """dataset configuration"""
+    data_dir: str | Path = './datasets/'
+
+    # Training data
+    sct_file_path: str | Path = ''
+    simu_bulk_file_path: str | Path = ''
+
+    # Test data
+    test_set_file_path: str | Path = ''
+    test_set_sample2cell_id_file_path: str | Path = ''
+    sct_gep_file_path: str | Path = ''
+
+    # Additional files
+    pred_cell_prop_file_path: Optional[str] = None
+    cell_type2ave_exp_file_path: Optional[str] = None
+
+    # Processing options
+    scaling_by_constant: bool = True
+    remove_low_var_genes: bool = False
+    force_reprocess: bool = False
+
+    def __post_init__(self):
+        """auto-complete file paths"""
+        if not self.sct_file_path:
+            self.sct_file_path = os.path.join(
+                self.data_dir,
+                'generated_sc_dataset_12ds_n_base100_all_subtypes',
+                'simu_bulk_exp_SCT_POS_N100_test_log2cpm1p.h5ad'
+            )
+
+        if not self.simu_bulk_file_path:
+            self.simu_bulk_file_path = os.path.join(
+                self.data_dir,
+                'simulated_bulk_cell_dataset_subtypes_all_range',
+                'segment_12ds_0.95_n_base100_19cancer_pca_0.9_median_gep',
+                'simu_bulk_exp_Test_set1_log2cpm1p.h5ad'
+            )
+
+
+@dataclass
+class TrainingConfig:
+    """training configuration"""
+    # Basic settings
+    output_dir: str | Path = Path('./output/vae')
+    naming_postfix: str = 'default'
+
+    # Training hyperparameters
+    learning_rate: float = 1e-5
+    batch_size: int = 512
+    num_epochs: int = 1000
+
+    # Early stopping
+    n_early_stopping_patience: int = 15
+
+    # Device settings
+    devices: int = 1
+    device: str = 'auto'  # 'auto', 'cuda', 'cpu'
+
+    # Optimizer
+    optimizer_cls: str = 'Adam'
+
+    # Saving
+    steps_saving: int = 0
+
+    # Debug
+    debug_model: bool = False
+
+    # Data split
+    train_split: float = 0.8
+    val_split: float = 0.2
+
+
+# @dataclass
+# class ModelConfig(VAEConfig):
+#     """model configuration"""
+#     # Architecture
+#     input_dim: Tuple[int, int] = (1, 17834)
+#     latent_dim: int = 10
+#     n_cell_types: int = 16
+#
+#     # Encoder/Decoder
+#     encoder_hidden_dims: List[int] = field(default_factory=lambda: [2048, 1024, 1024, 512])
+#     decoder_hidden_dims: List[int] = field(default_factory=lambda: [512, 1024, 1024, 2048])
+#     encoder_dropout_rate: List[float] = field(default_factory=lambda: [0, 0.1, 0.1, 0])
+#     decoder_dropout_rate: List[float] = field(default_factory=lambda: [0, 0.1, 0.1, 0])
+#
+#     # Fusion layer
+#     fusion_hidden_dims: Tuple[int, int] = (512, 256)
+#     fusion_dropout_rate: Tuple[float, float] = (0.1, 0)
+#
+#     # Encoder types
+#     encoders: List[str] = field(default_factory=lambda: ['EncoderHybrid'])
+#
+#     # Cell proportion prediction
+#     predict_cell_prop: bool = False
+#
+#     # Loss coefficients
+#     loss_coefficient: Dict = field(default_factory=lambda: {
+#         "cell_prop": 0,
+#         "beta": 2,
+#         "gamma": 0.005,
+#         "kld_type": 'ave',
+#         "weighting_gene_by_exp": True,
+#         'weight_clamp_range': (0.2, 5),
+#         'gene_mean_std_weight': 1,
+#     })
+#
+#     # GNN settings
+#     gnn_n_genes: int = 12596
+#     gnn_inter_col_dim: int = 500
+#     gnn_embd_col_dim: int = 30
+#     gnn_lambda_cols: float = 1.0
+#     gnn_num_layers: int = 3
+#     gnn_drop_p: float = 0.25
+#     gene_hidden_dim: int = 10
+#
+#     # File paths (will be set automatically)
+#     ppi_file_path: str | Path  = ''
+#     input_gene_list_fp: str | Path  = ''
+#     cell_type_fp: str | Path  = ''
+#     gene_mean_std_fp: str | Path  = ''
+#     model_dir: str | Path = ''
+#
+#     # Other settings
+#     using_positional_encoding: bool = False
+#     scaling_by_constant: bool = True
+
+
+class ModelConfig(VAEConfig):
+    """Complete model configuration for VAE-based deconvolution.
+
+    This configuration extends VAEConfig with specific settings for the
+    hybrid encoder architecture, GNN components, and custom loss functions.
+
+    Attributes:
+        Architecture:
+            input_dim: Input dimensions (channels, features).
+            latent_dim: Latent space dimension per cell type.
+            n_cell_types: Number of cell types to deconvolve.
+
+        Encoder/Decoder:
+            encoder_hidden_dims: Hidden layer dimensions for encoder.
+            decoder_hidden_dims: Hidden layer dimensions for decoder.
+            encoder_dropout_rate: Dropout rates for encoder layers.
+            decoder_dropout_rate: Dropout rates for decoder layers.
+            encoders: List of encoder types (e.g., ['EncoderHybrid']).
+
+        Fusion Layer:
+            fusion_hidden_dims: Hidden dimensions for fusion layers.
+            fusion_dropout_rate: Dropout rates for fusion layers.
+
+        GNN Settings:
+            gnn_n_genes: Number of genes in GNN.
+            gnn_inter_col_dim: Intermediate dimension for cell embeddings.
+            gnn_embd_col_dim: Final cell embedding dimension.
+            gnn_lambda_cols: Weight for cell loss term.
+            gnn_num_layers: Number of GNN layers.
+            gnn_drop_p: Dropout probability in GNN.
+            gene_hidden_dim: Hidden dimension for gene projection.
+
+        Loss Configuration:
+            loss_coefficient: Dictionary containing:
+                - cell_prop: Weight for cell proportion loss
+                - beta: Weight for reconstruction loss
+                - gamma: Weight for regularization
+                - kld_type: Type of KLD computation ('ave' or 'sum')
+                - weighting_gene_by_exp: Weight genes by expression level
+                - weight_clamp_range: Range to clamp gene weights
+                - gene_mean_std_weight: Weight for gene mean/std loss
+
+        File Paths:
+            ppi_file_path: Path to PPI network file.
+            input_gene_list_fp: Path to input gene list.
+            cell_type_fp: Path to cell type definitions.
+            gene_mean_std_fp: Path to gene statistics.
+            model_dir: Directory to save model checkpoints.
+
+        Other Settings:
+            predict_cell_prop: Whether to predict cell proportions.
+            using_positional_encoding: Use positional encoding for cell types.
+            scaling_by_constant: Scale input by constant factor.
+    """
+
+    # ==================== Architecture ====================
+    input_dim: Tuple[int, int] = Field(
+        default=(1, 17834),
+        description="Input dimensions (channels, features)"
+    )
+    latent_dim: int = Field(
+        default=10,
+        gt=0,
+        description="Latent space dimension per cell type"
+    )
+    n_cell_types: int = Field(
+        default=16,
+        gt=0,
+        description="Number of cell types to deconvolve"
+    )
+
+    # ==================== Encoder/Decoder ====================
+    encoder_hidden_dims: List[int] = Field(
+        default_factory=lambda: [2048, 1024, 1024, 512],
+        description="Hidden layer dimensions for encoder"
+    )
+    decoder_hidden_dims: List[int] = Field(
+        default_factory=lambda: [512, 1024, 1024, 2048],
+        description="Hidden layer dimensions for decoder"
+    )
+    encoder_dropout_rate: List[float] = Field(
+        default_factory=lambda: [0.0, 0.1, 0.1, 0.0],
+        description="Dropout rates for encoder layers"
+    )
+    decoder_dropout_rate: List[float] = Field(
+        default_factory=lambda: [0.0, 0.1, 0.1, 0.0],
+        description="Dropout rates for decoder layers"
+    )
+
+    # ==================== Fusion Layer ====================
+    fusion_hidden_dims: Tuple[int, ...] = Field(
+        default=(512, 256),
+        description="Hidden dimensions for fusion layers"
+    )
+    fusion_dropout_rate: Tuple[float, ...] = Field(
+        default=(0.1, 0.0),
+        description="Dropout rates for fusion layers"
+    )
+
+    # ==================== Encoder Types ====================
+    encoders: List[str] = Field(
+        default_factory=lambda: ['EncoderHybrid'],
+        description="List of encoder types to use"
+    )
+
+    # ==================== Cell Proportion Prediction ====================
+    predict_cell_prop: bool = Field(
+        default=False,
+        description="Whether to predict cell type proportions"
+    )
+
+    # ==================== Loss Coefficients ====================
+    loss_coefficient: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "cell_prop": 0.0,
+            "beta": 2.0,
+            "gamma": 0.005,
+            "kld_type": 'ave',
+            "weighting_gene_by_exp": True,
+            'weight_clamp_range': (0.2, 5.0),
+            'gene_mean_std_weight': 1.0,
+        },
+        description="Loss function coefficients and settings"
+    )
+
+    # ==================== GNN Settings ====================
+    gnn_n_genes: int = Field(
+        default=12596,
+        gt=0,
+        description="Number of genes in GNN"
+    )
+    gnn_inter_col_dim: int = Field(
+        default=500,
+        gt=0,
+        description="Intermediate dimension for cell embeddings"
+    )
+    gnn_embd_col_dim: int = Field(
+        default=30,
+        gt=0,
+        description="Final cell embedding dimension"
+    )
+    gnn_lambda_cols: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="Weight for cell loss term"
+    )
+    gnn_num_layers: int = Field(
+        default=3,
+        ge=1,
+        description="Number of GNN layers"
+    )
+    gnn_drop_p: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description="Dropout probability in GNN"
+    )
+    gene_hidden_dim: int = Field(
+        default=10,
+        gt=0,
+        description="Hidden dimension for gene projection"
+    )
+
+    # ==================== File Paths ====================
+    ppi_file_path: Optional[Path] = Field(
+        default=None,
+        description="Path to protein-protein interaction network file"
+    )
+    input_gene_list_fp: Optional[Path] = Field(
+        default=None,
+        description="Path to input gene list file"
+    )
+    cell_type_fp: Optional[Path] = Field(
+        default=None,
+        description="Path to cell type definitions file"
+    )
+    gene_mean_std_fp: Optional[Path] = Field(
+        default=None,
+        description="Path to gene mean/std statistics file"
+    )
+    model_dir: Optional[Path] = Field(
+        default=None,
+        description="Directory to save model checkpoints and outputs"
+    )
+
+    # ==================== Other Settings ====================
+    using_positional_encoding: bool = Field(
+        default=False,
+        description="Use positional encoding to distinguish cell types"
+    )
+    scaling_by_constant: bool = Field(
+        default=True,
+        description="Scale input GEP data by constant factor (20 by default)"
+    )
+
+    # ==================== Validators ====================
+
+    @field_validator('input_dim')
+    @classmethod
+    def validate_input_dim(cls, v: Tuple[int, int]) -> Tuple[int, int]:
+        """Validate input dimensions are positive."""
+        if len(v) != 2:
+            raise ValueError(f"input_dim must be a tuple of length 2, got {len(v)}")
+        if any(dim <= 0 for dim in v):
+            raise ValueError(f"All input dimensions must be positive, got {v}")
+        return v
+
+    @field_validator('ppi_file_path', 'input_gene_list_fp', 'cell_type_fp',
+                     'gene_mean_std_fp', check_fields=False)
+    @classmethod
+    def validate_file_paths(cls, v: Optional[Path]) -> Optional[Path]:
+        """Validate file paths exist if provided."""
+        if v is not None:
+            # Convert string to Path if needed
+            if isinstance(v, str):
+                if v == '':  # Handle empty string
+                    return None
+                v = Path(v)
+
+            # Check if file exists (only warn, don't fail)
+            # This allows config creation before files exist
+            if not v.exists():
+                import warnings
+                warnings.warn(f"File path does not exist yet: {v}")
+
+        return v
+
+    @field_validator('model_dir')
+    @classmethod
+    def validate_model_dir(cls, v: Optional[Path]) -> Optional[Path]:
+        """Validate and create model directory if needed."""
+        if v is not None:
+            if isinstance(v, str):
+                if v == '':
+                    return None
+                v = Path(v)
+
+            # Create directory if it doesn't exist
+            if not v.exists():
+                v.mkdir(parents=True, exist_ok=True)
+
+        return v
+
+    @field_validator('encoder_hidden_dims', 'decoder_hidden_dims')
+    @classmethod
+    def validate_hidden_dims(cls, v: List[int]) -> List[int]:
+        """Ensure all hidden dimensions are positive."""
+        if not v:
+            raise ValueError("Hidden dimensions list cannot be empty")
+        if any(dim <= 0 for dim in v):
+            raise ValueError(f"All hidden dimensions must be positive, got {v}")
+        return v
+
+    @field_validator('encoder_dropout_rate', 'decoder_dropout_rate')
+    @classmethod
+    def validate_dropout_rates(cls, v: List[float]) -> List[float]:
+        """Ensure dropout rates are in [0, 1]."""
+        if not v:
+            raise ValueError("Dropout rate list cannot be empty")
+        if any(rate < 0 or rate > 1 for rate in v):
+            raise ValueError(f"Dropout rates must be in [0, 1], got {v}")
+        return v
+
+    @field_validator('fusion_dropout_rate')
+    @classmethod
+    def validate_fusion_dropout(cls, v: Tuple[float, ...]) -> Tuple[float, ...]:
+        """Ensure fusion dropout rates are in [0, 1]."""
+        if any(rate < 0 or rate > 1 for rate in v):
+            raise ValueError(f"Fusion dropout rates must be in [0, 1], got {v}")
+        return v
+
+    @field_validator('loss_coefficient')
+    @classmethod
+    def validate_loss_coefficient(cls, v: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate loss coefficient structure and values."""
+        required_keys = {
+            "cell_prop", "beta", "gamma", "kld_type",
+            "weighting_gene_by_exp", "weight_clamp_range", "gene_mean_std_weight"
+        }
+
+        # Check required keys
+        missing_keys = required_keys - set(v.keys())
+        if missing_keys:
+            raise ValueError(f"Missing required keys in loss_coefficient: {missing_keys}")
+
+        # Validate numeric values are non-negative
+        numeric_keys = ["cell_prop", "beta", "gamma", "gene_mean_std_weight"]
+        for key in numeric_keys:
+            if v[key] < 0:
+                raise ValueError(f"loss_coefficient['{key}'] must be non-negative, got {v[key]}")
+
+        # Validate kld_type
+        if v["kld_type"] not in ['ave', 'sum']:
+            raise ValueError(f"kld_type must be 'ave' or 'sum', got {v['kld_type']}")
+
+        # Validate weight_clamp_range
+        if not isinstance(v["weight_clamp_range"], (tuple, list)) or len(v["weight_clamp_range"]) != 2:
+            raise ValueError("weight_clamp_range must be a tuple/list of length 2")
+
+        min_weight, max_weight = v["weight_clamp_range"]
+        if min_weight >= max_weight:
+            raise ValueError(
+                f"weight_clamp_range min ({min_weight}) must be < max ({max_weight})"
+            )
+        if min_weight <= 0:
+            raise ValueError(f"weight_clamp_range min must be positive, got {min_weight}")
+
+        # Validate boolean
+        if not isinstance(v["weighting_gene_by_exp"], bool):
+            raise ValueError("weighting_gene_by_exp must be boolean")
+
+        return v
+
+    @field_validator('encoders')
+    @classmethod
+    def validate_encoders(cls, v: List[str]) -> List[str]:
+        """Validate encoder types."""
+        if not v:
+            raise ValueError("encoders list cannot be empty")
+
+        valid_encoders = ['EncoderHybrid', 'EncoderMLP', 'EncoderGNN']
+        for encoder in v:
+            if encoder not in valid_encoders:
+                raise ValueError(
+                    f"Unknown encoder type: {encoder}. "
+                    f"Valid types: {valid_encoders}"
+                )
+
+        return v
+
+    @model_validator(mode='after')
+    def validate_architecture_consistency(self):
+        """Ensure encoder/decoder architecture is consistent."""
+        # Check encoder dimensions and dropout rates match
+        if len(self.encoder_hidden_dims) != len(self.encoder_dropout_rate):
+            raise ValueError(
+                f"encoder_hidden_dims (len={len(self.encoder_hidden_dims)}) and "
+                f"encoder_dropout_rate (len={len(self.encoder_dropout_rate)}) "
+                f"must have the same length"
+            )
+
+        # Check decoder dimensions and dropout rates match
+        if len(self.decoder_hidden_dims) != len(self.decoder_dropout_rate):
+            raise ValueError(
+                f"decoder_hidden_dims (len={len(self.decoder_hidden_dims)}) and "
+                f"decoder_dropout_rate (len={len(self.decoder_dropout_rate)}) "
+                f"must have the same length"
+            )
+
+        # Check fusion dimensions and dropout rates match
+        if len(self.fusion_hidden_dims) != len(self.fusion_dropout_rate):
+            raise ValueError(
+                f"fusion_hidden_dims (len={len(self.fusion_hidden_dims)}) and "
+                f"fusion_dropout_rate (len={len(self.fusion_dropout_rate)}) "
+                f"must have the same length"
+            )
+
+        return self
+
+    @model_validator(mode='after')
+    def validate_cell_prop_consistency(self):
+        """Ensure cell proportion prediction settings are consistent."""
+        cell_prop_weight = self.loss_coefficient.get("cell_prop", 0)
+
+        if cell_prop_weight > 0 and not self.predict_cell_prop:
+            raise ValueError(
+                f"loss_coefficient['cell_prop'] = {cell_prop_weight} > 0 "
+                f"but predict_cell_prop=False. "
+                f"Either set predict_cell_prop=True or set cell_prop to 0."
+            )
+
+        if self.predict_cell_prop and cell_prop_weight == 0:
+            import warnings
+            warnings.warn(
+                "predict_cell_prop=True but loss_coefficient['cell_prop']=0. "
+                "Cell proportion predictions will not affect training."
+            )
+
+        return self
+
+    # @model_validator(mode='after')
+    # def validate_gene_mean_std_requirement(self):
+    #     """Ensure gene_mean_std_fp is provided when needed."""
+    #     if self.loss_coefficient.get("gene_mean_std_weight", 0) > 0:
+    #         if self.gene_mean_std_fp is None:
+    #             raise ValueError(
+    #                 "gene_mean_std_fp must be provided when "
+    #                 "loss_coefficient['gene_mean_std_weight'] > 0"
+    #             )
+    #
+    #     return self
+
+    @model_validator(mode='after')
+    def validate_gnn_consistency(self):
+        """Ensure GNN settings are consistent with input dimensions."""
+        # Check if number of genes matches input dimension
+        if self.input_dim[1] != self.gnn_n_genes:
+            import warnings
+            warnings.warn(
+                f"input_dim[1]={self.input_dim[1]} does not match "
+                f"gnn_n_genes={self.gnn_n_genes}. "
+                f"This may cause dimension mismatch errors."
+            )
+
+        return self
+
+    # ==================== Helper Methods ====================
+
+    def get_encoder_architecture(self) -> List[Tuple[int, float]]:
+        """Get encoder architecture as list of (dim, dropout) tuples."""
+        return list(zip(self.encoder_hidden_dims, self.encoder_dropout_rate))
+
+    def get_decoder_architecture(self) -> List[Tuple[int, float]]:
+        """Get decoder architecture as list of (dim, dropout) tuples."""
+        return list(zip(self.decoder_hidden_dims, self.decoder_dropout_rate))
+
+    def get_fusion_architecture(self) -> List[Tuple[int, float]]:
+        """Get fusion architecture as list of (dim, dropout) tuples."""
+        return list(zip(self.fusion_hidden_dims, self.fusion_dropout_rate))
+
+    def summary(self) -> Dict[str, Any]:
+        """Get configuration summary."""
+        return {
+            "model_type": "VAE-Deconvolution",
+            "input_shape": self.input_dim,
+            "latent_dim": self.latent_dim,
+            "n_cell_types": self.n_cell_types,
+            "encoder_layers": len(self.encoder_hidden_dims),
+            "decoder_layers": len(self.decoder_hidden_dims),
+            "fusion_layers": len(self.fusion_hidden_dims),
+            "gnn_layers": self.gnn_num_layers,
+            "total_params_estimate": self.estimate_total_params(),
+            "encoder_types": self.encoders,
+            "predict_cell_prop": self.predict_cell_prop,
+            "loss_settings": {
+                "beta": self.loss_coefficient["beta"],
+                "gamma": self.loss_coefficient["gamma"],
+                "cell_prop_weight": self.loss_coefficient["cell_prop"],
+            }
+        }
+
+    def estimate_total_params(self) -> int:
+        """Estimate total number of model parameters."""
+        total = 0
+
+        # Encoder parameters
+        prev_dim = self.input_dim[1]
+        for dim in self.encoder_hidden_dims:
+            total += prev_dim * dim + dim  # weights + bias
+            prev_dim = dim
+
+        # Latent layer
+        total += prev_dim * (self.latent_dim * self.n_cell_types) * 2  # mu and logvar
+
+        # Decoder parameters
+        prev_dim = self.latent_dim * self.n_cell_types
+        for dim in self.decoder_hidden_dims:
+            total += prev_dim * dim + dim
+            prev_dim = dim
+
+        # Output layer
+        total += prev_dim * self.input_dim[1] + self.input_dim[1]
+
+        return total
+
+    def validate_paths_exist(self) -> Dict[str, bool]:
+        """Check which file paths exist."""
+        return {
+            "ppi_file_path": self.ppi_file_path.exists() if self.ppi_file_path else False,
+            "input_gene_list_fp": self.input_gene_list_fp.exists() if self.input_gene_list_fp else False,
+            "cell_type_fp": self.cell_type_fp.exists() if self.cell_type_fp else False,
+            "gene_mean_std_fp": self.gene_mean_std_fp.exists() if self.gene_mean_std_fp else False,
+            "model_dir": self.model_dir.exists() if self.model_dir else False,
+        }
+
+
+@dataclass
+class EvaluationConfig:
+    """evaluation configuration"""
+    n_samples: int = 3
+    plot_cell_proportions: bool = True
+    plot_single_cell_gep: bool = True
+    plot_bulk_gep: bool = True
+    plot_latent_space: bool = True
+
+    # UMAP settings
+    n_neighbors: int = 15
+    min_dist: float = 0.1
+
+    # Plotting
+    figsize: Tuple[float, float] = (3.5, 3.5)
+    rasterized: bool = True
+    show_metrics: bool = True
+
+
+@dataclass
+class VAEDeconConfig:
+    """The complete configuration for VAEDecon"""
+    data: DataConfig = field(default_factory=DataConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+
+    @classmethod
+    def from_dict(cls, config_dict: Dict):
+        """Creates configuration from a dictionary"""
+        return cls(
+            data=DataConfig(**config_dict.get('data', {})),
+            training=TrainingConfig(**config_dict.get('training', {})),
+            model=ModelConfig(**config_dict.get('model', {})),
+            evaluation=EvaluationConfig(**config_dict.get('evaluation', {}))
+        )
+
+    @classmethod
+    def from_yaml(cls, yaml_path: str):
+        """Loads configuration from a YAML file"""
+        import yaml
+        with open(yaml_path, 'r') as f:
+            config_dict = yaml.safe_load(f)
+        return cls.from_dict(config_dict)
+
+    def to_yaml(self, yaml_path: str):
+        """Saves the configuration to a YAML file"""
+        import yaml
+        from dataclasses import asdict
+        config_dict = asdict(self)
+        with open(yaml_path, 'w') as f:
+            yaml.dump(config_dict, f, default_flow_style=False)

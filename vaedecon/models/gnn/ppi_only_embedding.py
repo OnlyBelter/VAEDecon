@@ -15,7 +15,7 @@ import lightning as L
 from ..vae.vae_config import VAEConfig
 from ...models.base import (ModelOutput, reparameterize_dirichlet, LOGVAR_CLAMP_MIN,
                             LOGVAR_CLAMP_MAX, EPS, NETWORK_CUTOFF, BaseEncoder)
-from ...models.nn.positional_encoding import PositionalEncoding
+from vaedecon.models.gnn.positional_encoding import PositionalEncoding
 # from .common_functions_for_gnn import build_network, nx_to_pyg_edge_index
 
 # EXPRESSION_CUTOFF = 0.0

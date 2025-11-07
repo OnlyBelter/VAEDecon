@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from dataclasses import field
 from typing import Union, Optional
 import torch.nn as nn
@@ -48,7 +49,7 @@ class BaseTrainerConfig(BaseConfig):
         amp (bool): Whether to use auto mixed precision in training. Default: False
     """
 
-    output_dir: Union[str, None] = None
+    output_dir: Union[str, Path, None] = None
     per_device_train_batch_size: int = 64
     per_device_eval_batch_size: int = 64
     num_epochs: int = 100

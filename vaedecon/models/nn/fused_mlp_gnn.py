@@ -1,4 +1,4 @@
-from typing import List, Optional, Union, Tuple
+from typing import Optional, Union, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,7 +7,7 @@ import warnings
 
 from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
                                   LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS, BaseEncoder)
-from ...models.nn.positional_encoding import PositionalEncoding
+from ..gnn.positional_encoding import PositionalEncoding
 from .mlp import EncoderMLP
 from ..gnn import EncoderSGNN
 

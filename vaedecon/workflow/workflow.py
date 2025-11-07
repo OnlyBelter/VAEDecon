@@ -11,7 +11,7 @@ from ..utility import check_dir, non_log2log_cpm
 from ..data import GEPDataset
 from ..models import AutoModel, BaseAE, AutoConfig
 from ..models.base import BaseEncoder
-from ..models.gnn import EncoderGNN, EncoderSGNN
+from ..models.gnn import EncoderSGNN
 from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding, EncoderHybrid
 from ..models.vae import VAE, VAEConfig
 from ..trainers import BaseTrainerConfig, BaseTrainerL, PLTrainer

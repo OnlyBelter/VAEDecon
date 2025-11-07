@@ -1,6 +1,6 @@
 """Proposed multilayer perceptron architectures as a baseline"""
 
-from typing import List, Optional, Union
+from typing import List, Optional
 
 import torch
 import numpy as np
@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
                                   LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
                                   BaseEncoder, BaseDecoder)
-from ...models.nn.positional_encoding import PositionalEncoding
+from vaedecon.models.gnn.positional_encoding import PositionalEncoding
 # from ....models.base.base_utils import
 # from ..base_architectures import BaseDecoder, BaseEncoder
 # from ..utils import ResBlock
