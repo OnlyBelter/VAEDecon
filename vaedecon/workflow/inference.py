@@ -2,6 +2,7 @@
 Inference pipeline for VAEDecon
 """
 import os
+import gc
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -328,6 +329,8 @@ def predict_vaedecon(
             pred_cell_prop_file_path='./results/cell_prop.csv'
         )
     """
+    gc.collect()
+    torch.cuda.empty_cache()
     data_file_path = str(data_file_path)
     predictor = VAEDeconPredictor(
         model_dir=model_dir,
