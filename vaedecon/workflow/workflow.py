@@ -166,14 +166,14 @@ def evaluate_model(
                 # if 'labels' in batch.keys() and batch['labels']:
                 if 'labels' in batch and batch['labels'] is not None:
                     labels = batch['labels']
-                    if isinstance(labels, list):
+                    if isinstance(labels, list) or isinstance(labels, torch.Tensor):
                         if len(labels) > 0:
                             labels = torch.tensor(labels)
                             pred_cell_prop = labels.squeeze().detach().cpu().numpy()
 
             pred_cell_prop_list.append(pred_cell_prop)
             pred_results.append(pred_a)
-    if pred_cell_prop_all is not None and pred_cell_prop_list[0] is not None:
+    if pred_cell_prop_all is None and pred_cell_prop_list[0] is not None:
         first_item = pred_cell_prop_list[0]
         is_valid = False
         if isinstance(first_item, np.ndarray):

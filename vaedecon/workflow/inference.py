@@ -167,16 +167,20 @@ class VAEDeconPredictor:
             dataset_type='test'
         )
 
-        # Extract results
-        true_cell_prop = results.get('true_cell_prop')
-        pred_cell_prop_fp = results.get('pred_cell_prop_file_path')
-        cell_types = results.get('cell_types')
-        pred_a = results.get('pred_a')
-        cell_prop_result_dir = results.get('cell_prop_result_dir')
-        gep_result_dir = results.get('gep_result_dir')
-        test_set_result_dir = results.get('test_set_result_dir')
+        # # Extract results
+        # true_cell_prop = results.get('true_cell_prop')
+        # pred_cell_prop_fp = results.get('pred_cell_prop_file_path')
+        # cell_types = results.get('cell_types')
+        # pred_a = results.get('pred_a')
+        # cell_prop_result_dir = results.get('cell_prop_result_dir')
+        # gep_result_dir = results.get('gep_result_dir')
+        # test_set_result_dir = results.get('test_set_result_dir')
 
         # Visualizations
+        if sample2cell_id_file_path is None or sample2cell_id_file_path == '':
+            sample2cell_id_file_path = self.config.data.test_set_sample2cell_id_file_path
+        if sct_gep_file_path is None or sct_gep_file_path == '':
+            sct_gep_file_path = self.config.data.sct_gep_file_path
         self._generate_visualizations(
             results=results,
             sample2cell_id_file_path=sample2cell_id_file_path,
@@ -218,7 +222,7 @@ class VAEDeconPredictor:
                 figsize=self.config.evaluation.figsize
             )
 
-        # 2. Plot single-cell gene expression profiles
+        # 2. Plot single-cell gene expression profiles, comparing purified cell-type-specific GEPs with original sctGEPs
         if (self.config.evaluation.plot_single_cell_gep and
                 sample2cell_id_file_path and sct_gep_file_path):
             logger.info("Plotting single cell GEP...")
