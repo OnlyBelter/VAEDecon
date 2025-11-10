@@ -20,7 +20,7 @@ class DataConfig:
     # Test data
     test_set_file_path: str | Path = ''
     test_set_sample2cell_id_file_path: str | Path = ''
-    sct_gep_file_path: str | Path = ''
+    sct_gep_file_path: str | Path = ''  # Used for query sampled sctGEPs in test set
 
     # Additional files
     pred_cell_prop_file_path: Optional[str] = None

@@ -4,7 +4,7 @@ Gene expression deconvolution by single cell generative model
 # Installation
 ```bash
 # conda is recommended
-conda create -n vaedecon python=3.11
+conda create -n vaedecon python=3.12
 conda activate vaedecon
 
 # optional: setting HDF5 library path for M1 Mac
@@ -14,13 +14,10 @@ export BLOSC_DIR=/opt/homebrew/opt/c-blosc
 
 # if you have a GPU, install pytorch with CUDA support first (optional)
 # For linux or Windows, please refer to https://pytorch.org/get-started/previous-versions/
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu118
+pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
 
 # For Mac OS
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
-pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.6.0+cpu.html
+pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2
 
-# sometimes you may need to install the package annoy manually on linux
-conda install conda-forge::python-annoy
 pip install vaedecon
 ```

@@ -455,8 +455,8 @@ def get_gene_mean_std_across_cell_types(sct_dataset_fp: str, result_fp, gene_lis
 def load_or_compute_gene_mean_std(
     sct_gep_fp: str,
     gene_list: list[str],
-    cell_type_fp: str,
-    input_gene_list_fp: str,
+    cell_type_fp: str | Path,
+    input_gene_list_fp: str | Path,
     scaling_by_constant: bool,
     log_fn=print,
     out_fp=None,

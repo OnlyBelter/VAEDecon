@@ -21,14 +21,14 @@ logger = logging.getLogger(__name__)
 
 
 class VAEDeconTrainer:
-    """VAEDecon训练器"""
+    """VAEDecon Trainer"""
 
     def __init__(self, config: Optional[VAEDeconConfig] = None):
         """
         Initializes the trainer
 
         Parameters:
-            config: VAEDecon配置对象，如果为None则使用默认配置
+            config: VAEDeconConfig, using default VAEDeconConfig if None
         """
         self.config = config or VAEDeconConfig()
         self._setup_logging()
@@ -58,23 +58,23 @@ class VAEDeconTrainer:
                 output_dir=self.config.training.output_dir,
                 naming_postfix=self.config.training.naming_postfix
             )
-            self.model_dir = os.path.join(self.result_dir, 'final_model')
+            self.model_dir = self.result_dir / 'final_model'
             self.config.model.model_dir = self.model_dir
         else:
             self.model_dir = self.config.model.model_dir
             self.result_dir = os.path.dirname(self.model_dir)
 
-        # Update file paths in model config
-        self.config.model.input_gene_list_fp = os.path.join(self.model_dir, 'input_gene_list.txt')
-        self.config.model.cell_type_fp = os.path.join(self.model_dir, 'cell_type_list.txt')
+        # # Update file paths in model config
+        self.config.model.input_gene_list_fp = self.model_dir / 'input_gene_list.txt'
+        self.config.model.cell_type_fp = self.model_dir / 'cell_type_list.txt'
 
         logger.info(f"Results will be saved to: {self.result_dir}")
 
     def _prepare_data(self) -> Tuple[GEPDataset, any, any]:
-        """准备训练数据"""
+        """Prepare training data"""
         logger.info("Loading and preparing data...")
 
-        # 准备训练文件路径
+        # All training set files
         training_file_paths = [
             self.config.data.simu_bulk_file_path,
             self.config.data.sct_file_path
@@ -85,7 +85,7 @@ class VAEDeconTrainer:
             f'processed_{len(training_file_paths)}_training_sets'
         )
 
-        # 加载数据集
+        # Load dataset
         dataset = GEPDataset(
             file_paths=training_file_paths,
             scaling_by_constant=self.config.data.scaling_by_constant,
@@ -95,7 +95,7 @@ class VAEDeconTrainer:
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
 
-        # 分割训练集和验证集
+        # Split train/val sets
         train_set, val_set = random_split(
             dataset,
             [self.config.training.train_split, self.config.training.val_split]
@@ -111,23 +111,20 @@ class VAEDeconTrainer:
         vae_config = self._convert_to_vae_config()
         save_metadata(dataset=dataset, model_config=vae_config)
 
-        # 计算基因均值和标准差
+        # Calculate gene mean and std as features for GNN
         self._compute_gene_statistics(dataset, training_file_paths)
 
         return dataset, train_set, val_set
 
     def _compute_gene_statistics(self, dataset: GEPDataset, training_file_paths: list):
-        """计算基因统计信息"""
+        """Calculate gene mean and std for each cell type"""
         logger.info("Computing gene statistics...")
 
-        self.config.model.gene_mean_std_fp = str(
-            Path(self.config.data.sct_gep_file_path).parent
-            / (
+        self.config.model.gene_mean_std_fp = Path(self.config.data.sct_gep_file_path).parent / (
                 f"gene_mean_std_log2p1_scaled_{len(training_file_paths)}training_files.csv"
                 if self.config.model.scaling_by_constant
                 else f"gene_mean_std_log2p1_{len(training_file_paths)}training_files.csv"
             )
-        )
 
         gene_mean_std_df = load_or_compute_gene_mean_std(
             sct_gep_fp=self.config.data.sct_gep_file_path,
@@ -140,7 +137,7 @@ class VAEDeconTrainer:
         )
 
     def _create_model(self):
-        """创建模型"""
+        """Create model"""
         logger.info("Creating model...")
 
         # 转换为VAEConfig
@@ -155,13 +152,10 @@ class VAEDeconTrainer:
         return model, vae_config
 
     def _convert_to_vae_config(self) -> VAEConfig:
-        """将配置转换为VAEConfig"""
-        # 设置PPI文件路径
+        """Convert to VAEConfig"""
+        # Set default PPI file path if not provided
         if not self.config.model.ppi_file_path:
-            self.config.model.ppi_file_path = os.path.join(
-                self.config.data.data_dir,
-                'PPI/format_h_sapiens.csv'
-            )
+            self.config.model.ppi_file_path = Path(self.config.data.data_dir) / 'PPI' / 'format_h_sapiens.csv'
 
         return VAEConfig(
             name='VAEConfig',
@@ -193,7 +187,7 @@ class VAEDeconTrainer:
         )
 
     def _convert_to_trainer_config(self) -> BaseTrainerConfig:
-        """将配置转换为TrainerConfig"""
+        """Convert to TrainerConfig"""
         return BaseTrainerConfig(
             name='VAETrainerConfig',
             output_dir=self.config.training.output_dir,
@@ -271,14 +265,18 @@ def train_vaedecon(
         config = VAEDeconConfig.from_yaml(config_file)
     elif config is None:
         config = VAEDeconConfig()
-    model_dir = config.model.model_dir
+    if config.model.model_dir is not None:
+        model_dir = Path(config.model.model_dir)
+    else:
+        model_dir = Path(config.training.output_dir) / config.training.naming_postfix / 'final_model'
+        config.model.model_dir = model_dir
     # Check if there is a file ending with .ckpt in the model_dir
     if model_dir and os.path.exists(model_dir):
         ckpt_files = [f for f in os.listdir(model_dir) if f.endswith('.ckpt')]
         if ckpt_files:
             logger.info(f"Model checkpoint found in {model_dir}. Skipping training.")
-            config.model.cell_type_fp = os.path.join(model_dir, 'cell_type_list.txt')
-            config.model.input_gene_list_fp = os.path.join(model_dir, 'input_gene_list.txt')
+            config.model.cell_type_fp = model_dir / 'cell_type_list.txt'
+            config.model.input_gene_list_fp = model_dir / 'input_gene_list.txt'
             return config
 
     trainer = VAEDeconTrainer(config)
