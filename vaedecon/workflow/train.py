@@ -112,18 +112,23 @@ class VAEDeconTrainer:
         save_metadata(dataset=dataset, model_config=vae_config)
 
         # Calculate gene mean and std as features for GNN
-        self._compute_gene_statistics(dataset, training_file_paths)
+        self._compute_gene_statistics(dataset, training_file_paths, n_genes=input_dim)
 
         return dataset, train_set, val_set
 
-    def _compute_gene_statistics(self, dataset: GEPDataset, training_file_paths: list):
-        """Calculate gene mean and std for each cell type"""
+    def _compute_gene_statistics(self, dataset: GEPDataset, training_file_paths: list, n_genes: int):
+        """Calculate gene mean and std for each cell type
+        Parameters:
+            dataset: GEPDataset
+            training_file_paths: list of training file paths
+            n_genes: number of genes to consider
+        """
         logger.info("Computing gene statistics...")
 
         self.config.model.gene_mean_std_fp = Path(self.config.data.sct_gep_file_path).parent / (
-                f"gene_mean_std_log2p1_scaled_{len(training_file_paths)}training_files.csv"
+                f"gene_mean_std_log2p1_scaled_{len(training_file_paths)}training_files_{n_genes}genes.csv"
                 if self.config.model.scaling_by_constant
-                else f"gene_mean_std_log2p1_{len(training_file_paths)}training_files.csv"
+                else f"gene_mean_std_log2p1_{len(training_file_paths)}training_files_{n_genes}genes.csv"
             )
 
         gene_mean_std_df = load_or_compute_gene_mean_std(
