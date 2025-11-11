@@ -91,6 +91,7 @@ class VAEDeconTrainer:
             scaling_by_constant=self.config.data.scaling_by_constant,
             remove_low_var_genes=self.config.data.remove_low_var_genes,
             processed_data_dir=processed_training_set_dir,
+            force_reprocess=self.config.data.force_reprocess,
         )
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
