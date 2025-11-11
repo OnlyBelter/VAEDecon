@@ -458,7 +458,7 @@ class ModelConfig(VAEConfig):
         if not v:
             raise ValueError("encoders list cannot be empty")
 
-        valid_encoders = ['EncoderHybrid', 'EncoderMLP', 'EncoderGNN']
+        valid_encoders = ['EncoderHybrid', 'EncoderMLP', 'EncoderSGNN']
         for encoder in v:
             if encoder not in valid_encoders:
                 raise ValueError(
