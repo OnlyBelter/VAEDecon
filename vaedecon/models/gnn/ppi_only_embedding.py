@@ -31,7 +31,6 @@ class EncoderSGNN(BaseEncoder):
 
     Memory optimizations:
     - Uses gradient checkpointing during training
-    - Supports mixed precision training
     - Implements batch splitting for large inputs
     """
 
@@ -251,9 +250,10 @@ class EncoderSGNN(BaseEncoder):
             y_chunk = y[i:end_idx] if y is not None else None
 
             # Process chunk
-            with torch.cuda.amp.autocast(enabled=True):  # Use mixed precision
-                chunk_output = self.forward(x_chunk, y_chunk, None)
+            # with torch.cuda.amp.autocast(enabled=True):  # Use mixed precision
+            #     chunk_output = self.forward(x_chunk, y_chunk, None)
 
+            chunk_output = self.forward(x_chunk, y_chunk, None)
             outputs.append(chunk_output)
 
             # Clear cache after each chunk
