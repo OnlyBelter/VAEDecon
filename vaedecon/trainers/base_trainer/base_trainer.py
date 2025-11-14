@@ -132,6 +132,10 @@ class PLTrainer(L.LightningModule):
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Performs a single training step."""
         output = self(batch)
+        # Log the learning rate
+        current_lr = self.optimizers().param_groups[0]['lr']
+        self.log('learning_rate', current_lr, on_step=False, on_epoch=True, prog_bar=True)
+
         self.loss_monitor(step='train', output=output,
                           loss_types=('loss', 'kld', 'kld_p', 'recon_loss_conv',
                                       'gene_mean_loss', 'gene_std_loss', 'repulsion_loss', 'cell_prop_loss'
@@ -169,29 +173,24 @@ class PLTrainer(L.LightningModule):
                 )
             else:
                 scheduler = scheduler_cls(optimizer)
+
+            scheduler_config = {
+                "scheduler": scheduler,
+                "interval": "epoch",  # 'epoch' or 'step'
+                "frequency": 1,
+            }
+
+            # If the scheduler is ReduceLROnPlateau, we need to specify the metric to monitor
+            if self.training_config.scheduler_cls == "ReduceLROnPlateau":
+                scheduler_config["monitor"] = "val_loss"
+                scheduler_config["strict"] = True  # If val_loss does not exist, it will report an error
+
             return {
                 "optimizer": optimizer,
-                "lr_scheduler": {"scheduler": scheduler, "monitor": "val_loss"},
+                "lr_scheduler": scheduler_config,
             }
         else:
             return {"optimizer": optimizer}
-
-    # def predict(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-    #     """Generates predictions from the model."""
-    #     self.model.eval()
-    #     with torch.no_grad():
-    #         model_out = self(inputs)
-    #         reconstructions = model_out.recon_x.cpu().detach()[
-    #             : min(inputs["data"].shape[0], 10)
-    #         ]
-    #         z_enc = model_out.z[: min(inputs["data"].shape[0], 10)]
-    #         z = torch.randn_like(z_enc)
-    #         normal_generation = self.model.decoder(z).reconstruction.detach().cpu()
-    #     return {
-    #         "true_data": inputs["data"][: min(inputs["data"].shape[0], 10)],
-    #         "reconstructions": reconstructions,
-    #         "generations": normal_generation,
-    #     }
 
     def loss_monitor(self, loss_types: tuple=('loss',), step: str='train', output: ModelOutput=None) -> None:
         """
@@ -311,8 +310,12 @@ class BaseTrainerL:
         )
         lr_monitor = LearningRateMonitor(logging_interval='epoch')
         csv_logger = CSVLogger(save_dir=self.model_dir, name="training_logs")
-        early_stop_callback = EarlyStopping(monitor="val_loss", patience=self.n_early_stopping_patience,
-                                            mode="min", min_delta=0.001)
+        early_stop_callback = EarlyStopping(
+            monitor="val_loss",
+            patience=self.n_early_stopping_patience,
+            mode="min",
+            min_delta=0.001
+        )
 
         trainer = L.Trainer(
             max_epochs=self.training_config.num_epochs,

@@ -81,6 +81,10 @@ class TrainingConfig:
     train_split: float = 0.8
     val_split: float = 0.2
 
+    # Scheduler
+    scheduler_cls: Optional[str] = None
+    scheduler_params: Optional[Dict[str, Any]] = None
+
 
 # @dataclass
 # class ModelConfig(VAEConfig):
