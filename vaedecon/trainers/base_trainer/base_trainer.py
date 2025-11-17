@@ -149,6 +149,14 @@ class PLTrainer(L.LightningModule):
                           loss_types=('loss', 'kld', 'kld_p', 'recon_loss_conv', 'cell_prop_loss'))
         return output.loss
 
+    def on_train_epoch_end(self):  # Add here
+        """Debug: Track LR changes after each training epoch."""
+        sch = self.lr_schedulers()
+        if sch is not None:
+            current_lr = self.optimizers().param_groups[0]['lr']
+            val_loss = self.trainer.callback_metrics.get('val_loss', None)
+            print(f"Epoch {self.current_epoch}: LR={current_lr:.2e}, val_loss={val_loss}")
+
     def configure_optimizers(self) -> Dict[str, Any]:
         """Configures the optimizer and learning rate scheduler."""
         optimizer_cls = getattr(optim, self.training_config.optimizer_cls)
