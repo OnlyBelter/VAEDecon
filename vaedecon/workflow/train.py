@@ -206,6 +206,8 @@ class VAEDeconTrainer:
             n_early_stopping_patience=self.config.training.n_early_stopping_patience,
             devices=self.config.training.devices,
             debug_model=self.config.training.debug_model,
+            scheduler_cls=self.config.training.scheduler_cls,
+            scheduler_params=self.config.training.scheduler_params,
         )
 
     def train(self) -> Optional[VAEDeconConfig]:
