@@ -284,6 +284,8 @@ class VAE(BaseAE):
             recon_gene_mean: Reconstructed gene means for each cell type across the whole batch.
             recon_gene_std: Reconstructed gene standard deviations for each cell type across the whole batch.
             device: Device to perform the calculations on.
+            logvar_mean: Mean of log variances across cell types. (B, Latent)
+            mu_mean: Mean of means across cell types. (B, Latent)
         Returns:
             A tuple containing the total loss, KL divergence loss, cell proportion loss, and reconstruction loss.
         """

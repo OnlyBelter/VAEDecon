@@ -9,7 +9,7 @@ data:
 training:
   output_dir: './output/vae'
   naming_postfix: 'my_experiment'
-  learning_rate: 0.00015
+  learning_rate: 5.0e-5
   batch_size: 1024
   num_epochs: 1000
   n_early_stopping_patience: 15
@@ -20,6 +20,13 @@ training:
   debug_model: false
   train_split: 0.8
   val_split: 0.2
+  scheduler_cls: "ReduceLROnPlateau"
+  scheduler_params:
+    patience: 3
+    factor: 0.5
+    min_lr: 1.0e-7
+    verbose: true
+
 
 model:
   input_dim: [1, 17834]
@@ -34,13 +41,14 @@ model:
   encoders: ['EncoderHybrid']
   predict_cell_prop: false
   loss_coefficient:
-    cell_prop: 100
-    beta: 2
-    gamma: 0.005
+    cell_prop: 0
+    beta: 2  # beta parameter for KLD loss, beta-VAE
+    gamma: 0.005  # gamma parameter for the repulsion loss (default 0.005)
+    # 'ave' means using the average mu and logvar across cell types, 'sep' means calculate kld for each cell type separately
     kld_type: 'ave'
-    weighting_gene_by_exp: true
-    weight_clamp_range: [0.2, 5]
-    gene_mean_std_weight: 1
+    weighting_gene_by_exp: true  # whether to weight the gene loss by the expression value across cell types (default true)
+    weight_clamp_range: [0.2, 5]  # the range of the weights for the genes across cell types, only work if weighting_gene_by_exp is true
+    gene_mean_std_weight: 1  # the weight for the gene mean and std loss (default 1)
   gnn_n_genes: 12596
   gnn_inter_col_dim: 500
   gnn_embd_col_dim: 30
@@ -50,6 +58,7 @@ model:
   gene_hidden_dim: 10
   using_positional_encoding: false
   scaling_by_constant: true
+
 
 evaluation:
   n_samples: 3

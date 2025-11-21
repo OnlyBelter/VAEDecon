@@ -86,62 +86,6 @@ class TrainingConfig:
     scheduler_params: Optional[Dict[str, Any]] = None
 
 
-# @dataclass
-# class ModelConfig(VAEConfig):
-#     """model configuration"""
-#     # Architecture
-#     input_dim: Tuple[int, int] = (1, 17834)
-#     latent_dim: int = 10
-#     n_cell_types: int = 16
-#
-#     # Encoder/Decoder
-#     encoder_hidden_dims: List[int] = field(default_factory=lambda: [2048, 1024, 1024, 512])
-#     decoder_hidden_dims: List[int] = field(default_factory=lambda: [512, 1024, 1024, 2048])
-#     encoder_dropout_rate: List[float] = field(default_factory=lambda: [0, 0.1, 0.1, 0])
-#     decoder_dropout_rate: List[float] = field(default_factory=lambda: [0, 0.1, 0.1, 0])
-#
-#     # Fusion layer
-#     fusion_hidden_dims: Tuple[int, int] = (512, 256)
-#     fusion_dropout_rate: Tuple[float, float] = (0.1, 0)
-#
-#     # Encoder types
-#     encoders: List[str] = field(default_factory=lambda: ['EncoderHybrid'])
-#
-#     # Cell proportion prediction
-#     predict_cell_prop: bool = False
-#
-#     # Loss coefficients
-#     loss_coefficient: Dict = field(default_factory=lambda: {
-#         "cell_prop": 0,
-#         "beta": 2,
-#         "gamma": 0.005,
-#         "kld_type": 'ave',
-#         "weighting_gene_by_exp": True,
-#         'weight_clamp_range': (0.2, 5),
-#         'gene_mean_std_weight': 1,
-#     })
-#
-#     # GNN settings
-#     gnn_n_genes: int = 12596
-#     gnn_inter_col_dim: int = 500
-#     gnn_embd_col_dim: int = 30
-#     gnn_lambda_cols: float = 1.0
-#     gnn_num_layers: int = 3
-#     gnn_drop_p: float = 0.25
-#     gene_hidden_dim: int = 10
-#
-#     # File paths (will be set automatically)
-#     ppi_file_path: str | Path  = ''
-#     input_gene_list_fp: str | Path  = ''
-#     cell_type_fp: str | Path  = ''
-#     gene_mean_std_fp: str | Path  = ''
-#     model_dir: str | Path = ''
-#
-#     # Other settings
-#     using_positional_encoding: bool = False
-#     scaling_by_constant: bool = True
-
-
 class ModelConfig(VAEConfig):
     """Complete model configuration for VAE-based deconvolution.
 
