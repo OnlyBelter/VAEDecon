@@ -98,147 +98,6 @@ def load_gene_list(file_path: Path) -> list[str]:
     return gene_list
 
 
-# class GEPDataset(Dataset):
-#     """
-#     Dataset class for GEP data. Implements preprocessing and caching
-#     to speed up data loading for repeated runs.
-#
-#     A ``__getitem__`` is redefined and outputs a python dictionary
-#     with the keys corresponding to `data` and `labels`.
-#     This Class should be used for any new data sets.
-#     """
-#
-#     def __init__(self, file_path: List[str],
-#                  processed_data_dir: Union[str, Path],
-#                  scaling_by_constant: bool = True,
-#                  gene_list_file: Optional[Union[str, Path]] = None,
-#                  remove_low_var_genes: bool = False,
-#                  min_var: float = 1.0,
-#                  cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None):
-#         """
-#         Args:
-#             file_path (str): a list of file path containing the data
-#
-#             scaling_by_constant (bool): If True, the data is scaled by a constant factor (20 by default),
-#               so that the data is in the range [0, 1].
-#
-#             gene_list_file (str): a file path containing the gene list to filter the data
-#
-#             remove_low_var_genes (bool): If True, the low variance genes are removed from the dataset.
-#
-#             min_var (float): The minimum variance of the gene to be kept.
-#
-#             cell_cell2ave_exp_file_path (str): The file path to save the average expression of each cell type.
-#                 - a table: genes x cell types, in TPM format
-#         """
-#         # self.file_path = file_path
-#         all_data = []
-#         all_cell_prop = []
-#         for path in file_path:
-#             log_message(f"Reading data from {path}")
-#             h5ad_obj = ReadH5AD(path)  # read the data in log2(TPM + 1) format
-#             gep_data = h5ad_obj.get_df(convert_to_tpm=True)  # get the data in pandas DataFrame format in TPM
-#             log_message(f"Data shape: {gep_data.shape}")
-#             cell_prop = h5ad_obj.get_cell_fraction()
-#             all_data.append(gep_data)
-#             all_cell_prop.append(cell_prop)
-#         # merge multiple datasets and rescale each dataset based on the intersection of genes
-#         self.gep_data = pd.concat(all_data, axis=0, join='inner')  # merge multiple datasets by rows (n_samples, n_genes)
-#         self.cell_prop = pd.concat(all_cell_prop, axis=0, join='inner')  # merge multiple datasets by rows (n_samples, n_cell_types)
-#         assert len(self.gep_data) == len(self.cell_prop)
-#         assert np.all(self.gep_data.index == self.cell_prop.index)  # check the order of samples
-#         if gene_list_file is not None:  # filter the data based on the gene list, for test sets
-#             gene_list = load_gene_list(gene_list_file)
-#             self.gep_data = self.gep_data.loc[:, self.gep_data.columns.isin(gene_list)]
-#
-#         # remove low variance genes here
-#         if remove_low_var_genes:
-#             self.remove_low_var_genes(min_var=min_var, cell_cell2ave_exp_file_path=cell_cell2ave_exp_file_path)
-#
-#         # rescaling the data to log2(CPM + 1) format after merging
-#         self.gep_data = non_log2log_cpm(self.gep_data, transpose=False)
-#         log_message(f"Data shape after merging: {self.gep_data.shape}")
-#         # self.gep_data = anndata.concat(all_data)
-#         # self.gep_data = anndata.read_h5ad(file_path, backed='r')  # read the data in log2(TPM + 1) format
-#         self.data = self.gep_data.values.astype(np.float32)  # get the data in numpy format
-#         self.data = torch.from_numpy(self.data)
-#         if scaling_by_constant:
-#             self.data = self.data / 20.0
-#
-#         self.cell_types = self.cell_prop.columns.to_list()
-#         self.gene_list = self.gep_data.columns.to_list()
-#         self.labels = torch.tensor(self.cell_prop.values, dtype=torch.float32)
-#
-#     def __len__(self):
-#         return self.gep_data.shape[0]
-#
-#     def __getitem__(self, index):
-#         """Generates one sample of data
-#
-#         Args:
-#             index (int): The index of the data in the Dataset
-#
-#         Returns:
-#             (dict): A dictionary with the keys 'data' and 'labels' and corresponding
-#             torch.Tensor
-#         """
-#         # Select sample
-#         x = self.data[index]
-#         y = self.labels[index]
-#         # sample_id = self.gep_data.index.to_list()[index]
-#         # y = self.labels[index]
-#
-#         return DatasetOutput(data=x, labels=y)
-#
-#     def save_gene_list(self, file_path: Path):
-#         check_dir(Path(file_path).parent)
-#         with open(file_path, 'w') as f:
-#             for gene in self.gene_list:
-#                 f.write(f"{gene}\n")
-#         logger.info(f"Gene list is saved to {file_path}")
-#
-#     def save_cell_types(self, file_path: Path):
-#         check_dir(Path(file_path).parent)
-#         with open(file_path, 'w') as f:
-#             for cell_type in self.cell_types:
-#                 f.write(f"{cell_type}\n")
-#         logger.info(f"Cell types are saved to {file_path}")
-#
-#     def get_gene_list(self):
-#         return self.gene_list
-#
-#     def get_cell_types(self):
-#         return self.cell_types
-#
-#     def get_cell_prop(self) -> pd.DataFrame:
-#         return self.cell_prop
-#
-#     def get_sample_ids(self):
-#         return self.gep_data.index.to_list()
-#
-#     def remove_low_var_genes(self, min_var: float = 1, cell_cell2ave_exp_file_path: str = None):
-#         """Remove low variance genes from the dataset.
-#
-#         Args:
-#             min_var (float): The minimum variance of the gene to be kept.
-#             cell_cell2ave_exp_file_path (str): The file path to save the average expression of each cell type.
-#             - a table: genes x cell types
-#         """
-#         n_gene_before_filter = self.gep_data.shape[1]
-#         var = self.gep_data.var(axis=0)
-#         self.gep_data = self.gep_data.loc[:, var > min_var]
-#         if cell_cell2ave_exp_file_path is not None:
-#             cell_cell2ave_exp = pd.read_csv(cell_cell2ave_exp_file_path, index_col=0)
-#             if 'var' not in cell_cell2ave_exp:
-#                 cell_cell2ave_exp['var'] = cell_cell2ave_exp.var(axis=0)
-#             cell_cell2ave_exp = cell_cell2ave_exp.loc[cell_cell2ave_exp['var'] > min_var, :]
-#             self.gep_data = self.gep_data.loc[:, self.gep_data.columns.isin(cell_cell2ave_exp.index)]
-#         n_gene_after_filter = self.gep_data.shape[1]
-#         log_message(f"Number of genes before filter: {n_gene_before_filter}")
-#         log_message(f"Number of genes after filter: {n_gene_after_filter}")
-#         log_message(f"Number of genes removed: {n_gene_before_filter - n_gene_after_filter}")
-
-
 class GEPDataset(Dataset):
     """
     Dataset class for GEP data. Implements preprocessing and caching
@@ -265,15 +124,18 @@ class GEPDataset(Dataset):
             cell_cell2ave_exp_file_path: Path to a table (genes x cell types, TPM) for additional gene filtering.
             force_reprocess: If True, reprocesses data even if cached files exist.
         """
-        self.processed_data_dir = Path(processed_data_dir)
-        self.processed_data_dir.mkdir(parents=True, exist_ok=True)
+        if processed_data_dir is not None:
+            self.processed_data_dir = Path(processed_data_dir)
+            self.processed_data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Define paths for cached processed files
-        self.cached_data_path = self.processed_data_dir / "data.pt"
-        self.cached_labels_path = self.processed_data_dir / "labels.pt"
-        self.cached_gene_list_path = self.processed_data_dir / "gene_list.txt"
-        self.cached_cell_types_path = self.processed_data_dir / "cell_types.txt"
-        self.cached_sample_ids_path = self.processed_data_dir / "sample_ids.txt"
+            # Define paths for cached processed files
+            self.cached_data_path = self.processed_data_dir / "data.pt"
+            self.cached_labels_path = self.processed_data_dir / "labels.pt"
+            self.cached_gene_list_path = self.processed_data_dir / "gene_list.txt"
+            self.cached_cell_types_path = self.processed_data_dir / "cell_types.txt"
+            self.cached_sample_ids_path = self.processed_data_dir / "sample_ids.txt"
+        else:
+            self.processed_data_dir = None
 
         if not force_reprocess and self._load_from_cache():
             log_message(f"Successfully loaded preprocessed data from {self.processed_data_dir}")
@@ -377,14 +239,15 @@ class GEPDataset(Dataset):
         self.sample_ids = self.gep_data_df.index.to_list()
 
         # Save processed data to cache
-        torch.save(self.data, self.cached_data_path)
-        if self.labels is not None:
-            torch.save(self.labels, self.cached_labels_path)
-        self._save_list_txt(self.gene_list, self.cached_gene_list_path)
-        if self.cell_types is not None:
-            self._save_list_txt(self.cell_types, self.cached_cell_types_path)
-        self._save_list_txt(self.sample_ids, self.cached_sample_ids_path)
-        log_message(f"Finished processing and saved data to {self.processed_data_dir}")
+        if self.processed_data_dir is not None:
+            torch.save(self.data, self.cached_data_path)
+            if self.labels is not None:
+                torch.save(self.labels, self.cached_labels_path)
+            self._save_list_txt(self.gene_list, self.cached_gene_list_path)
+            if self.cell_types is not None:
+                self._save_list_txt(self.cell_types, self.cached_cell_types_path)
+            self._save_list_txt(self.sample_ids, self.cached_sample_ids_path)
+            log_message(f"Finished processing and saved data to {self.processed_data_dir}")
 
         # Clean up large DataFrames if they are no longer needed as attributes
         del self.gep_data_df
