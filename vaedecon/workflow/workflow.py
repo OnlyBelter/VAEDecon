@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import warnings
 from pathlib import Path
-from typing import Dict, Any, Type, Union, TypeVar, Sequence
+from typing import Dict, Any, Type, Union, TypeVar, Sequence, List
 import torch
 from torch.utils.data import DataLoader
 
@@ -12,7 +12,8 @@ from ..data import GEPDataset
 from ..models import AutoModel, BaseAE, AutoConfig
 from ..models.base import BaseEncoder
 from ..models.gnn import EncoderSGNN
-from ..models.nn import EncoderMLP, DecoderMLP, PositionalEncoding, EncoderHybrid
+from ..models.nn import (EncoderMLP, DecoderMLP, EncoderHybrid, EncoderResMLP, DecoderResMLP,
+                         PositionalEncoding, GeneTransformerEncoder)
 from ..models.vae import VAE, VAEConfig
 from ..trainers import BaseTrainerConfig, BaseTrainerL, PLTrainer
 from ..pipelines import TrainingPipeline
@@ -21,11 +22,11 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
 # Define type variables for better type hinting
-T_Encoder = TypeVar('T_Encoder', bound=BaseEncoder)
-T_Decoder = TypeVar('T_Decoder', bound=DecoderMLP)
+# T_Encoder = TypeVar('T_Encoder', bound=BaseEncoder)
+# T_Decoder = TypeVar('T_Decoder', bound=DecoderMLP)
 
 
-def create_model(model_config: VAEConfig, encoder_cls_name_list: list[str], decoder_cls: Type[T_Decoder]) -> VAE:
+def create_model(model_config: VAEConfig, encoder_cls_name_list: List[str], decoder_cls: List[str]) -> VAE:
     """Creates the VAE model."""
     position_encoding = PositionalEncoding(
         d_model=model_config.latent_dim,
@@ -43,6 +44,10 @@ def create_model(model_config: VAEConfig, encoder_cls_name_list: list[str], deco
             encoder_cls = EncoderSGNN
         elif encoder_cls_name == "EncoderMLP".lower():
             encoder_cls = EncoderMLP
+        elif encoder_cls_name == "EncoderResMLP".lower():
+            encoder_cls = EncoderResMLP
+        elif encoder_cls_name == "GeneTransformerEncoder".lower():
+            encoder_cls = GeneTransformerEncoder
         elif encoder_cls_name == "EncoderHybrid".lower():
             encoder_cls = EncoderHybrid
             kwargs_for_hybrid = kwargs.copy()
@@ -54,6 +59,14 @@ def create_model(model_config: VAEConfig, encoder_cls_name_list: list[str], deco
 
         encoders.append(encoder_cls(**kwargs))
 
+    for decoder_cls_name in decoder_cls:
+        decoder_cls_name = decoder_cls_name.lower()
+        if decoder_cls_name == "DecoderMLP".lower():
+            decoder_cls = DecoderMLP
+        elif decoder_cls_name == "DecoderResMLP".lower():
+            decoder_cls = DecoderResMLP
+        else:
+            raise NotImplementedError(decoder_cls_name)
     decoder = decoder_cls(args=model_config)
     model = VAE(
         model_config=model_config,
@@ -105,7 +118,7 @@ def load_trained_model(model_dir: str) -> Union[AutoModel, BaseAE]:
         training_config = BaseTrainerConfig.from_json_file(training_config_path)
 
         model = create_model(model_config=model_config, encoder_cls_name_list=model_config.encoders,
-                             decoder_cls=DecoderMLP)
+                             decoder_cls=model_config.decoders)
         trained_model = PLTrainer.load_from_checkpoint(
             checkpoint_path=model_file_path,
             model=model,

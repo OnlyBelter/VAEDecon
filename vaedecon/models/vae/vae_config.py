@@ -105,6 +105,12 @@ class VAEConfig(BaseModelConfig):
         description="List of encoder types to use (e.g., ['mlp', 'gnn'])"
     )
 
+    # Decoder types
+    decoders: Optional[List[str]] = Field(
+        default=None,
+        description="List of decoder types to use (e.g., ['mlp', 'res_mlp'])"
+    )
+
     # ==================== Validators ====================
 
     @field_validator('input_gene_list_fp', 'cell_type_fp', 'gene_mean_std_fp', check_fields=False)

@@ -152,7 +152,7 @@ class VAEDeconTrainer:
         model = create_model(
             model_config=vae_config,
             encoder_cls_name_list=self.config.model.encoders,
-            decoder_cls=DecoderMLP
+            decoder_cls=self.config.model.decoders
         )
 
         return model, vae_config
@@ -190,6 +190,7 @@ class VAEDeconTrainer:
             ppi_file_path=self.config.model.ppi_file_path,
             gene_hidden_dim=self.config.model.gene_hidden_dim,
             encoders=self.config.model.encoders,
+            decoders=self.config.model.decoders,
         )
 
     def _convert_to_trainer_config(self) -> BaseTrainerConfig:

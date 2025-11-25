@@ -191,6 +191,12 @@ class ModelConfig(VAEConfig):
         description="List of encoder types to use"
     )
 
+    # ==================== Decoder Types ====================
+    decoders: List[str] = Field(
+        default_factory=lambda: ['DecoderMLP'],
+        description="List of decoder types to use"
+    )
+
     # ==================== Cell Proportion Prediction ====================
     predict_cell_prop: bool = Field(
         default=False,
@@ -406,7 +412,7 @@ class ModelConfig(VAEConfig):
         if not v:
             raise ValueError("encoders list cannot be empty")
 
-        valid_encoders = ['EncoderHybrid', 'EncoderMLP', 'EncoderSGNN']
+        valid_encoders = ['EncoderHybrid', 'EncoderMLP', 'EncoderSGNN', 'EncoderResMLP', 'GeneTransformerEncoder']
         for encoder in v:
             if encoder not in valid_encoders:
                 raise ValueError(
