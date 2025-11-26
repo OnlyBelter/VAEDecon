@@ -12,48 +12,55 @@ from vaedecon.models.gnn.positional_encoding import PositionalEncoding
 
 class GeneTransformerEncoder(BaseEncoder):
     """
-    Transformer-based Encoder for Gene Expression.
-    Treats genes as a set of tokens and uses learnable 'Cell Type Tokens'
-    to query the gene set for deconvolution.
+    Optimized Transformer Encoder using Cross-Attention (Perceiver-like).
+    Scales linearly with the number of genes O(N_genes), not quadratically.
     """
 
     def __init__(self, args: BaseModelConfig, position_encoding: Optional[PositionalEncoding] = None):
         super().__init__()
         self.args = args
-        self.input_dim = args.input_dim  # Number of genes (G)
+        if isinstance(args.input_dim, (tuple, list)):
+            self.input_dim = args.input_dim[1]  # Assume (1, G) format
+        else:
+            self.input_dim = args.input_dim  # Number of genes (G)
         self.latent_dim = args.latent_dim
         self.n_cell_types = args.n_cell_types
         self.predict_cell_prop = args.predict_cell_prop
         self.using_positional_encoding = args.using_positional_encoding
 
-        # Transformer Config
-        # You might want to add these to your args
+        # Config
         self.d_model = getattr(args, 'transformer_d_model', 256)
         self.nhead = getattr(args, 'transformer_nhead', 8)
-        self.num_layers = getattr(args, 'transformer_num_layers', 4)
+        self.num_layers = getattr(args, 'transformer_num_layers', 4)  # Can be deeper now
         self.dim_feedforward = getattr(args, 'transformer_dim_feedforward', 1024)
         self.dropout = getattr(args, 'transformer_dropout', 0.1)
 
-        # 1. Gene Identity Embedding (The "Position" of the gene in the set)
-        # Shape: (G, d_model)
-        self.gene_id_embedding = nn.Parameter(torch.randn(np.prod(self.input_dim), self.d_model))
-
-        # 2. Value Embedding (Project scalar expression value to vector)
-        # We project the scalar value x_i to d_model and add it to gene_id_embedding
+        # 1. Gene Embedding
+        # We use a smaller linear layer or shared embedding to save parameters if G is huge
+        self.gene_id_embedding = nn.Parameter(torch.randn(self.input_dim, self.d_model))
         self.value_projector = nn.Sequential(
             nn.Linear(1, self.d_model),
             nn.GELU()
         )
 
-        # 3. Cell Type Query Tokens (Learnable tokens that will become our latent variables)
-        # Shape: (n_cell_types, d_model)
-        self.cell_type_queries = nn.Parameter(torch.randn(self.n_cell_types, self.d_model))
+        # 2. Latent Queries (Cell Types + Global)
+        # These act as the "seeds" that gather info from the genes
+        num_queries = self.n_cell_types + (1 if self.predict_cell_prop else 0)
+        self.latents = nn.Parameter(torch.randn(num_queries, self.d_model))
 
-        # 4. Global Context Token (For predicting cell proportions)
-        if self.predict_cell_prop:
-            self.global_query = nn.Parameter(torch.randn(1, self.d_model))
+        # 3. Cross-Attention Layer (The "Compression" Step)
+        # Queries: Latents (Small), Keys/Values: Genes (Large)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=self.d_model,
+            num_heads=self.nhead,
+            dropout=self.dropout,
+            batch_first=True
+        )
+        self.norm_cross = nn.LayerNorm(self.d_model)
+        self.norm_latents = nn.LayerNorm(self.d_model)
 
-        # 5. Transformer Encoder
+        # 4. Self-Attention Stack (Deep processing on the small latent space)
+        # Once data is compressed to K tokens, we can do deep processing cheaply
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.d_model,
             nhead=self.nhead,
@@ -65,14 +72,12 @@ class GeneTransformerEncoder(BaseEncoder):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=self.num_layers)
 
-        # 6. Heads
-        # Map from d_model to latent_dim * 2 (mu, logvar)
+        # 5. Heads
         self.fc_mu_logvar = nn.Linear(self.d_model, self.latent_dim * 2)
-
         if self.predict_cell_prop:
             self.fc_dd_alpha = nn.Linear(self.d_model, self.n_cell_types)
 
-        # External Positional Encoding (Optional, for spatial/temporal data)
+        # Positional Encoding
         if self.using_positional_encoding:
             if position_encoding is None:
                 raise ValueError("position_encoding parameter must be provided.")
@@ -81,68 +86,58 @@ class GeneTransformerEncoder(BaseEncoder):
     def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None,
                 output_layer_levels: Optional[List[int]] = None, eps: float = EPS) -> ModelOutput:
 
-        # x shape: (Batch, Genes)
         B, G = x.shape
         device = x.device
 
-        # --- 1. Prepare Input Sequence ---
+        # --- 1. Prepare Gene Inputs (Keys/Values) ---
+        # (B, G, 1) -> (B, G, d_model)
+        val_emb = self.value_projector(x.unsqueeze(-1))
+        # Add Identity: (1, G, d_model) + (B, G, d_model)
+        gene_kv = self.gene_id_embedding.unsqueeze(0) + val_emb
 
-        # A. Embed Genes
-        # Reshape x for projection: (B, G, 1)
-        x_reshaped = x.unsqueeze(-1)
-        # Project values: (B, G, d_model)
-        val_emb = self.value_projector(x_reshaped)
-        # Add Gene Identity (Broadcasting): (1, G, d_model) + (B, G, d_model)
-        gene_tokens = self.gene_id_embedding.unsqueeze(0) + val_emb
+        # --- 2. Prepare Latent Queries ---
+        # (1, K, d_model) -> (B, K, d_model)
+        latents = self.latents.unsqueeze(0).expand(B, -1, -1)
 
-        # B. Prepare Queries (Cell Types)
-        # Expand queries for batch: (B, n_cell_types, d_model)
-        type_tokens = self.cell_type_queries.unsqueeze(0).expand(B, -1, -1)
+        # --- 3. Cross-Attention (The Magic Fix) ---
+        # Q: Latents, K: Genes, V: Genes
+        # This extracts info from 10,000 genes into ~20 vectors
+        # Use PyTorch 2.0 Scaled Dot Product Attention if available for speed
+        attn_out, _ = self.cross_attn(
+            query=self.norm_latents(latents),
+            key=gene_kv,
+            value=gene_kv
+        )
+        # Residual connection
+        latents = latents + attn_out
 
-        # C. Prepare Global Query (if needed)
-        if self.predict_cell_prop:
-            global_token = self.global_query.unsqueeze(0).expand(B, -1, -1)
-            # Concatenate: [Global, Type1...TypeK, Gene1...GeneG]
-            # Sequence Length = 1 + K + G
-            full_seq = torch.cat([global_token, type_tokens, gene_tokens], dim=1)
-        else:
-            # Concatenate: [Type1...TypeK, Gene1...GeneG]
-            full_seq = torch.cat([type_tokens, gene_tokens], dim=1)
+        # --- 4. Deep Processing (Self-Attention) ---
+        # Now we only process the small latent sequence
+        latents = self.transformer(latents)
 
-        # --- 2. Transformer Pass ---
-        # Self-attention allows Type tokens to attend to Gene tokens
-        out_seq = self.transformer(full_seq)
-
-        # --- 3. Extract Outputs ---
-
-        # Identify indices
+        # --- 5. Extract Outputs ---
         start_idx = 0
         if self.predict_cell_prop:
-            # Extract Global Token (Index 0)
-            global_out = out_seq[:, 0, :]  # (B, d_model)
+            # Global token is at index 0 (assuming we initialized it first in self.latents)
+            # Note: In __init__, I combined them into one Parameter for simplicity.
+            # Index 0 is Global, 1..K are Cell Types (if initialized that way)
+            # Let's assume self.latents was created such that index 0 is global if predict_cell_prop is True
+            global_out = latents[:, 0, :]
             start_idx = 1
 
-        # Extract Cell Type Tokens
-        # (B, n_cell_types, d_model)
-        type_out = out_seq[:, start_idx: start_idx + self.n_cell_types, :]
+        type_out = latents[:, start_idx: start_idx + self.n_cell_types, :]
 
-        # --- 4. Latent Projection ---
-
-        # Predict Mu/LogVar for each cell type
-        # Input: (B, C, d_model) -> Output: (B, C, L*2)
+        # --- 6. Latent Projection (Same as before) ---
         mu_logvar = self.fc_mu_logvar(type_out)
         mu_raw, logvar_raw = torch.chunk(mu_logvar, chunks=2, dim=-1)
 
-        # Permute to standard format: (B, Latent, CellTypes)
         mu_all_types = mu_raw.permute(0, 2, 1)
         logvar_all_types = logvar_raw.permute(0, 2, 1)
         logvar_all_types = torch.clamp(logvar_all_types, LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX)
 
-        # --- 5. Cell Proportions ---
+        # --- 7. Cell Proportions ---
         output = ModelOutput()
-
         if self.predict_cell_prop:
-            # Use the Global Token to predict proportions
             dd_alpha = F.softplus(self.fc_dd_alpha(global_out)) + eps
             output['dd_alpha'] = dd_alpha
             cell_prop = reparameterize_dirichlet(dd_alpha, device=device)
@@ -151,8 +146,7 @@ class GeneTransformerEncoder(BaseEncoder):
         else:
             cell_prop = None
 
-        # --- 6. External Positional Encoding Logic (Legacy support) ---
-        # (Same logic as your MLP encoder)
+        # --- 8. Positional Encoding Logic (Legacy) ---
         if self.using_positional_encoding and self.position_encoding is not None and cell_prop is not None:
             if cell_prop.ndim == 3: cell_prop = cell_prop.squeeze(-1)
             exists = (cell_prop >= 0.01).float()
@@ -161,7 +155,7 @@ class GeneTransformerEncoder(BaseEncoder):
             pe_to_add = pe_matrix.t().unsqueeze(0)
             mu_all_types = mu_all_types + (exists_mask * pe_to_add)
 
-        # --- 7. Final Aggregation ---
+        # --- 9. Final Aggregation ---
         mu_mean = mu_all_types.mean(dim=-1)
         logvar_mean = logvar_all_types.mean(dim=-1)
 
@@ -170,7 +164,6 @@ class GeneTransformerEncoder(BaseEncoder):
         output['logvar_all_types'] = logvar_all_types
         output['mu_all_types'] = mu_all_types
         output['cell_prop'] = cell_prop
-
         if cell_prop is not None:
             output['cell_type_existed'] = (cell_prop >= 0.01).float()
 
