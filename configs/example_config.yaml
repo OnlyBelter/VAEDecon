@@ -38,7 +38,8 @@ model:
   decoder_dropout_rate: [0, 0.1, 0.1, 0]
   fusion_hidden_dims: [512, 256]
   fusion_dropout_rate: [0.1, 0]
-  encoders: ['EncoderHybrid']
+  encoders: ['EncoderResMLP']  # EncoderMLP, EncoderResMLP, EncoderHybrid, EncoderSGNN, GeneTransformerEncoder
+  decoders: ['DecoderResMLP']  # DecoderMLP, DecoderResMLP
   predict_cell_prop: false
   loss_coefficient:
     cell_prop: 0

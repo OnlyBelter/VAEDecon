@@ -168,6 +168,17 @@ def evaluate_model(
     pred_cell_prop_list = []
     with torch.no_grad():
         for batch in test_set_loader:
+            # Move the batch to the correct device (GPU)
+            if isinstance(batch, dict):
+                batch = {
+                    k: v.to(device) if isinstance(v, torch.Tensor) else v
+                    for k, v in batch.items()
+                }
+            elif isinstance(batch, torch.Tensor):
+                batch = batch.to(device)
+            elif isinstance(batch, list):
+                batch = [v.to(device) if isinstance(v, torch.Tensor) else v for v in batch]
+
             pred_a = trained_model(batch)  # A ModelOutput including 11 elements
             pred_cell_prop = []
             if model_config.predict_cell_prop:
