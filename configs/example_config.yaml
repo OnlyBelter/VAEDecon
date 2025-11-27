@@ -72,3 +72,4 @@ evaluation:
   figsize: [3.5, 3.5]
   rasterized: true
   show_metrics: true
+  val_batch_size: 128

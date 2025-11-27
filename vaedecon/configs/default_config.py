@@ -576,6 +576,7 @@ class EvaluationConfig:
     plot_single_cell_gep: bool = True
     plot_bulk_gep: bool = True
     plot_latent_space: bool = True
+    val_batch_size: int = 128
 
     # UMAP settings
     n_neighbors: int = 15

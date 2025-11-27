@@ -73,7 +73,7 @@ class VAEDeconPredictor:
             data_file_path: str,
             output_dir: Optional[str] = None,
             pred_cell_prop_file_path: Optional[str] = None,
-            batch_size: int = 1024,
+            # batch_size: int = 1024,
             save_reconstructed_geps: bool = False,
             dataset_type: str = 'test'
     ) -> Dict[str, Any]:
@@ -118,6 +118,7 @@ class VAEDeconPredictor:
         logger.info(f"Dataset shape: {dataset.data.shape}")
 
         logger.info("Running inference...")
+        val_batch_size = self.config.evaluation.val_batch_size
         results = evaluate_model(
             trained_model=self.model,
             test_set=dataset,
@@ -126,7 +127,7 @@ class VAEDeconPredictor:
             device=self.device,
             pred_cell_prop_file_path=pred_cell_prop_file_path,
             model_config=self.config.model,
-            val_batch_size=batch_size,
+            val_batch_size=val_batch_size,
             save_reconstructed_geps=save_reconstructed_geps,
             dataset_type=dataset_type,
         )
@@ -142,7 +143,7 @@ class VAEDeconPredictor:
             pred_cell_prop_file_path: Optional[str] = None,
             sample2cell_id_file_path: Optional[str] = None,
             sct_gep_file_path: Optional[str] = None,
-            batch_size: int = 1024,
+            # batch_size: int = 1024,
     ) -> Dict[str, Any]:
         """
         Predict and visualize results
@@ -163,7 +164,7 @@ class VAEDeconPredictor:
             data_file_path=data_file_path,
             output_dir=output_dir,
             pred_cell_prop_file_path=pred_cell_prop_file_path,
-            batch_size=batch_size,
+            # batch_size=val_batch_size,
             save_reconstructed_geps=True,
             dataset_type='test'
         )
