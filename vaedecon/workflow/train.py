@@ -191,6 +191,7 @@ class VAEDeconTrainer:
             gene_hidden_dim=self.config.model.gene_hidden_dim,
             encoders=self.config.model.encoders,
             decoders=self.config.model.decoders,
+            mask_ratio=self.config.model.mask_ratio,
         )
 
     def _convert_to_trainer_config(self) -> BaseTrainerConfig:

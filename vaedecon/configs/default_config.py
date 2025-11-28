@@ -287,6 +287,14 @@ class ModelConfig(VAEConfig):
         description="Scale input GEP data by constant factor (20 by default)"
     )
 
+    # Mask fraction for input dropout
+    mask_ratio: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of input features (genes) to mask for dropout"
+    )
+
     # ==================== Validators ====================
 
     @field_validator('input_dim')

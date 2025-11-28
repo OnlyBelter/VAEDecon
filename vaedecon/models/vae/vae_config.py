@@ -111,6 +111,14 @@ class VAEConfig(BaseModelConfig):
         description="List of decoder types to use (e.g., ['mlp', 'res_mlp'])"
     )
 
+    # Mask fraction for input dropout
+    mask_ratio: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of input features (genes) to mask for dropout"
+    )
+
     # ==================== Validators ====================
 
     @field_validator('input_gene_list_fp', 'cell_type_fp', 'gene_mean_std_fp', check_fields=False)

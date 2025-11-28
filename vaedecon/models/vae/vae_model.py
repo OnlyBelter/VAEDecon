@@ -28,7 +28,7 @@ class VAE(BaseAE):
     def __init__(
         self,
         model_config: VAEConfig,
-        encoders: list[BaseDecoder] = None,
+        encoders: list[BaseEncoder] = None,
         decoder: Optional[BaseDecoder] = None,
     ):
         super().__init__(model_config=model_config, encoders=encoders, decoder=decoder)
@@ -73,6 +73,9 @@ class VAE(BaseAE):
             )
         self.register_buffer('w', w)
 
+        # Add mask_ratio from config or default to 0.0
+        self.mask_ratio = getattr(model_config, 'mask_ratio', 0.0)
+
     def forward(self, inputs: DatasetOutput, **kwargs) -> ModelOutput:
         # 1. Get input and handle device automatically
         # Do not use self.to(device) manually inside forward; rely on input tensor device.
@@ -84,12 +87,30 @@ class VAE(BaseAE):
         if y is not None:
             y = y.to(device)
 
+        # ================== Random Gene Masking ==================
+        # Only apply masking during training, not validation/testing
+        if self.training and self.mask_ratio > 0:
+            # Create a random mask: 1 = keep, 0 = mask
+            # Shape: (Batch, Genes)
+            mask = torch.rand_like(x) > self.mask_ratio
+
+            # Apply mask: Zero out masked genes
+            x_masked = x * mask.float()
+
+            # (Optional) Scale remaining values to preserve magnitude
+            # x_masked = x_masked / (1 - self.mask_ratio)
+
+            # Use x_masked for the encoders
+            x_input = x_masked
+        else:
+            x_input = x
+
         # 2. Encoders Forward Pass
         mu_list, logvar_list, prop_list, dd_alpha_list = [], [], [], []
         mu_mean_list, logvar_mean_list = [], []
 
         for encoder in self.encoders:
-            out = encoder(x=x, y=y)
+            out = encoder(x=x_input, y=y)
             mu_list.append(out.mu_all_types)  # (B, Latent, n_cell_types)
             logvar_list.append(out.logvar_all_types)
             mu_mean_list.append(out.mu_mean)  # (B, Latent)
