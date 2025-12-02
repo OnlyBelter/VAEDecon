@@ -62,7 +62,7 @@ class VAEDeconTrainer:
             self.config.model.model_dir = self.model_dir
         else:
             self.model_dir = self.config.model.model_dir
-            self.result_dir = os.path.dirname(self.model_dir)
+            self.result_dir = self.model_dir.parent
 
         # # Update file paths in model config
         self.config.model.input_gene_list_fp = self.model_dir / 'input_gene_list.txt'
@@ -281,7 +281,7 @@ def train_vaedecon(
         model_dir = Path(config.training.output_dir) / config.training.naming_postfix / 'final_model'
         config.model.model_dir = model_dir
     # Check if there is a file ending with .ckpt in the model_dir
-    if model_dir and os.path.exists(model_dir):
+    if model_dir and model_dir.exists():
         ckpt_files = [f for f in os.listdir(model_dir) if f.endswith('.ckpt')]
         if ckpt_files:
             logger.info(f"Model checkpoint found in {model_dir}. Skipping training.")

@@ -615,14 +615,14 @@ class VAEDeconConfig:
         )
 
     @classmethod
-    def from_yaml(cls, yaml_path: str):
+    def from_yaml(cls, yaml_path: str | Path):
         """Loads configuration from a YAML file"""
         import yaml
         with open(yaml_path, 'r') as f:
             config_dict = yaml.safe_load(f)
         return cls.from_dict(config_dict)
 
-    def to_yaml(self, yaml_path: str):
+    def to_yaml(self, yaml_path: str | Path):
         """Saves the configuration to a YAML file"""
         import yaml
         from dataclasses import asdict
