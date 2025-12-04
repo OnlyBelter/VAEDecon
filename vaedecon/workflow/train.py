@@ -76,8 +76,7 @@ class VAEDeconTrainer:
 
         # All training set files
         training_file_paths = [
-            self.config.data.simu_bulk_file_path,
-            self.config.data.sct_file_path
+            i for i in [self.config.data.simu_bulk_file_path, self.config.data.sct_file_path] if i is not None
         ]
 
         processed_training_set_dir = os.path.join(
