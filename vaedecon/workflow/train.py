@@ -75,8 +75,12 @@ class VAEDeconTrainer:
         logger.info("Loading and preparing data...")
 
         # All training set files
+        if self.config.data.simu_bulk_file_path is None:
+            self.config.data.simu_bulk_file_path = []
+        if self.config.data.sct_file_path is None:
+            self.config.data.sct_file_path = []
         training_file_paths = [
-            i for i in [self.config.data.simu_bulk_file_path, self.config.data.sct_file_path] if i is not None
+            i for i in self.config.data.simu_bulk_file_path + self.config.data.sct_file_path if i is not None
         ]
 
         processed_training_set_dir = os.path.join(

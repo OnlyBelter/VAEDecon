@@ -4,7 +4,6 @@ Default configuration for VAEDecon
 from dataclasses import dataclass, field
 from ..models.vae.vae_config import VAEConfig
 from typing import List, Dict, Optional, Tuple, Any
-import os
 from pathlib import Path
 from pydantic import Field, field_validator, model_validator
 
@@ -14,8 +13,8 @@ class DataConfig:
     data_dir: str | Path = './datasets/'
 
     # Training data
-    sct_file_path: str | Path = ''
-    simu_bulk_file_path: str | Path = ''
+    sct_file_path: list[str | Path] = field(default_factory=list)
+    simu_bulk_file_path: list[str | Path] = field(default_factory=list)
 
     # Test data
     test_set_file_path: str | Path = ''
@@ -30,23 +29,6 @@ class DataConfig:
     scaling_by_constant: bool = True
     remove_low_var_genes: bool = False
     force_reprocess: bool = False
-
-    def __post_init__(self):
-        """auto-complete file paths"""
-        if not self.sct_file_path:
-            self.sct_file_path = os.path.join(
-                self.data_dir,
-                'generated_sc_dataset_12ds_n_base100_all_subtypes',
-                'simu_bulk_exp_SCT_POS_N100_test_log2cpm1p.h5ad'
-            )
-
-        if not self.simu_bulk_file_path:
-            self.simu_bulk_file_path = os.path.join(
-                self.data_dir,
-                'simulated_bulk_cell_dataset_subtypes_all_range',
-                'segment_12ds_0.95_n_base100_19cancer_pca_0.9_median_gep',
-                'simu_bulk_exp_Test_set1_log2cpm1p.h5ad'
-            )
 
 
 @dataclass
