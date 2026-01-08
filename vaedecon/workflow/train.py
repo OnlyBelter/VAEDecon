@@ -95,6 +95,9 @@ class VAEDeconTrainer:
             remove_low_var_genes=self.config.data.remove_low_var_genes,
             processed_data_dir=processed_training_set_dir,
             force_reprocess=self.config.data.force_reprocess,
+            use_memmap=True,  # use memory-mapped files for large datasets
+            chunk_size=1000,
+            compress=True, # compress cached files to save disk space
         )
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
