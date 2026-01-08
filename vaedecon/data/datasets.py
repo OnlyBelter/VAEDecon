@@ -196,24 +196,29 @@ class GEPDataset(Dataset):
 
     def _load_data(self):
         """Load data array (with memory mapping if enabled)."""
-        if self.use_memmap and self.cached_data_path.exists():
-            # Memory-mapped array: doesn't load into RAM until accessed
-            self._data = np.load(self.cached_data_path, mmap_mode='r')
-            log_message(f"Loaded data as memory-mapped array: {self._data.shape}")
-            if self._data.dtype != np.float32:
-                logger.warning(f'Data dtype is {self._data.dtype}, consider converting to float32 for efficiency.')
-        elif self.cached_data_path.exists():
-            data = np.load(self.cached_data_path)
-            if data.dtype != np.float32:
-                data = data.astype(np.float32)  # Convert to float32 for efficiency
-            log_message(f"Loaded data into memory: {self._data.shape}")
-            self._data = data
+        if self.cached_data_path.exists():
+            if self.compress:
+                self.cached_data_path = self.cached_data_path.with_suffix(".npz")
+            if self.use_memmap:
+                # Memory-mapped array: doesn't load into RAM until accessed
+                self._data = np.load(self.cached_data_path, mmap_mode='r')
+                log_message(f"Loaded data as memory-mapped array: {self._data.shape}")
+                if self._data.dtype != np.float32:
+                    logger.warning(f'Data dtype is {self._data.dtype}, consider converting to float32 for efficiency.')
+            else:
+                data = np.load(self.cached_data_path)
+                if data.dtype != np.float32:
+                    data = data.astype(np.float32)  # Convert to float32 for efficiency
+                log_message(f"Loaded data into memory: {self._data.shape}")
+                self._data = data
         else:
             raise FileNotFoundError(f"Data file not found: {self.cached_data_path}")
 
     def _load_labels(self):
         """Load labels array (with memory mapping if enabled)."""
         if self.cached_labels_path.exists():
+            if self.compress:
+                self.cached_labels_path = self.cached_labels_path.with_suffix(".npz")
             if self.use_memmap:
                 self._labels = np.load(self.cached_labels_path, mmap_mode='r')
             else:
