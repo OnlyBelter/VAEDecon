@@ -97,7 +97,7 @@ class VAEDeconTrainer:
             force_reprocess=self.config.data.force_reprocess,
             use_memmap=True,  # use memory-mapped files for large datasets
             chunk_size=1000,
-            compress=True, # compress cached files to save disk space
+            # compress=True, # compress cached files to save disk space
         )
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
