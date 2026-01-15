@@ -433,17 +433,86 @@ class GEPDataset(Dataset):
 
         return gep_data_df
 
-    def _apply_transformation_chunked(self, gep_data_df: pd.DataFrame) -> pd.DataFrame:
+    def _apply_transformation_chunked(self, gep_data_df: pd.DataFrame,
+                                      chunk_size: int = 10000) -> pd.DataFrame:
         """
-        Apply transformations in chunks to reduce memory usage.
+        Apply transformations in chunks with memory optimization.
+
+        Args:
+            gep_data_df: Input gene expression DataFrame
+            chunk_size: Number of samples to process at once (adjust based on available memory)
+
+        Returns:
+            Transformed DataFrame in float32
         """
-        # Apply non_log2log_cpm transformation
-        # If this function is memory-intensive, consider chunking it
-        gep_data_df = non_log2log_cpm(gep_data_df, transpose=False)
-        if gep_data_df.values.dtype != np.float32:
-            gep_data_df = gep_data_df.astype(np.float32)  # Reduce memory usage
-        log_message(f"After transformation: {gep_data_df.shape}")
-        return gep_data_df
+        log_message(f"Applying transformation to {gep_data_df.shape} data...")
+        log_message(f"Chunk size: {chunk_size} samples")
+
+        n_samples, n_genes = gep_data_df.shape
+        if n_samples <= chunk_size:
+            log_message("Data fits in one chunk, processing directly...")
+            transformed_df = non_log2log_cpm(gep_data_df, transpose=False)
+            return transformed_df.astype(np.float32, copy=False)
+
+        n_chunks = (n_samples + chunk_size - 1) // chunk_size
+
+        # Store metadata
+        index = gep_data_df.index
+        columns = gep_data_df.columns
+
+        # Pre-allocate result array
+        result_array = np.empty((n_samples, n_genes), dtype=np.float32)
+
+        # Process in chunks
+        for i in range(n_chunks):
+            start_idx = i * chunk_size
+            end_idx = min((i + 1) * chunk_size, n_samples)
+            chunk_samples = end_idx - start_idx
+
+            # log_message(f"Processing chunk {i + 1}/{n_chunks}: "
+            #             f"samples {start_idx}-{end_idx} ({chunk_samples} samples)")
+
+            # Get chunk (avoid copy if possible)
+            chunk_df = gep_data_df.iloc[start_idx:end_idx]
+
+            # Apply transformation
+            try:
+                transformed_chunk = non_log2log_cpm(chunk_df, transpose=False)
+
+                # Store in result array as float32
+                result_array[start_idx:end_idx] = transformed_chunk.values.astype(
+                    np.float32, copy=False
+                )
+
+            except MemoryError:
+                logger.error(f"Memory error at chunk {i + 1}. Try reducing chunk_size.")
+                raise
+
+            finally:
+                # Explicitly free memory
+                del chunk_df
+                if 'transformed_chunk' in locals():
+                    del transformed_chunk
+
+            # Periodic garbage collection
+            if (i + 1) % 5 == 0:
+                import gc
+                gc.collect()
+                log_message(f"Garbage collection performed after chunk {i + 1}")
+
+        # Create DataFrame from result array
+        log_message("Creating result DataFrame...")
+        result = pd.DataFrame(result_array, index=index, columns=columns)
+
+        # Final cleanup
+        del result_array, gep_data_df
+        import gc
+        gc.collect()
+
+        log_message(f"Transformation complete: {result.shape}, dtype: {result.values.dtype}")
+        log_message(f"Memory usage: {result.memory_usage(deep=True).sum() / (1024 ** 3):.2f} GB")
+
+        return result
 
     def _save_to_cache_efficient(self, gep_data_df: pd.DataFrame,
                                  cell_prop_df: pd.DataFrame):

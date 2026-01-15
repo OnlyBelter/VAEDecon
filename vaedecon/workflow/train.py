@@ -3,6 +3,8 @@ Training pipeline for VAEDecon
 """
 import os
 import logging
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -277,15 +279,61 @@ def train_vaedecon(
         config.training.num_epochs = 500
         model_dir = train_vaedecon(config=config)
     """
+    # Load configuration
     if config_file is not None:
         config = VAEDeconConfig.from_yaml(config_file)
     elif config is None:
         config = VAEDeconConfig()
+
+    # Determine model directory
     if config.model.model_dir is not None:
         model_dir = Path(config.model.model_dir)
     else:
         model_dir = Path(config.training.output_dir) / config.training.naming_postfix / 'final_model'
         config.model.model_dir = model_dir
+
+    # Create model directory
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save config file to model directory
+    if config_file is not None:
+        try:
+            config_file_path = Path(config_file)
+
+            # Save original config with original name
+            saved_config_path = model_dir / f"config_{config_file_path.stem}.yaml"
+            shutil.copy2(config_file_path, saved_config_path)
+            logger.info(f"Saved original config to {saved_config_path}")
+
+            # Save as default config.yaml for easy access
+            default_config_path = model_dir / "config.yaml"
+            shutil.copy2(config_file_path, default_config_path)
+            logger.info(f"Saved config to {default_config_path}")
+
+            # Save timestamped version for versioning
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamped_config = model_dir / f"config_{timestamp}.yaml"
+            shutil.copy2(config_file_path, timestamped_config)
+            logger.info(f"Saved timestamped config to {timestamped_config}")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Could not save config file: {e}")
+    else:
+        # If config was provided as object (not file), save it
+        try:
+            config_path = model_dir / "config.yaml"
+            config.to_yaml(config_path)
+            logger.info(f"Saved config to {config_path}")
+
+            # Also save timestamped version
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamped_config = model_dir / f"config_{timestamp}.yaml"
+            config.to_yaml(timestamped_config)
+            logger.info(f"Saved timestamped config to {timestamped_config}")
+
+        except Exception as e:
+            logger.warning(f"⚠️  Could not save config: {e}")
+
     # Check if there is a file ending with .ckpt in the model_dir
     if model_dir and model_dir.exists():
         ckpt_files = [f for f in os.listdir(model_dir) if f.endswith('.ckpt')]
@@ -295,5 +343,16 @@ def train_vaedecon(
             config.model.input_gene_list_fp = model_dir / 'input_gene_list.txt'
             return config
 
+    # Train model
     trainer = VAEDeconTrainer(config)
-    return trainer.train()
+    trained_config = trainer.train()
+
+    # Save final config after training (may have updates)
+    try:
+        final_config_path = model_dir / "config_final.yaml"
+        trained_config.to_yaml(final_config_path)
+        logger.info(f"Saved final config to {final_config_path}")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not save final config: {e}")
+
+    return trained_config

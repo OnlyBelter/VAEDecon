@@ -531,7 +531,7 @@ def log_exp2cpm_tensor(exp: torch.Tensor, log_base=2, correct=1, transpose: bool
 
 
 def non_log2log_cpm(input_file_path: Union[str, pd.DataFrame, torch.Tensor], result_file_path: str = None,
-                    transpose: bool = True, correct: int = 1):
+                    transpose: bool = True, correct: int = 1, dtype = np.float32):
     """
     Convert non-log expression data to log2(CPM + 1) or log2(TPM + 1)
 
@@ -543,23 +543,34 @@ def non_log2log_cpm(input_file_path: Union[str, pd.DataFrame, torch.Tensor], res
 
     :param correct: plus 1 for avoiding log transform 0
 
+    :param dtype: data type of returned DataFrame
+
     :return: log2(CPM + 1) or save result to file, samples by genes if transpose is True, otherwise genes by samples
     """
 
     bulk_exp = pd.DataFrame()
     if type(input_file_path) is str:
         sep = get_sep(input_file_path)
-        bulk_exp = pd.read_csv(input_file_path, index_col=0, sep=sep)
+        bulk_exp = pd.read_csv(input_file_path, index_col=0, sep=sep, dtype=dtype)
     elif type(input_file_path) is pd.DataFrame:
-        bulk_exp = input_file_path
+        if input_file_path.values.dtype != dtype:
+            bulk_exp = input_file_path.astype(dtype, copy=False)
+        else:
+            bulk_exp = input_file_path
     if transpose:
         bulk_exp = bulk_exp.T  # transpose to samples by genes
     bulk_exp = non_log2cpm(bulk_exp)  # CPM/TPM
-    bulk_exp = np.log2(bulk_exp + correct)
+
+    # Using numpy (faster than pandas)
+    values = bulk_exp.values
+    values = np.log2(values + correct, dtype=dtype)
+
+    result = pd.DataFrame(values, index=bulk_exp.index, columns=bulk_exp.columns)
+    # bulk_exp = np.log2(bulk_exp + correct)
     if result_file_path is not None:
-        bulk_exp.round(3).to_csv(result_file_path)
+        result.round(3).to_csv(result_file_path)
     else:
-        return bulk_exp.round(3)
+        return result.round(3)
 
 
 def non_log2log_cpm_tensor(exp: torch.Tensor, result_file_path: str = None,
@@ -605,7 +616,12 @@ def non_log2cpm(exp_df, sum_exp=1e6) -> pd.DataFrame:
 
     :return: counts per million (CPM) or transcript per million (TPM)
     """
-    return exp_df / np.vstack(exp_df.sum(axis=1)) * sum_exp
+    values = exp_df.values.astype(np.float32)  # Use float32
+    lib_size = values.sum(axis=1, keepdims=True)  # Use keepdims
+    lib_size[lib_size == 0] = 1.0  # Handle zeros
+    normalized = (values / lib_size) * sum_exp
+    return pd.DataFrame(normalized, index=exp_df.index, columns=exp_df.columns)
+    # return exp_df / np.vstack(exp_df.sum(axis=1)) * sum_exp
 
 
 def non_log2cpm_tensor(exp: torch.Tensor, sum_exp=1e6) -> torch.Tensor:
