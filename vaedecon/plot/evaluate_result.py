@@ -13,7 +13,7 @@ from typing import List, Dict
 import torch
 import umap
 
-from ..utility import (calculate_rmse, check_dir, get_corr, read_xy, read_df, get_ccc,
+from ..utility import (calculate_rmse, check_dir, get_corr, read_xy, read_df, get_ccc, to_numpy,
                        get_core_zone_of_pca, read_cancer_purity, cancer_types, non_log2log_cpm)
 # from ..utility.read_file import find_sct_gep_of_bulk_sample
 from ..data import GEPDataset
@@ -934,7 +934,7 @@ def plot_bulk_gep(
     bulk_gep_result_dir = os.path.join(gep_result_dir, "bulk_gep")
     check_dir(Path(bulk_gep_result_dir))
     recon_bulk_gep_conv = pred_a["recon_x_conv"].detach().cpu().numpy()
-    bulk_gep_input = test_set.data.detach().cpu().numpy()
+    bulk_gep_input = to_numpy(test_set.data)
     sample_ids = test_set.get_sample_ids()
     gene_list = test_set.get_gene_list()
     recon_bulk_gep_conv_df = pd.DataFrame(

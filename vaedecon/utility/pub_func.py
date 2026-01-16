@@ -1080,5 +1080,34 @@ def generate_time_signature(model_name: str, naming_postfix: str = None) -> str:
     return f"{model_name}_training_{_training_signature}"
 
 
+def to_numpy(data: Union[torch.Tensor, np.ndarray, np.memmap]) -> np.ndarray:
+    """
+    Safely convert data to numpy array.
+
+    Handles:
+    - PyTorch Tensors
+    - NumPy arrays
+    - NumPy memmaps
+
+    Args:
+        data: Input data
+
+    Returns:
+        Regular numpy array
+    """
+    if isinstance(data, torch.Tensor):
+        return data.detach().cpu().numpy()
+    elif isinstance(data, np.memmap):
+        # Force conversion to regular array
+        return np.array(data, copy=True)
+    elif isinstance(data, np.ndarray):
+        return data
+    else:
+        raise TypeError(
+            f"Cannot convert {type(data)} to numpy array. "
+            f"Expected torch.Tensor, np.ndarray, or np.memmap."
+        )
+
+
 if __name__ == '__main__':
     pass
