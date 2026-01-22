@@ -1019,3 +1019,88 @@ def plot_latent_space(
                     data=sc_mu_df, ax=ax, rasterized=True)
     f.savefig(os.path.join(latent_space_result_dir, f'sc_mu_deconv_{n_neighbors}_{min_dist}.svg'), dpi=300)
     plt.close(f)
+
+
+def plot_prediction_comparison(
+        y_pred: pd.Series,
+        y_true: pd.Series,
+        ax: plt.Axes,
+        title: str = None,
+        xlabel: str = "",
+        ylabel: str = "",
+        show_metrics: bool = True,
+        show_diag_line: bool = True,
+        scatter_kwargs: dict = None,
+        diag_line_kwargs: dict = None,
+        rasterized: bool = True,
+) -> dict:
+    """
+    Plots a general-purpose comparison of true vs. predicted values on a given axis.
+
+    Args:
+        y_pred: A pandas Series of the predicted values.
+        y_true: A pandas Series of the ground truth values.
+        ax: The matplotlib Axes object to plot on.
+        title: The title for the subplot.
+        xlabel: The label for the x-axis.
+        ylabel: The label for the y-axis.
+        show_metrics: If True, calculates and displays correlation, p-value, and RMSE.
+        show_diag_line: If True, displays a y=x diagonal line.
+        scatter_kwargs: A dictionary of keyword arguments passed to ax.scatter().
+        diag_line_kwargs: A dictionary of keyword arguments passed to ax.plot() for the diagonal line.
+        rasterized: If True, uses a rasterized version of the plot.
+
+    Returns:
+        A dictionary containing the calculated 'correlation', 'p_value', and 'rmse'.
+    """
+    # --- Set default styles for plot elements ---
+    if scatter_kwargs is None:
+        scatter_kwargs = {'s': 1.5, 'alpha': 0.85, 'rasterized': rasterized, 'color': 'tab:blue'}
+    if diag_line_kwargs is None:
+        diag_line_kwargs = {'linestyle': '--', 'color': 'tab:gray', 'lw': 1}
+
+    # --- Plotting ---
+    ax.scatter(y_pred, y_true, **scatter_kwargs)
+
+    if show_diag_line:
+        # Determine the limits for the diagonal line from the data
+        min_val = min(ax.get_xlim()[0], ax.get_ylim()[0])
+        max_val = max(ax.get_xlim()[1], ax.get_ylim()[1])
+        ax.plot([min_val, max_val], [min_val, max_val], **diag_line_kwargs)
+
+    # --- Labels and Title ---
+    if title is not None:
+        ax.set_title(title, fontsize=8)
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=7)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=7)
+
+    # --- Metrics Calculation and Display ---
+    metrics = {}
+    if show_metrics:
+        # Ensure there are no NaN values which would crash the metric functions
+        valid_indices = y_true.notna() & y_pred.notna()
+        if valid_indices.sum() < 2:  # Not enough data to correlate
+            ax.text(0.05, 0.95, "Not enough data", transform=ax.transAxes, fontsize=6,
+                    verticalalignment='top', bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.5))
+            return {'correlation': np.nan, 'p_value': np.nan, 'rmse': np.nan}
+
+        y_t = y_true[valid_indices]
+        y_p = y_pred[valid_indices]
+
+        corr, p_value = get_corr(y_p, y_t, return_p_value=True)
+        rmse = calculate_rmse(pd.DataFrame(y_t), pd.DataFrame(y_p))
+        metrics = {'correlation': corr, 'p_value': p_value, 'rmse': rmse}
+
+        # Format p-value for display
+        p_text = f"p < 0.001" if p_value < 0.001 else f"p = {p_value:.3f}"
+
+        # Consolidate metrics into a single text block for cleaner plotting
+        metrics_text = f"$r$ = {corr:.2f} ({p_text})\nRMSE = {rmse:.3f}"
+
+        # Use ax.transAxes for robust text positioning in the top-left corner
+        ax.text(0.05, 0.95, metrics_text, transform=ax.transAxes, fontsize=6,
+                verticalalignment='top', bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.5))
+
+    return metrics

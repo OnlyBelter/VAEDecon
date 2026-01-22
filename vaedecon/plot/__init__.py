@@ -19,7 +19,7 @@ from .evaluate_result import compare_mean_exp_with_cell_frac_across_algo
 from .evaluate_result import ScatterPlot
 from .evaluate_result import plot_pred_cell_prop_with_cpe
 from .evaluate_result import compare_y_y_pred_plot_cpe
-from .evaluate_result import compare_y_y_pred_subplot
+from .evaluate_result import compare_y_y_pred_subplot, plot_prediction_comparison
 from .evaluate_result import plot_single_cell_gep
 from .evaluate_result import plot_bulk_gep
 from .evaluate_result import plot_latent_space
