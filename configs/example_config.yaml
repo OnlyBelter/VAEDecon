@@ -5,6 +5,13 @@ data:
   scaling_by_constant: true
   remove_low_var_genes: false
   force_reprocess: false
+  # Training set, test set, and sct_gep_file (for finding true sampled GEPs).
+  sct_file_path: [ './datasets/generated_sc_dataset_12ds_n_base100_all_subtypes/simu_bulk_exp_SCT_POS_N100_test_log2cpm1p.h5ad' ]
+  simu_bulk_file_path: [ './datasets/simulated_bulk_cell_dataset_subtypes_all_range/segment_12ds_no_filtering_n_base100_median_gep/simu_bulk_exp_Mixed_N1K_segment_without_filtering_log2cpm1p.h5ad' ]
+  test_set_file_path: './datasets/simulated_bulk_cell_dataset_subtypes_all_range/segment_12ds_0.95_n_base100_19cancer_pca_0.9_median_gep/simu_bulk_exp_Test_set1_log2cpm1p.h5ad'
+  sct_gep_file_path: './datasets/generated_sc_dataset_12ds_n_base100_all_subtypes/simu_bulk_exp_SCT_POS_N10K_log2cpm1p_25sct.h5ad'
+  test_set_sample2cell_id_file_path: './datasets/simulated_bulk_cell_dataset_subtypes_all_range/segment_12ds_0.95_n_base100_19cancer_pca_0.9_median_gep/simu_bulk_exp_Test_set1_sampled_sc_cell_id.csv'
+
 
 training:
   output_dir: './output/vae'
@@ -29,6 +36,7 @@ training:
 
 
 model:
+  ppi_file_path: './datasets/PPI/format_h_sapiens.csv'
   input_dim: [1, 17834]
   latent_dim: 10
   n_cell_types: 16
@@ -59,6 +67,7 @@ model:
   gene_hidden_dim: 10
   using_positional_encoding: false
   scaling_by_constant: true
+  mask_ratio: 0.4
 
 
 evaluation:

@@ -170,6 +170,8 @@ class VAEDeconTrainer:
         # Set default PPI file path if not provided
         if not self.config.model.ppi_file_path:
             self.config.model.ppi_file_path = Path(self.config.data.data_dir) / 'PPI' / 'format_h_sapiens.csv'
+        else:
+            self.config.model.ppi_file_path = Path(self.config.model.ppi_file_path)
 
         return VAEConfig(
             name='VAEConfig',
