@@ -35,9 +35,18 @@ class DatasetOutput(OrderedDict):
         else:
             return self.to_tuple()[k]
 
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
     def __setattr__(self, name, value):
-        super().__setitem__(name, value)
-        super().__setattr__(name, value)
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+        else:
+            self[name] = value
+            super().__setattr__(name, value)
 
     def __setitem__(self, key, value):
         super().__setitem__(key, value)

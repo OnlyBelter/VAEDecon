@@ -66,9 +66,9 @@ def get_dataloader(
                 logger.info(f"OS is Windows, num_workers defaulted to {num_workers}. "
                             "Consider manual tuning if data loading is a bottleneck.")
             else:
-                # A common heuristic: number of GPUs * 2 or 4, or num_cpus / 2
+                # A common heuristic: number of GPUs * 2 or 4, or num_cpus / 3 (multiple programs may be running).
                 # Let's use a conservative approach:
-                num_workers = max(1, available_cpus // 2) if available_cpus > 2 else (1 if available_cpus > 0 else 0)
+                num_workers = max(1, int(available_cpus // 3)) if available_cpus > 3 else (1 if available_cpus > 0 else 0)
                 num_workers = min(num_workers, 10)  # Cap at 8 to avoid excessive resource usage
 
             # If dataset is small and __getitem__ is trivial (e.g., pre-loaded tensors),

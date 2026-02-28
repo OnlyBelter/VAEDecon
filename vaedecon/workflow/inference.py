@@ -301,33 +301,58 @@ def predict_vaedecon(
         **kwargs
 ) -> Dict[str, Any]:
     """
-    Wrapper function for predicting with a trained VAEDecon model
+    Run inference (prediction) using a trained VAEDecon model.
+
+    This function loads a trained model and predicts cell type proportions for new bulk data.
+    It can optionally generate visualizations of the results.
 
     Parameters:
-        model_dir: Directory of the trained model
-        data_file_path: File path of input data to be predicted
-        output_dir: Output directory
-        config: VAEDecon Config object
-        device: ('auto', 'cuda', 'cpu')
-        visualize: Whether to generate visualizations, default is True
-        **kwargs: Other parameters passed to predict or predict_and_visualize
+        model_dir (str | Path):
+            Directory containing the trained model (checkpoint and config).
+        data_file_path (str | Path):
+            Path to the input bulk expression file (.h5ad or .csv).
+        output_dir (Optional[str]):
+            Directory to save prediction results. Defaults to a 'test_results' folder
+            relative to the model directory.
+        config (Optional[VAEDeconConfig]):
+            Configuration object override. Usually loaded automatically from `model_dir`.
+        device (str):
+            Device to run inference on ('auto', 'cuda', 'cpu'). Defaults to 'auto'.
+        visualize (bool):
+            If True, generates plots for cell proportions, latent space, etc.
+            Defaults to True.
+        **kwargs:
+            Additional arguments passed to the underlying predictor methods.
+            Common kwargs include:
+            - pred_cell_prop_file_path (str): Path to ground truth cell proportions (for evaluation).
+            - sample2cell_id_file_path (str): Path to sample-to-cell mapping (for simulated data).
+            - sct_gep_file_path (str): Path to single-cell GEP reference (for visualization).
+            - save_reconstructed_geps (bool): Whether to save reconstructed expression profiles.
+            - dataset_type (str): Label for the dataset (e.g., 'test', 'tcga').
 
     Returns:
-        Dictionary containing prediction results
+        Dict[str, Any]:
+            A dictionary containing prediction results and paths to saved files.
+            Key fields include:
+            - 'pred_cell_prop': DataFrame of predicted cell proportions.
+            - 'pred_cell_prop_file_path': Path to the saved prediction CSV.
+            - 'gep_result_dir': Directory where GEP results are saved.
+            - 'cell_prop_result_dir': Directory where proportion results are saved.
 
     Examples:
-        # Prediction
+        # 1. Simple prediction
         results = predict_vaedecon(
-            model_dir='./output/vae/VAE_training_xxx/final_model',
+            model_dir='./output/model',
             data_file_path='./data/test.h5ad'
         )
+        print(results['pred_cell_prop'].head())
 
-        # Prediction and visualization
-        results = predict_vaedecon(
-            model_dir='./output/vae/VAE_training_xxx/final_model',
+        # 2. Prediction with visualization and ground truth comparison
+        predict_vaedecon(
+            model_dir='./output/model',
             data_file_path='./data/test.h5ad',
             visualize=True,
-            pred_cell_prop_file_path='./results/cell_prop.csv'
+            pred_cell_prop_file_path='./data/true_proportions.csv'
         )
     """
     gc.collect()

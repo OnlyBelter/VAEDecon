@@ -260,26 +260,39 @@ def train_vaedecon(
         config_file: Optional[str] = None
 ) -> Optional[VAEDeconConfig]:
     """
-    Wrapper function to train VAEDecon model
+    Wrapper function to train VAEDecon model.
+
+    This function serves as the main entry point for training a VAEDecon model.
+    It handles configuration loading (from file or object), directory setup,
+    model initialization, and the training loop.
 
     Parameters:
-        config: VAEDecon configuration object, either config or config_file should be provided
-        config_file: Config file path in YAML format, either config or config_file should be provided
+        config (Optional[VAEDeconConfig]):
+            A VAEDecon configuration object. If provided, it overrides default settings.
+            Either `config` or `config_file` should be provided.
+        config_file (Optional[str]):
+            Path to a YAML configuration file. If provided, the configuration is loaded from this file.
+            If both `config` and `config_file` are provided, `config_file` takes precedence
+            for initial loading, but any programmatic changes to `config` should be applied before calling.
 
     Returns:
-        VAEDecon configuration (maybe updated during training)
+        Optional[VAEDeconConfig]:
+            The final configuration object used for training, which may contain updates
+            (e.g., paths to saved models, calculated input dimensions).
+            Returns None if training fails or is skipped.
 
     Examples:
-        # Use default configuration
-        model_dir = train_vaedecon()
+        # 1. Use default configuration
+        train_vaedecon()
 
-        # Use config file
-        model_dir = train_vaedecon(config_file='config.yaml')
+        # 2. Use a YAML config file
+        train_vaedecon(config_file='configs/my_experiment.yaml')
 
-        # Use custom configuration
+        # 3. Use a custom configuration object
+        from vaedecon.configs import VAEDeconConfig
         config = VAEDeconConfig()
-        config.training.num_epochs = 500
-        model_dir = train_vaedecon(config=config)
+        config.training.num_epochs = 200
+        train_vaedecon(config=config)
     """
     # Load configuration
     if config_file is not None:

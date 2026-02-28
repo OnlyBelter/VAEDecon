@@ -5,9 +5,9 @@ from vaedecon.workflow import predict_vaedecon
 from vaedecon.configs import VAEDeconConfig
 
 
-# ============ 方法1: 简单预测 ============
+# ============ Method 1 ============
 def example_1_simple_prediction():
-    """简单预测"""
+    """Simple prediction without visualization"""
     results = predict_vaedecon(
         model_dir='./output/vae/VAE_training_2025-11-03_22-28-38/final_model',
         data_file_path='./datasets/test_data.h5ad'
@@ -17,9 +17,9 @@ def example_1_simple_prediction():
     print(f"Predicted cell proportions shape: {results['pred_cell_prop'].shape}")
 
 
-# ============ 方法2: 预测并可视化 ============
+# ============ Method 2 ============
 def example_2_predict_with_visualization():
-    """预测并生成可视化结果"""
+    """Predict with visualization and additional inputs"""
     results = predict_vaedecon(
         model_dir='./output/vae/VAE_training_2025-11-03_22-28-38/final_model',
         data_file_path='./datasets/test_data.h5ad',
@@ -33,9 +33,9 @@ def example_2_predict_with_visualization():
     print("Prediction and visualization completed!")
 
 
-# ============ 方法3: 批量预测多个数据集 ============
+# ============ Method 3 ============
 def example_3_batch_prediction():
-    """批量预测多个数据集"""
+    """Predict multiple datasets in a batch"""
     model_dir = './output/vae/VAE_training_2025-11-03_22-28-38/final_model'
 
     datasets = [
@@ -54,16 +54,15 @@ def example_3_batch_prediction():
         print(f"  ✓ Completed: {data_file}")
 
 
-# ============ 方法4: 使用自定义配置预测 ============
+# ============ Method 4 ============
 def example_4_custom_config_prediction():
-    """使用自定义配置进行预测"""
-    # 创建配置
+    """Prediction with custom configuration"""
+    # Customize evaluation settings
     config = VAEDeconConfig()
     config.evaluation.n_samples = 5
     config.evaluation.plot_latent_space = True
     config.evaluation.figsize = (5, 5)
 
-    # 执行预测
     results = predict_vaedecon(
         model_dir='./output/vae/VAE_training_2025-11-03_22-28-38/final_model',
         data_file_path='./datasets/test_data.h5ad',

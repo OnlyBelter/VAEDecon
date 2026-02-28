@@ -152,10 +152,7 @@ class VAE(BaseAE):
 
         # Flatten for decoder: (B, Latent, C) -> (B, C, Latent) -> (B*C, Latent)
         # Ensure the shape is compatible with the decoder's input expectation
-        if z_types.shape[-1] == n_cell_types:
-            z_types_flat = z_types.permute(0, 2, 1).reshape(-1, self.model_config.latent_dim)
-        else:
-            z_types_flat = z_types.reshape(-1, self.model_config.latent_dim)
+        z_types_flat = z_types.permute(0, 2, 1).reshape(-1, self.model_config.latent_dim)
 
         # One-time decoding: (B*C, Latent) -> (B*C, Genes)
         recon_flat = self.decoder(z_types_flat)["reconstruction"]
@@ -246,10 +243,10 @@ class VAE(BaseAE):
         # --- 1. Reconstruction Loss ---
         if self.model_config.reconstruction_loss == "mse":
             recon_loss = F.mse_loss(recon_x_conv, x, reduction="none").sum(dim=-1)
-        elif self.model_config.reconstruction_loss == "bce":
-            recon_loss = F.binary_cross_entropy(recon_x_conv, x, reduction="none").sum(dim=-1)
+        # elif self.model_config.reconstruction_loss == "bce":
+            # recon_loss = F.binary_cross_entropy(recon_x_conv, x, reduction="none").sum(dim=-1)
         else:
-            raise ValueError(f"Unknown loss: {self.model_config.reconstruction_loss}")
+            raise ValueError(f"Unknown resconstruction loss: {self.model_config.reconstruction_loss}, only MSE is supported")
 
         # --- 2. Gene Statistics Loss ---
         if lo.get('gene_mean_std_weight', 0) != 0:
