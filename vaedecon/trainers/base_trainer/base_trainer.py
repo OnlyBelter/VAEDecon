@@ -69,7 +69,7 @@ def get_dataloader(
                 # A common heuristic: number of GPUs * 2 or 4, or num_cpus / 3 (multiple programs may be running).
                 # Let's use a conservative approach:
                 num_workers = max(1, int(available_cpus // 3)) if available_cpus > 3 else (1 if available_cpus > 0 else 0)
-                num_workers = min(num_workers, 10)  # Cap at 8 to avoid excessive resource usage
+                num_workers = min(num_workers, 2)  # Cap at 8 to avoid excessive resource usage
 
             # If dataset is small and __getitem__ is trivial (e.g., pre-loaded tensors),
             # num_workers > 0 might add overhead.
