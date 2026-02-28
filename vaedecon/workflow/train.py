@@ -87,7 +87,7 @@ class VAEDeconTrainer:
 
         processed_training_set_dir = os.path.join(
             self.config.data.data_dir,
-            f'processed_{len(training_file_paths)}_training_sets'
+            f'processed_training_sets_{self.config.training.naming_postfix}'
         )
 
         # Load dataset
@@ -361,6 +361,15 @@ def train_vaedecon(
     # Train model
     trainer = VAEDeconTrainer(config)
     trained_config = trainer.train()
+
+    processed_training_set_dir = Path(config.data.data_dir) / f'processed_training_sets_{config.training.naming_postfix}'
+    # Delete processed training set directory to save space
+    if processed_training_set_dir.exists() and processed_training_set_dir.is_dir():
+        try:
+            shutil.rmtree(processed_training_set_dir)
+            logger.info(f"Deleted processed training set directory: {processed_training_set_dir}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not delete processed training set directory: {e}")
 
     # Save final config after training (may have updates)
     try:
