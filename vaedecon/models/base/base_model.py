@@ -479,12 +479,13 @@ class Decoder_AE_MLP(BaseDecoder):
     def __init__(self, args: BaseModelConfig):
         BaseDecoder.__init__(self)
 
-        self.input_dim = args.input_dim
+        self.input_dim = args.input_dim  # The number of genes in each GEP
 
         layers = nn.ModuleList()
 
         layers.append(nn.Sequential(nn.Linear(args.latent_dim, 512), nn.ReLU()))
 
+        # Sigmoid activation at the end to ensure output is in [0, 1] range after scaling by dividing 20 after log transformation.
         layers.append(
             nn.Sequential(nn.Linear(512, int(np.prod(args.input_dim))), nn.Sigmoid())
         )

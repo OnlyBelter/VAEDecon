@@ -29,6 +29,8 @@ def plot_loss(history_df, output_dir=None, x_label='n_epoch', y_label='MSE', fil
     plt.figure(figsize=(8, 6))
     if 'loss' in history_df.columns:
         plt.plot(history_df['epoch'], history_df['loss'], label='loss')
+    if 'train_loss' in history_df.columns:
+        plt.plot(history_df['epoch'], history_df['train_loss'], label='train_loss')
     if 'val_loss' in history_df.columns:
         plt.plot(history_df['epoch'], history_df['val_loss'], label='val_loss')
     if 'total_loss' in history_df.columns:

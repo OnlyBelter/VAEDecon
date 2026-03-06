@@ -17,7 +17,7 @@ from ...data.datasets import DatasetOutput
 
 from ...models.base import BaseAE, reparameterize_dirichlet, reparameterize_gaussian, ModelOutput, BaseDecoder, BaseEncoder
 from .vae_config import VAEConfig
-from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor
+from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor, non_log2cpm_tensor
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +40,8 @@ class VAE(BaseAE):
         latent_dim = model_config.latent_dim
         n_cell_types = model_config.n_cell_types
 
-        # Constant for scaling (Avoid Magic Numbers)
-        self.scaling_factor = 20.0
+        # Constant for scaling
+        self.scaling_factor = model_config.SCALING_FACTOR
 
         # --- Anchor & Prior Setup ---
         # Initialize orthonormal anchors for structured latent space
@@ -57,12 +57,19 @@ class VAE(BaseAE):
 
         # Optimization: Use usecols to reduce memory usage if possible
         gf_df = pd.read_csv(model_config.gene_mean_std_fp, index_col=0)
+        # log2(CPM + 1) / scaling_factor space, so we can directly compare with reconstructions without extra transformations
+        # Cell types have been ordered as the same order in the file "cell_type_list.txt", n_genes by n_cell_type
         g_mean = gf_df.loc[:, [c for c in gf_df.columns if c.endswith("avg")]].values
         g_std = gf_df.loc[:, [c for c in gf_df.columns if c.endswith("std")]].values
 
+        g_mean = torch.tensor(g_mean, dtype=torch.float32)
+        g_std = torch.tensor(g_std, dtype=torch.float32)
+        g_mean_non_log = torch.pow(2, g_mean * self.scaling_factor) - 1  # Convert mean GEP to non-log space
+
         # Register as buffers so they move to device automatically with the model
-        self.register_buffer('g_mean', torch.tensor(g_mean, dtype=torch.float32))
-        self.register_buffer('g_std', torch.tensor(g_std, dtype=torch.float32))
+        self.register_buffer('g_mean', g_mean)
+        self.register_buffer('g_std', g_std)
+        self.register_buffer('g_mean_non_log', g_mean_non_log)
 
         # --- Gene Weights Calculation ---
         # Calculated once and fixed. If dynamic adjustment is needed, move to forward.
@@ -118,6 +125,7 @@ class VAE(BaseAE):
             prop_list.append(out.cell_prop)  # (B, n_cell_types)
 
             if self.model_config.predict_cell_prop:
+                # Dirichlet distribution parameters for cell type proportions
                 dd_alpha_list.append(out.dd_alpha)
 
         # 3. Fusion (Single or Product of Experts)
@@ -148,6 +156,11 @@ class VAE(BaseAE):
         # instead of looping through cell types.
 
         # Sample latent vectors: (B, Latent, C)
+        # For each cell type k, sample z from a d_latent-dimensional diagonal Gaussian N(mu_k, diag(sigma_k^2))
+        # via the reparameterization trick. Since the covariance is diagonal, this is equivalent to sampling
+        # each of the d_latent dimensions independently from a 1D Gaussian, yielding n_cell_type independent
+        # d_latent-dimensional latent representations with z_types of shape (batch_size, d_latent, n_cell_type).
+
         z_types = reparameterize_gaussian(mu_types, log_var_types)
 
         # Flatten for decoder: (B, Latent, C) -> (B, C, Latent) -> (B*C, Latent)
@@ -163,11 +176,22 @@ class VAE(BaseAE):
         # -------------------------------------------------------
 
         # 5. Scaling & Mixing
-        if self.model_config.scaling_by_constant:
-            recon_x_all_types = recon_x_all_types * self.scaling_factor
+        if self.model_config.scaling_by_constant:  # Scale back up if we scaled down the input to get full GEP in log space
+            recon_x_all_types = recon_x_all_types * self.scaling_factor  # From (0, 1) to (0, scaling_factor) range in log space
 
         # Log -> CPM (Batch, Genes, C)
-        recon_x_all_types_cpm = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
+        if not self.model_config.learn_gep_residual:
+            # If not learning residual, decoder outputs full GEP in log space, so convert to CPM for mixing.
+            recon_x_all_types_cpm = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
+        else:
+            # If learning residual, decoder outputs log2(residual), so we need to add back the mean GEP
+            # before converting to CPM. We first convert both residual and mean GEP back to non-log space,
+            # add them together to recover the full GEP, then normalize to CPM.
+            recon_x_all_types_non_log = torch.pow(2, recon_x_all_types)  # Convert residual from log2 to non-log space
+            # Add mean GEP to residual in non-log space, and convert to (B, C, Genes) for the next step
+            recon_x_add_g_mean = torch.transpose(recon_x_all_types_non_log + self.g_mean_non_log, 1,2)
+            # Normalize to CPM space for mixing, then transpose back to (B, Genes, C)
+            recon_x_all_types_cpm = non_log2cpm_tensor(recon_x_add_g_mean).transpose(1, 2)
 
         # Prepare Proportions for Mixing
         if cell_prop is not None:

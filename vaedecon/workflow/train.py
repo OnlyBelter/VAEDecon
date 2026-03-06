@@ -8,11 +8,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
+import pandas as pd
 import torch
 from torch.utils.data import random_split
 from ..data import GEPDataset
 from ..models.nn import EncoderMLP, DecoderMLP
 from ..models.vae import VAEConfig
+from ..plot import plot_loss
 from ..trainers import BaseTrainerConfig, BaseTrainerL
 from ..utility import set_output_dir, log_message, set_fig_style
 from ..utility.read_file import load_or_compute_gene_mean_std
@@ -140,7 +142,7 @@ class VAEDeconTrainer:
                 else f"gene_mean_std_log2p1_{len(training_file_paths)}training_files_{n_genes}genes.csv"
             )
 
-        gene_mean_std_df = load_or_compute_gene_mean_std(
+        load_or_compute_gene_mean_std(
             sct_gep_fp=self.config.data.sct_gep_file_path,
             gene_list=dataset.gene_list,
             cell_type_fp=self.config.model.cell_type_fp,
@@ -154,9 +156,10 @@ class VAEDeconTrainer:
         """Create model"""
         logger.info("Creating model...")
 
-        # 转换为VAEConfig
+        # Construct VAEConfig from the config file (model section)
         vae_config = self._convert_to_vae_config()
 
+        # Create VAE model by combining encoder and decoder classes specified in the config
         model = create_model(
             model_config=vae_config,
             encoder_cls_name_list=self.config.model.encoders,
@@ -202,6 +205,7 @@ class VAEDeconTrainer:
             encoders=self.config.model.encoders,
             decoders=self.config.model.decoders,
             mask_ratio=self.config.model.mask_ratio,
+            learn_gep_residual=self.config.model.learn_gep_residual,
         )
 
     def _convert_to_trainer_config(self) -> BaseTrainerConfig:
@@ -286,7 +290,7 @@ def train_vaedecon(
         train_vaedecon()
 
         # 2. Use a YAML config file
-        train_vaedecon(config_file='configs/my_experiment.yaml')
+        train_vaedecon(config_file='configs/example_config.yaml')
 
         # 3. Use a custom configuration object
         from vaedecon.configs import VAEDeconConfig
@@ -378,5 +382,14 @@ def train_vaedecon(
         logger.info(f"Saved final config to {final_config_path}")
     except Exception as e:
         logger.warning(f"⚠️ Could not save final config: {e}")
+    # Plot loss curves
+    log_file = model_dir / "losses.csv"
+    if log_file.exists():
+        try:
+            history_df = pd.read_csv(log_file)
+            plot_loss(history_df=history_df, output_dir=model_dir)
+            logger.info(f"Saved loss curve to {model_dir}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not plot loss curve: {e}")
 
     return trained_config

@@ -449,7 +449,7 @@ def get_gene_mean_std_across_cell_types(sct_dataset_fp: str, result_fp, gene_lis
             ct2ave = np.log2(ct2ave + 1)
         if scaling_by_constant is True:
             ct2ave = ct2ave / 20
-        ct2ave.to_csv(result_fp, float_format='%.3f')
+        ct2ave.to_csv(result_fp, float_format='%.6f')
 
 
 def load_or_compute_gene_mean_std(

@@ -516,6 +516,8 @@ def log_exp2cpm_tensor(exp: torch.Tensor, log_base=2, correct=1, transpose: bool
 
     :param correct: plus 1 for avoiding log transform 0
 
+    :param transpose: if input tensor is genes by samples, set to True, otherwise set to False
+
     :return: counts per million (CPM) or transcript per million (TPM)
     """
     if transpose:

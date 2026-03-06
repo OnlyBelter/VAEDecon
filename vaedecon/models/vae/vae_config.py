@@ -31,6 +31,8 @@ class VAEConfig(BaseModelConfig):
             encoder_dropout_rate: Dropout rates for each encoder layer.
             decoder_dropout_rate: Dropout rates for each decoder layer.
             encoders: List of encoder types to use.
+            learn_gep_residual: Whether to learn residual compared to mean GEP instead of full GEP,
+             for more accurate GEP reconstruction.
 
         Loss Coefficients:
             loss_coefficient: Weights for each loss term (recon_decoder,
@@ -117,6 +119,19 @@ class VAEConfig(BaseModelConfig):
         ge=0.0,
         le=1.0,
         description="Fraction of input features (genes) to mask for dropout"
+    )
+
+    # Whether to learn GEP residual compared to mean GEP of cell types instead of full GEP
+    learn_gep_residual: bool = Field(
+        default=False,
+        description="Whether to learn GEP residuals compared to the mean GEP of each cell type (instead of learning the full GEP)"
+    )
+
+    SCALING_FACTOR: float = Field(
+        default=20.0,
+        description='Constant factor to scale input GEP data after log transformation when scaling_by_constant=True. '
+                    'This can help stabilize training by normalizing the input into (0, 1) range'
+                    ' and improve performance.'
     )
 
     # ==================== Validators ====================

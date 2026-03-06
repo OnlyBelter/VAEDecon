@@ -79,6 +79,7 @@ class ModelConfig(VAEConfig):
             input_dim: Input dimensions (channels, features).
             latent_dim: Latent space dimension per cell type.
             n_cell_types: Number of cell types to deconvolve.
+            learn_gep_residual: Whether to learn GEP residuals compared to mean GEP of each cell type.
 
         Encoder/Decoder:
             encoder_hidden_dims: Hidden layer dimensions for encoder.
@@ -276,6 +277,8 @@ class ModelConfig(VAEConfig):
         le=1.0,
         description="Fraction of input features (genes) to mask for dropout"
     )
+
+    learn_gep_residual: bool = False
 
     # ==================== Validators ====================
 
