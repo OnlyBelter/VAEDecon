@@ -476,6 +476,10 @@ def check_decoder(decoder: BaseDecoder) -> BaseDecoder:
 
 
 class Decoder_AE_MLP(BaseDecoder):
+    # This class is used as the default decoder for BaseAE if no custom decoder is provided.
+    # It is a simple MLP that maps from the latent space to the original input space (gene expression profiles).
+    # The output is passed through a sigmoid activation to ensure it is in the range [0, 1],
+    # which is appropriate for gene expression data after log transformation and scaling.
     def __init__(self, args: BaseModelConfig):
         BaseDecoder.__init__(self)
 

@@ -421,7 +421,8 @@ def read_gene_set(gene_set_file_path: list, max_n_genes: int = 300) -> pd.DataFr
 
 
 def get_gene_mean_std_across_cell_types(sct_dataset_fp: str, result_fp, gene_list_fp,
-                                        cell_type_fp, scaling_by_constant: bool=True, log2p1: bool=True) -> None:
+                                        cell_type_fp, scaling_by_constant: bool=True,
+                                        log2p1: bool=True, scaling_factor: float = 20.0) -> None:
     """Get the mean and std of gene expression values across cell types in the SCT dataset."""
     # sct_dataset_obj = ReadH5AD(sct_dataset_fp)
     # sct_dataset_df = sct_dataset_obj.get_df(convert_to_tpm=True)
@@ -448,7 +449,7 @@ def get_gene_mean_std_across_cell_types(sct_dataset_fp: str, result_fp, gene_lis
         if log2p1 is True:
             ct2ave = np.log2(ct2ave + 1)
         if scaling_by_constant is True:
-            ct2ave = ct2ave / 20
+            ct2ave = ct2ave / scaling_factor
         ct2ave.to_csv(result_fp, float_format='%.6f')
 
 
@@ -458,6 +459,7 @@ def load_or_compute_gene_mean_std(
     cell_type_fp: str | Path,
     input_gene_list_fp: str | Path,
     scaling_by_constant: bool,
+    scaling_factor: float = 20.0,
     log_fn=print,
     out_fp=None,
 ) -> pd.DataFrame:
@@ -505,6 +507,7 @@ def load_or_compute_gene_mean_std(
         cell_type_fp=cell_type_fp,
         sct_dataset_fp=sct_gep_fp,
         scaling_by_constant=scaling_by_constant,
+        scaling_factor=scaling_factor,
     )
 
     # load and return
@@ -513,4 +516,66 @@ def load_or_compute_gene_mean_std(
         raise RuntimeError(
             f"After computation, {out_fp} still does not match the expected gene list!"
         )
+    return df
+
+
+def load_lightning_metrics(
+    csv_path: str,
+    metric_cols: list = None,
+    fill_epoch: bool = True,
+    fill_step: bool = False,
+    drop_all_nan_metric_rows: bool = True,
+) -> pd.DataFrame:
+    """
+    Load and clean PyTorch Lightning metrics.csv.
+
+    Args:
+        csv_path: Path to Lightning metrics.csv.
+        metric_cols: Metrics to keep. If None, keep all columns except epoch/step.
+        fill_epoch: Whether to forward-fill epoch column.
+        fill_step: Whether to forward-fill step column.
+        drop_all_nan_metric_rows: Whether to drop rows whose metric columns are all NaN.
+
+    Returns:
+        Cleaned pandas DataFrame.
+    """
+    df = pd.read_csv(csv_path)
+
+    # Remove fully empty rows
+    df = df.dropna(how="all").copy()
+
+    # Standardize column names a bit
+    df.columns = [c.strip() for c in df.columns]
+
+    # Fill epoch / step if needed
+    if "epoch" in df.columns and fill_epoch:
+        df["epoch"] = df["epoch"].ffill()
+
+    if "step" in df.columns and fill_step:
+        df["step"] = df["step"].ffill()
+
+    # Convert epoch/step to nullable integer if possible
+    if "epoch" in df.columns:
+        df["epoch"] = pd.to_numeric(df["epoch"], errors="coerce").astype("Int64")
+
+    if "step" in df.columns:
+        df["step"] = pd.to_numeric(df["step"], errors="coerce").astype("Int64")
+
+    # Decide which metric columns to keep
+    basic_cols = [c for c in ["epoch", "step"] if c in df.columns]
+
+    if metric_cols is None:
+        metric_cols = [c for c in df.columns if c not in basic_cols]
+
+    keep_cols = basic_cols + [c for c in metric_cols if c in df.columns]
+    df = df[keep_cols].copy()
+
+    # Drop rows where all metric columns are NaN
+    existing_metric_cols = [c for c in metric_cols if c in df.columns]
+    if drop_all_nan_metric_rows and len(existing_metric_cols) > 0:
+        df = df.dropna(subset=existing_metric_cols, how="all").copy()
+
+    # Reset index
+    df = df.reset_index(drop=True)
+
     return df

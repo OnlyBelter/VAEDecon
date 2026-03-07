@@ -1,6 +1,7 @@
 import os
 import logging
 import platform
+import shutil
 
 import matplotlib.pyplot as plt
 from typing import Any, Dict, Optional, Union
@@ -109,19 +110,25 @@ class PLTrainer(L.LightningModule):
         model: BaseAE,
         training_config: BaseTrainerConfig,
         debug_model: Optional[bool] = False,
+        monitor_metric: str = "val_loss",
     ):
         """Initializes the PLTrainer.
 
         Args:
             model: The BaseAE model to train.
             training_config: The training configuration.
+            debug_model: Whether to enable more detailed logging behavior.
+            monitor_metric: Metric name monitored by scheduler/checkpoint if needed.
         """
         super().__init__()
         self.model = model
         self.training_config = training_config
         self.model_name = model.model_name
         self.debug_model = debug_model
-        # self.save_hyperparameters(training_config)  # TODO
+        self.monitor_metric = monitor_metric
+
+        # self.prog_bar_metrics = {"loss", "kld", "recon_loss_conv", "cell_prop_loss"}
+        self.prog_bar_metrics = {"loss", "kld", "recon_loss_conv"}
 
     def forward(self, inputs: Dict[str, Any], **kwargs) -> Any:
         """Forward pass of the model."""
@@ -130,33 +137,67 @@ class PLTrainer(L.LightningModule):
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Performs a single training step."""
         output = self(batch)
-        # Log the learning rate
-        current_lr = self.optimizers().param_groups[0]['lr']
-        self.log('learning_rate', current_lr, on_step=False, on_epoch=True, prog_bar=True)
+        self.log_learning_rate()
 
-        self.loss_monitor(step='train', output=output,
-                          loss_types=('loss', 'kld', 'kld_p', 'recon_loss_conv',
-                                      'gene_mean_loss', 'gene_std_loss', 'repulsion_loss', 'cell_prop_loss'
-                                      ))
+        self.loss_monitor(
+            step="train",
+            output=output,
+            loss_types=(
+                "loss",
+                "kld",
+                "kld_p",
+                "recon_loss_conv",
+                "gene_mean_loss",
+                "gene_std_loss",
+                "repulsion_loss",
+                "cell_prop_loss",
+            ),
+        )
+
         return output.loss
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Performs a single validation step."""
         output = self(batch)
-        self.loss_monitor(step='val', output=output,
-                          loss_types=('loss', 'kld', 'kld_p', 'recon_loss_conv', 'cell_prop_loss'))
+
+        self.loss_monitor(
+            step="val",
+            output=output,
+            loss_types=(
+                "loss",
+                "kld",
+                "kld_p",
+                "recon_loss_conv",
+                "cell_prop_loss",
+                "gene_mean_loss",
+                "gene_std_loss",
+                "repulsion_loss",
+            ),
+        )
+
         return output.loss
 
-    def on_train_epoch_end(self):  # Add here
-        """Debug: Track LR changes after each training epoch."""
-        sch = self.lr_schedulers()
-        if sch is not None:
-            current_lr = self.optimizers().param_groups[0]['lr']
-            val_loss = self.trainer.callback_metrics.get('val_loss', None)
-            print(f"Epoch {self.current_epoch}: LR={current_lr:.2e}, val_loss={val_loss}")
+    def on_train_epoch_end(self):
+        """Optional debug info after each epoch."""
+        if self.debug_model:
+            opt = self.optimizers()
+            current_lr = None
+            if opt is not None:
+                current_lr = opt.param_groups[0]["lr"]
+
+            monitored_value = self.trainer.callback_metrics.get(self.monitor_metric, None)
+            if monitored_value is not None and torch.is_tensor(monitored_value):
+                monitored_value = monitored_value.item()
+
+            if current_lr is not None:
+                print(
+                    f"Epoch {self.current_epoch}: "
+                    f"lr={current_lr:.2e}, "
+                    f"{self.monitor_metric}={monitored_value}"
+                )
 
     def configure_optimizers(self) -> Dict[str, Any]:
-        """Configures the optimizer and learning rate scheduler."""
+        """Configures optimizer and optional learning rate scheduler."""
         optimizer_cls = getattr(optim, self.training_config.optimizer_cls)
 
         if self.training_config.optimizer_params is not None:
@@ -167,59 +208,109 @@ class PLTrainer(L.LightningModule):
             )
         else:
             optimizer = optimizer_cls(
-                self.model.parameters(), lr=self.training_config.learning_rate
+                self.model.parameters(),
+                lr=self.training_config.learning_rate,
             )
 
-        if self.training_config.scheduler_cls is not None:
-            scheduler_cls = getattr(lr_scheduler, self.training_config.scheduler_cls)
-
-            if self.training_config.scheduler_params is not None:
-                scheduler = scheduler_cls(
-                    optimizer, **self.training_config.scheduler_params
-                )
-            else:
-                scheduler = scheduler_cls(optimizer)
-
-            scheduler_config = {
-                "scheduler": scheduler,
-                "interval": "epoch",  # 'epoch' or 'step'
-                "frequency": 1,
-            }
-
-            # If the scheduler is ReduceLROnPlateau, we need to specify the metric to monitor
-            if self.training_config.scheduler_cls == "ReduceLROnPlateau":
-                scheduler_config["monitor"] = "val_loss"
-                scheduler_config["strict"] = True  # If val_loss does not exist, it will report an error
-
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": scheduler_config,
-            }
-        else:
+        if self.training_config.scheduler_cls is None:
             return {"optimizer": optimizer}
 
-    def loss_monitor(self, loss_types: tuple=('loss',), step: str='train', output: ModelOutput=None) -> None:
-        """
-        Monitors the loss during training and validation step.
+        scheduler_cls = getattr(lr_scheduler, self.training_config.scheduler_cls)
+
+        if self.training_config.scheduler_params is not None:
+            scheduler = scheduler_cls(
+                optimizer, **self.training_config.scheduler_params
+            )
+        else:
+            scheduler = scheduler_cls(optimizer)
+
+        scheduler_config = {
+            "scheduler": scheduler,
+            "interval": "epoch",
+            "frequency": 1,
+        }
+
+        # For ReduceLROnPlateau, a monitored metric is required
+        if self.training_config.scheduler_cls == "ReduceLROnPlateau":
+            scheduler_config["monitor"] = self.monitor_metric
+            scheduler_config["strict"] = True
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": scheduler_config,
+        }
+
+    def loss_monitor(
+        self,
+        loss_types: tuple = ("loss",),
+        step: str = "train",
+        output: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Monitors and logs losses during training and validation.
+
         Args:
-            loss_types (tuple): List of loss types to monitor.
-            step (str): The step during which to monitor the loss ('train' or 'val').
-            output (ModelOutput): The model output containing the loss values.
+            loss_types: Tuple of loss names to log.
+            step: Either 'train' or 'val'.
+            output: Model output containing the relevant losses.
         """
+        if output is None:
+            return
+
         for loss_type in loss_types:
-            if loss_type in output.keys():
+            if loss_type not in output.keys():
+                continue
+
+            value = output.get(loss_type)
+
+            if value is None:
+                continue
+
+            # Naming convention
+            if step == "train":
+                loss_name = "train_loss" if loss_type == "loss" else f"train_{loss_type}"
+            elif step == "val":
+                loss_name = "val_loss" if loss_type == "loss" else f"val_{loss_type}"
+            else:
                 loss_name = loss_type
-                if step == 'train' and loss_type == 'loss':
-                    loss_name = 'train_loss'
-                elif step == 'val' and loss_type == 'loss':
-                    loss_name = 'val_loss'
-                if self.debug_model:
-                    self.log(loss_name, output.get(loss_type), on_step=True if step=='train' else False,
-                             on_epoch=True if step=='val' else False,
-                             prog_bar=True, logger=True)
-                else:
-                    self.log(loss_name, output.get(loss_type), on_step=False, on_epoch=True,
-                             prog_bar=True, logger=True)
+
+            # Logging strategy
+            if step == "train":
+                self.log(
+                    loss_name,
+                    value,
+                    on_step=True,      # save each training step
+                    on_epoch=True,     # also save epoch-aggregated version
+                    prog_bar=(loss_type in self.prog_bar_metrics),  # show main losses in progress bar
+                    logger=True,
+                    batch_size=self.training_config.per_device_train_batch_size,
+                )
+            elif step == "val":
+                self.log(
+                    loss_name,
+                    value,
+                    on_step=False,     # epoch-level val logging
+                    on_epoch=True,
+                    prog_bar=(loss_type == "loss"),
+                    logger=True,
+                    batch_size=self.training_config.per_device_eval_batch_size,
+                )
+
+    def log_learning_rate(self):
+        optimizer = self.optimizers()
+        if isinstance(optimizer, (list, tuple)):
+            optimizer = optimizer[0]
+
+        current_lr = optimizer.param_groups[0]["lr"]
+
+        self.log(
+            "lr",
+            current_lr,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=True,
+            logger=True,
+            batch_size=self.training_config.per_device_train_batch_size,
+        )
 
 
 class BaseTrainerL:
@@ -229,9 +320,9 @@ class BaseTrainerL:
         self,
         model: BaseAE,
         result_dir: str,
-        train_dataset: Union[BaseDataset, DataLoader],
-        eval_dataset: Optional[Union[BaseDataset, DataLoader]] = None,
-        training_config: Optional[BaseTrainerConfig] = None,
+        train_dataset: Union[DataLoader, Any],
+        eval_dataset: Optional[Union[DataLoader, Any]] = None,
+        training_config: Optional[Any] = None,
         n_early_stopping_patience: int = 10,
         debug_model: Optional[bool] = False,
     ):
@@ -239,29 +330,29 @@ class BaseTrainerL:
 
         Args:
             model: The BaseAE model to train.
-            result_dir: The directory to save the model checkpoints and logs.
-            train_dataset: The training dataset.
-            eval_dataset: The evaluation dataset.
-            training_config: The training configuration.
-            n_early_stopping_patience: The number of early stopping patience.
+            result_dir: Directory to save checkpoints and logs.
+            train_dataset: Training dataset or dataloader.
+            eval_dataset: Evaluation dataset or dataloader.
+            training_config: Training configuration.
+            n_early_stopping_patience: Early stopping patience.
+            debug_model: Whether to enable debug mode.
         """
         if training_config is None:
             training_config = BaseTrainerConfig()
 
         if training_config.output_dir is None:
-            output_dir = "dummy_output_dir"
-            training_config.output_dir = output_dir
+            training_config.output_dir = "dummy_output_dir"
 
         self.training_config = training_config
         self.model_name = model.model_name
         self.n_early_stopping_patience = n_early_stopping_patience
-        # self.rank = self.training_config.rank
+        self.debug_model = debug_model
 
         if isinstance(train_dataset, DataLoader):
             train_loader = train_dataset
             logger.warning(
-                "Using the provided train dataloader! Carefull this may overwrite some "
-                "parameters provided in your training config."
+                "Using the provided train dataloader! Careful: this may overwrite "
+                "some parameters provided in your training config."
             )
         else:
             train_loader = get_dataloader(
@@ -276,8 +367,8 @@ class BaseTrainerL:
             if isinstance(eval_dataset, DataLoader):
                 eval_loader = eval_dataset
                 logger.warning(
-                    "Using the provided eval dataloader! Carefull this may overwrite some "
-                    "parameters provided in your training config."
+                    "Using the provided eval dataloader! Careful: this may overwrite "
+                    "some parameters provided in your training config."
                 )
             else:
                 eval_loader = get_dataloader(
@@ -288,40 +379,60 @@ class BaseTrainerL:
                     collate_fn=collate_dataset_output,
                 )
         else:
-            logger.info(
-                "! No eval dataset provided ! -> keeping best model on train.\n"
-            )
+            logger.info("! No eval dataset provided ! -> keeping best model on train.\n")
             self.training_config.keep_best_on_train = True
             eval_loader = None
 
         self.train_loader = train_loader
         self.eval_loader = eval_loader
-
-        self.pl_model = PLTrainer(model, training_config, debug_model=debug_model)
-
         self.model_dir = result_dir
+
+        # Dynamic monitor metric
+        self.monitor_metric = "val_loss" if self.eval_loader is not None else "train_loss"
+
+        self.pl_model = PLTrainer(
+            model=model,
+            training_config=training_config,
+            debug_model=debug_model,
+            monitor_metric=self.monitor_metric,
+        )
+
+    def _copy_metrics_file(self, csv_logger: CSVLogger) -> None:
+        """Copy Lightning metrics.csv to self.model_dir."""
+        try:
+            src_metrics = os.path.join(csv_logger.log_dir, "metrics.csv")
+            dst_metrics = os.path.join(self.model_dir, "metrics.csv")
+
+            if os.path.exists(src_metrics):
+                shutil.copy2(src_metrics, dst_metrics)
+                logger.info(f"Copied metrics file to: {dst_metrics}")
+            else:
+                logger.warning(f"metrics.csv not found at: {src_metrics}")
+        except Exception as e:
+            logger.warning(f"Failed to copy metrics.csv to model_dir: {e}")
 
     def train(self) -> None:
         """Trains the model using PyTorch Lightning."""
         set_seed(self.training_config.seed)
-        # final_dir = self.model_dir
-        # model_par_dir = os.path.dirname(self.model_dir)
+        os.makedirs(self.model_dir, exist_ok=True)
 
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.model_dir,
             filename="best_model_epoch={epoch}",
-            monitor="val_loss",
+            monitor=self.monitor_metric,
             mode="min",
             save_top_k=1,
         )
-        lr_monitor = LearningRateMonitor(logging_interval='epoch')
-        csv_logger = CSVLogger(save_dir=self.model_dir, name="training_logs")
+
         early_stop_callback = EarlyStopping(
-            monitor="val_loss",
+            monitor=self.monitor_metric,
             patience=self.n_early_stopping_patience,
             mode="min",
-            min_delta=0.001
+            min_delta=0.001,
         )
+
+        lr_monitor = LearningRateMonitor(logging_interval="epoch")
+        csv_logger = CSVLogger(save_dir=self.model_dir, name="training_logs")
 
         trainer = L.Trainer(
             max_epochs=self.training_config.num_epochs,
@@ -329,7 +440,7 @@ class BaseTrainerL:
             devices=self.training_config.devices,
             callbacks=[checkpoint_callback, lr_monitor, early_stop_callback],
             logger=csv_logger,
-            precision=16 if self.training_config.amp else 32,
+            precision="16-mixed" if self.training_config.amp else 32,
         )
 
         trainer.fit(
@@ -337,22 +448,39 @@ class BaseTrainerL:
             train_dataloaders=self.train_loader,
             val_dataloaders=self.eval_loader,
         )
+
+        # Save final model
         self.pl_model.model.save(self.model_dir, training_config=self.training_config)
+
+        # Copy metrics.csv to self.model_dir
+        self._copy_metrics_file(csv_logger)
 
         logger.info("Training ended!")
         logger.info(f"Saved final model in {self.model_dir}")
+        logger.info(f"Lightning CSV logs saved in: {csv_logger.log_dir}")
+        logger.info(f"Monitor metric used: {self.monitor_metric}")
 
     def predict(self) -> Dict[str, torch.Tensor]:
         """Generates predictions from the trained model."""
-        inputs = next(iter(self.eval_loader))
-        return self.pl_model.predict(inputs)
+        if self.eval_loader is None:
+            raise ValueError("eval_loader is None. Cannot run predict().")
 
-    # @property
-    # def is_main_process(self):
-    #     if self.rank == 0 or self.rank == -1:
-    #         return True
-    #     else:
-    #         return False
+        inputs = next(iter(self.eval_loader))
+        self.pl_model.eval()
+
+        # Move batch to device if needed
+        device = self.pl_model.device
+        moved_inputs = {}
+        for k, v in inputs.items():
+            if torch.is_tensor(v):
+                moved_inputs[k] = v.to(device)
+            else:
+                moved_inputs[k] = v
+
+        with torch.no_grad():
+            outputs = self.pl_model(moved_inputs)
+
+        return outputs
 
     def __call__(self, *args, **kwargs):
         pass

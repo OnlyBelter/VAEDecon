@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+
 # import importlib
 # import umap
 import numpy as np
@@ -16,39 +18,116 @@ from sklearn.metrics import median_absolute_error
 set_fig_style()
 
 
-def plot_loss(history_df, output_dir=None, x_label='n_epoch', y_label='MSE', file_name=None):
+def plot_loss(
+    history_df,
+    output_dir: Path = None,
+    x_label="Epoch",
+    y_label="Loss",
+    file_name=None,
+    x_col="epoch",
+    aggregate_same_x=True,
+    agg_func="last",
+    figsize=(8, 6),
+):
     """
-    :param history_df:
-    :param output_dir:
-    :param x_label:
-    :param y_label:
-    :param file_name:
-    :return:
+    Plot loss curves from a metrics DataFrame.
+
+    Args:
+        history_df (pd.DataFrame):
+            DataFrame containing logged metrics.
+        output_dir (str, optional):
+            Directory to save the figure.
+        x_label (str):
+            Label for x-axis.
+        y_label (str):
+            Label for y-axis.
+        file_name (str, optional):
+            Output figure name. Default is 'loss.png'.
+        x_col (str):
+            Column to use as x-axis, usually 'epoch' or 'step'.
+        aggregate_same_x (bool):
+            Whether to aggregate duplicated x values.
+        agg_func (str):
+            Aggregation for duplicated x values: 'last', 'mean', 'min', 'max'.
+        figsize (tuple):
+            Figure size.
+
+    Returns:
+        (fig, ax) if output_dir is None, otherwise None.
     """
-    # sns.set(font_scale=1.5)
-    plt.figure(figsize=(8, 6))
-    if 'loss' in history_df.columns:
-        plt.plot(history_df['epoch'], history_df['loss'], label='loss')
-    if 'train_loss' in history_df.columns:
-        plt.plot(history_df['epoch'], history_df['train_loss'], label='train_loss')
-    if 'val_loss' in history_df.columns:
-        plt.plot(history_df['epoch'], history_df['val_loss'], label='val_loss')
-    if 'total_loss' in history_df.columns:
-        plt.plot(history_df['epoch'], history_df['total_loss'], label='total_loss')
-    if 'val_total_loss' in history_df.columns:
-        plt.plot(history_df['epoch'], history_df['val_total_loss'], label='val_total_loss')
-    plt.legend()
-    plt.xlabel(x_label)
-    plt.ylabel(y_label.upper())
-    plt.tight_layout()
-    if output_dir:
-        if file_name is not None:
-            plt.savefig(os.path.join(output_dir, file_name), dpi=200)
-        else:
-            plt.savefig(os.path.join(output_dir, 'loss.png'), dpi=200)
-        plt.close()
-    else:
-        return plt
+    if history_df is None or len(history_df) == 0:
+        raise ValueError("history_df is empty.")
+
+    if x_col not in history_df.columns:
+        raise ValueError(f"Column '{x_col}' not found in history_df.")
+
+    df = history_df.copy()
+
+    # Candidate columns to plot: (column_name, label)
+    candidate_metrics = [
+        ("loss", "loss"),
+        ("train_loss_epoch", "train loss"),
+        ("train_loss", "train loss"),
+        ("val_loss", "val loss"),
+        ("total_loss", "total loss"),
+        ("val_total_loss", "val total loss"),
+    ]
+
+    # Keep only existing columns
+    metrics_to_plot = [(col, label) for col, label in candidate_metrics if col in df.columns]
+
+    if len(metrics_to_plot) == 0:
+        raise ValueError(
+            "None of the expected loss columns were found. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    # Make sure x is numeric if possible
+    df[x_col] = pd.to_numeric(df[x_col], errors="coerce")
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    for metric_col, metric_label in metrics_to_plot:
+        plot_df = df[[x_col, metric_col]].copy()
+        plot_df[metric_col] = pd.to_numeric(plot_df[metric_col], errors="coerce")
+
+        # Drop rows with missing x or y
+        plot_df = plot_df.dropna(subset=[metric_col])
+
+        if len(plot_df) == 0:
+            continue
+
+        # Aggregate repeated x values if needed
+        if aggregate_same_x:
+            if agg_func == "last":
+                plot_df = plot_df.groupby(x_col, as_index=False).last()
+            elif agg_func == "mean":
+                plot_df = plot_df.groupby(x_col, as_index=False).mean()
+            elif agg_func == "min":
+                plot_df = plot_df.groupby(x_col, as_index=False).min()
+            elif agg_func == "max":
+                plot_df = plot_df.groupby(x_col, as_index=False).max()
+            else:
+                raise ValueError(f"Unsupported agg_func: {agg_func}")
+
+        plot_df = plot_df.sort_values(by=x_col)
+        ax.plot(plot_df[x_col], plot_df[metric_col], marker="o", linewidth=2, label=metric_label)
+
+    ax.legend()
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_title("Training History")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        save_name = file_name if file_name is not None else "loss.png"
+        fig.savefig(str(output_dir / save_name), dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        return None
+
+    return fig, ax
 
 
 def plot_corr_two_columns(df: pd.DataFrame, output_dir: str, col_name1: str = 'CPE',

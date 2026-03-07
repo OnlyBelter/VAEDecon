@@ -65,11 +65,13 @@ class VAE(BaseAE):
         g_mean = torch.tensor(g_mean, dtype=torch.float32)
         g_std = torch.tensor(g_std, dtype=torch.float32)
         g_mean_non_log = torch.pow(2, g_mean * self.scaling_factor) - 1  # Convert mean GEP to non-log space
+        g_std_non_log = torch.pow(2, g_std * self.scaling_factor) - 1  # Convert gene std to non-log space
 
         # Register as buffers so they move to device automatically with the model
         self.register_buffer('g_mean', g_mean)
         self.register_buffer('g_std', g_std)
         self.register_buffer('g_mean_non_log', g_mean_non_log)
+        self.register_buffer('g_std_non_log', g_std_non_log)
 
         # --- Gene Weights Calculation ---
         # Calculated once and fixed. If dynamic adjustment is needed, move to forward.
@@ -171,25 +173,35 @@ class VAE(BaseAE):
         recon_flat = self.decoder(z_types_flat)["reconstruction"]
 
         # Restore shape: (B*C, Genes) -> (B, C, Genes) -> (B, Genes, C)
-        # We need (B, Genes, C) for the subsequent matrix multiplication
+        # We need (B, Genes, C) for the subsequent matrix multiplication, ranging in (0, 1) after sigmoid activation.
         recon_x_all_types = recon_flat.view(batch_size, n_cell_types, -1).permute(0, 2, 1)
         # -------------------------------------------------------
 
         # 5. Scaling & Mixing
-        if self.model_config.scaling_by_constant:  # Scale back up if we scaled down the input to get full GEP in log space
-            recon_x_all_types = recon_x_all_types * self.scaling_factor  # From (0, 1) to (0, scaling_factor) range in log space
 
         # Log -> CPM (Batch, Genes, C)
         if not self.model_config.learn_gep_residual:
+            if self.model_config.scaling_by_constant:  # Scale back up if we scaled down the input to get full GEP in log space
+                recon_x_all_types = recon_x_all_types * self.scaling_factor  # From (0, 1) to (0, scaling_factor) range in log space
             # If not learning residual, decoder outputs full GEP in log space, so convert to CPM for mixing.
             recon_x_all_types_cpm = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
         else:
-            # If learning residual, decoder outputs log2(residual), so we need to add back the mean GEP
+            # If learning residual, decoder outputs residual z-score in range (-3, 3), so we need to multipl each value by the std and add back the mean GEP
             # before converting to CPM. We first convert both residual and mean GEP back to non-log space,
             # add them together to recover the full GEP, then normalize to CPM.
-            recon_x_all_types_non_log = torch.pow(2, recon_x_all_types)  # Convert residual from log2 to non-log space
+
+            # Redefine the min of z-score to guarantee all values >= 0 after adding mean GEP.
+            eps = 1e-6
+            mu = self.g_mean_non_log.unsqueeze(0)
+            std = torch.clamp(self.g_std_non_log, min=eps).unsqueeze(0)
+            z_min = torch.maximum(torch.full_like(std, -3.0), -mu / std)
+            # Now recon_x_all_types is in range (z_min, 3)
+            recon_x_all_types = z_min + (3.0 - z_min) * recon_x_all_types
+
+            # Scale to (z_min*sigma, 3*sigma)
+            recon_residual = recon_x_all_types * std  # Convert residual z-score to residual in non-log space by multiplying with std, shape (B, Genes, C)
             # Add mean GEP to residual in non-log space, and convert to (B, C, Genes) for the next step
-            recon_x_add_g_mean = torch.transpose(recon_x_all_types_non_log + self.g_mean_non_log, 1,2)
+            recon_x_add_g_mean = torch.transpose(recon_residual + self.g_mean_non_log, 1,2)
             # Normalize to CPM space for mixing, then transpose back to (B, Genes, C)
             recon_x_all_types_cpm = non_log2cpm_tensor(recon_x_add_g_mean).transpose(1, 2)
 

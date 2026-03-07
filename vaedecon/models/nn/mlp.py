@@ -177,6 +177,7 @@ class DecoderMLP(BaseDecoder):
 
         self.layers = nn.ModuleList()
         input_size = self.latent_dim
+        output_dim = int(np.prod(self.input_dim))
 
         # Build layers
         for i, hidden_dim_size in enumerate(self.hidden_dims):
@@ -190,10 +191,11 @@ class DecoderMLP(BaseDecoder):
             input_size = hidden_dim_size
 
         # Output layer (Gene expression reconstruction)
+        # Output constrained to (0, 1)
         self.final_layer = nn.Sequential(
-            nn.Linear(self.hidden_dims[-1], np.prod(self.input_dim)),
-            nn.Softplus(threshold=1),  # Ensures output > 0
-            nn.Dropout(p=self.dropout_rate[-1]) if self.dropout_rate[-1] > 0 else nn.Identity(),
+            nn.Linear(self.hidden_dims[-1], output_dim),
+            nn.Sigmoid(),
+            # nn.Dropout(p=self.dropout_rate[-1]) if self.dropout_rate[-1] > 0 else nn.Identity(),
         )
 
         self.depth = len(self.layers) + 1

@@ -17,7 +17,7 @@ from ..models.vae import VAEConfig
 from ..plot import plot_loss
 from ..trainers import BaseTrainerConfig, BaseTrainerL
 from ..utility import set_output_dir, log_message, set_fig_style
-from ..utility.read_file import load_or_compute_gene_mean_std
+from ..utility import load_or_compute_gene_mean_std, load_lightning_metrics
 from .workflow import create_model, train_model, save_metadata
 from ..configs.default_config import VAEDeconConfig
 
@@ -148,6 +148,7 @@ class VAEDeconTrainer:
             cell_type_fp=self.config.model.cell_type_fp,
             input_gene_list_fp=self.config.model.input_gene_list_fp,
             scaling_by_constant=self.config.model.scaling_by_constant,
+            scaling_factor=self.config.model.SCALING_FACTOR,
             log_fn=log_message,
             out_fp=Path(self.config.model.gene_mean_std_fp),
         )
@@ -206,6 +207,7 @@ class VAEDeconTrainer:
             decoders=self.config.model.decoders,
             mask_ratio=self.config.model.mask_ratio,
             learn_gep_residual=self.config.model.learn_gep_residual,
+            SCALING_FACTOR=self.config.model.SCALING_FACTOR,
         )
 
     def _convert_to_trainer_config(self) -> BaseTrainerConfig:
@@ -383,10 +385,10 @@ def train_vaedecon(
     except Exception as e:
         logger.warning(f"⚠️ Could not save final config: {e}")
     # Plot loss curves
-    log_file = model_dir / "losses.csv"
+    log_file = model_dir / "metrics.csv"
     if log_file.exists():
         try:
-            history_df = pd.read_csv(log_file)
+            history_df = load_lightning_metrics(str(log_file), metric_cols=["train_loss_epoch", "val_loss", "lr-Adam"])
             plot_loss(history_df=history_df, output_dir=model_dir)
             logger.info(f"Saved loss curve to {model_dir}")
         except Exception as e:
