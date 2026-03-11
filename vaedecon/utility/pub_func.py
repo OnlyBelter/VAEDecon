@@ -283,7 +283,7 @@ def cal_relative_error(y_true, y_pred, max_error=None, min_error=None):
     return relative_error
 
 
-def calculate_rmse(y_true: pd.DataFrame, y_pred: pd.DataFrame, n_decimal: int = 3):
+def calculate_rmse(y_true: pd.DataFrame | np.ndarray, y_pred: pd.DataFrame | np.ndarray, n_decimal: int = 3):
     """
     https://scikit-learn.org/stable/modules/generated/sklearn.metrics.mean_squared_error.html
     calculate the RMSE of each cell type by columns
@@ -293,6 +293,10 @@ def calculate_rmse(y_true: pd.DataFrame, y_pred: pd.DataFrame, n_decimal: int = 
     :param n_decimal: float number rounded to n_decimal
     :return:
     """
+    if isinstance(y_true, np.ndarray):
+        y_true = pd.DataFrame(y_true)
+    if isinstance(y_pred, np.ndarray):
+        ypd = pd.DataFrame(y_pred)
     if y_true.shape[1] == 1:  # only one feature
         multioutput = 'uniform_average'
     else:  # multiple cell types

@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from typing import Union
 import statsmodels.api as sm
+from fontTools.ttLib.woff2 import bboxFormat
 from sklearn.metrics import median_absolute_error
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
@@ -45,7 +46,7 @@ class ScatterPlot(object):
              x_label: str = None, y_label: str = None, show_corr: bool = True, show_rmse: bool = False,
              show_diag: bool = True, show_mae: bool = False, pred_by: str = None,
              fig_size=(8, 8), group_by: str = None, show_reg_line: bool = False, s=6, order=1,
-             legend_loc: str = 'best', rasterized=False):
+             legend_loc: str = 'best', rasterized=False, figure_format: str = 'svg'):
         """
         :param show_columns: a list of column names in both x and y, could be multiple common columns
             or a dict {'x': '', 'y': ''}, only one column allowed
@@ -64,6 +65,7 @@ class ScatterPlot(object):
         :param legend_loc:
         :param rasterized: whether to rasterize the plot
         :param order: 1 for linear regression; 2 for Polynomial Regressions, y = alpha + beta1*x + beta2*x^2
+        :param figure_format: 'svg' or 'png'
         """
         plt.figure(figsize=fig_size)
         ax = plt.axes()
@@ -140,9 +142,7 @@ class ScatterPlot(object):
         plt.tight_layout()
         if result_file_dir:
             plt.savefig(os.path.join(result_file_dir,
-                                     'x_vs_y_{}.svg'.format(self.postfix)), dpi=300)
-            # plt.savefig(os.path.join(result_file_dir,
-            #                          'x_vs_y_{}.svg'.format(self.postfix)), dpi=300)
+                                     f'x_vs_y_{self.postfix}.{figure_format}'), dpi=300)
         plt.close()
 
     def fit_reg_model(self, ax, x, y, alpha_ci=0.05, order=1):
@@ -213,7 +213,7 @@ class ScatterPlot(object):
 
 def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, pd.DataFrame],
                           show_columns: list = None, result_file_dir=None, annotation: dict = None,
-                          y_label=None, x_label=None, model_name='average',
+                          y_label=None, x_label=None, model_name='average', figure_format: str='svg',
                           show_metrics: bool = False, figsize: tuple = (8, 8), rasterized=False):
     """
     Plot y against y_pred to visualize the performance of prediction result
@@ -237,6 +237,8 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
     :param show_metrics: show correlation and RMSE
 
     :param figsize: figure size
+
+    :param figure_format: 'svg' or 'png'
 
     :param rasterized: whether to rasterize the figure
 
@@ -308,93 +310,153 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
     plt.legend()
     plt.tight_layout()
     if result_file_dir:
-        plt.savefig(os.path.join(result_file_dir, 'y_true_vs_y_pred_{}.svg'.format(model_name)), dpi=300)
+        plt.savefig(os.path.join(result_file_dir, f'y_true_vs_y_pred_{model_name}.{figure_format}'), dpi=300)
     plt.close()
 
 
-def compare_y_y_pred_subplot(y_true, y_pred,
-                             show_columns: list = None, result_file_dir=None, annotation: dict = None,
-                             y_label=None, x_label=None, dataset_name='average',
-                             show_metrics: bool = False, figsize: tuple = (8, 8), ax=None, show_legend=False):
+def compare_y_y_pred_subplot(y_true,
+                             y_pred,
+                             show_columns: list = None,
+                             result_file_dir=None,
+                             y_label=None,
+                             x_label=None,
+                             dataset_name='average',
+                             figure_format: str='svg',
+                             show_metrics: bool = False,
+                             figsize: tuple = (8, 8),
+                             ax=None,
+                             show_legend=False
+) -> tuple:
     """
-    Plot y against y_pred to visualize the performance of prediction result
+    Scatter plot of predicted vs. true cell-type fractions (or GEPs).
 
-    :param y_true: this file contains the ground truth of cell fractions when it was simulated
+    Each cell type in ``show_columns`` is drawn as a separate scatter series.
+    An identity diagonal (y = x) is overlaid as a visual reference.
+    Optionally, Pearson r, p-value, RMSE, and CCC are annotated inside the axes.
 
-    :param y_pred: this file contains the predicted value of y
+    Parameters
+    ----------
+    y_true : path-like, DataFrame, or array-like
+        Ground-truth cell-type fractions. Passed to ``read_xy``.
+    y_pred : path-like, DataFrame, or array-like
+        Predicted cell-type fractions. Passed to ``read_xy``.
+    show_columns : list of str
+        Column names (cell types) to include in the plot.
+        Raises ``ValueError`` if None or empty.
+    result_file_dir : str, optional
+        Directory to save the figure. If None, the figure is not saved.
+    y_label : str, optional
+        Y-axis label. Defaults to an empty string.
+    x_label : str, optional
+        X-axis label. Defaults to an empty string.
+    dataset_name : str
+        Tag appended to the output filename (e.g. 'train', 'test').
+    figure_format : str
+        File format for saving: 'svg' or 'png'.
+    show_metrics : bool
+        If True, annotate Pearson r, p-value, RMSE, and CCC inside the axes.
+    figsize : tuple of (float, float)
+        Figure size in inches. Used only when ``ax`` is None.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw on. If None, a new figure and axes are created.
+    show_legend : bool
+        If True, display a per-cell-type legend in the upper-left corner.
 
-    :param show_columns: this list contains the name of columns that want to plot in figure
-
-    :param result_file_dir: where to save results
-
-    :param annotation: annotations that need to show in figure, {anno_name: {col1: value1, col2: value2, ...}, ...}
-
-    :param y_label: y label
-
-    :param x_label: x label
-
-    :param model_name: only for naming files
-
-    :param show_metrics: show correlation and RMSE
-
-    :param figsize: figure size
-
-    :return: None
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    ax  : matplotlib.axes.Axes
     """
+
+    # ── Input Validation ──────────────────────────────────────────────────────
+    # Guard against None/empty show_columns to avoid cryptic errors
+    # from enumerate(None) downstream.
+    if not show_columns:
+        raise ValueError("`show_columns` must be a non-empty list of column names.")
+
     y_true = read_xy(a=y_true, xy='cell_frac')
     y_pred = read_xy(a=y_pred, xy='cell_frac')
 
-    # sns.set(font_scale=font_scale)
+    # Axes Setup
     if ax is None:
-        plt.figure(figsize=figsize)
+        fig, ax = plt.subplots(figsize=figsize)
     else:
-        # Use the pyplot interface to change just one subplot...
-        plt.sca(ax)
+        fig = ax.get_figure()
+
+    # Scatter Plotting
     all_x = []
     all_y = []
-    for i, col in enumerate(show_columns):
-        _y = y_true.loc[:, col]
-        _x = y_pred.loc[:, col]
+    for col in show_columns:
+        _x = y_pred.loc[:, col]  # Predicted (x-axis)
+        _y = y_true.loc[:, col]  # Ground-truth (y-axis)
         all_x.append(_x)
         all_y.append(_y)
-        plt.scatter(_x, _y, label=col, s=1, alpha=0.65, rasterized=True)
-    # plt.xlim([-0.05, 1.05])
-    # plt.ylim([-0.05, 1.05])
-    # plt.xticks([0, 1])
-    # plt.yticks([0, 0.5, 1])
-    x_left, x_right = plt.xlim()
-    y_bottom, y_top = plt.ylim()
-    x_max = x_right
-    y_max = y_top
-    plt.plot([0, max(x_max, y_max)], [0, max(x_max, y_max)], linestyle='--', color='tab:gray')
-    if show_metrics:  # show metrics in test set
-        all_x = np.concatenate(all_x)  # 1d ndarray
-        all_y = np.concatenate(all_y)
-        corr, p_value = get_corr(all_x, all_y, return_p_value=True)
-        rmse = calculate_rmse(y_true=pd.DataFrame(all_x), y_pred=pd.DataFrame(all_y))
-        ccc = get_ccc(x=all_x, y=all_y)
-        plt.text(0.32 * x_max, 0.25 * y_max, r'$r$={}'.format(corr), fontsize=5)
-        if p_value < 0.001:
-            plt.text(0.55 * x_max, 0.25 * y_max, r'($p$<0.001)', fontsize=5)
-        else:
-            plt.text(0.55 * x_max, 0.25 * y_max, r'($p$={})'.format(p_value), fontsize=5)
-        plt.text(0.32 * x_max, 0.15 * y_max, r'RMSE={}'.format(rmse), fontsize=5)
-        plt.text(0.32 * x_max, 0.05 * y_max, r'CCC={}'.format(ccc), fontsize=5)
-    if x_label is not None:
-        plt.xlabel(x_label, fontsize=5)
-    else:
-        plt.xlabel('')
-    if y_label is not None:
-        plt.ylabel(y_label, fontsize=5)
-    else:
-        plt.ylabel('')
+        ax.scatter(_x, _y, label=col, s=1, alpha=0.65, rasterized=True)
+    # ── Identity Diagonal ─────────────────────────────────────────────────────
+    # Compute axis limits from the actual data range rather than
+    # reading plt.xlim()/plt.ylim() mid-render, which can be unreliable.
+    # A small margin (2 %) is added so edge points are not clipped.
+    all_x_cat = np.concatenate(all_x)
+    all_y_cat = np.concatenate(all_y)
+    data_min = min(all_x_cat.min(), all_y_cat.min())
+    data_max = max(all_x_cat.max(), all_y_cat.max())
+    margin = (data_max - data_min) * 0.02
+    lim_lo = data_min - margin
+    lim_hi = data_max + margin
+
+    ax.set_xlim(lim_lo, lim_hi)
+    ax.set_ylim(lim_lo, lim_hi)
+    ax.plot(
+        [lim_lo, lim_hi], [lim_lo, lim_hi],
+        linestyle='--', linewidth=0.8, color='tab:gray', zorder=0
+    )
+
+    # ── Metric Annotation ─────────────────────────────────────────────────────
+    if show_metrics:
+        corr, p_value = get_corr(all_x_cat, all_y_cat, return_p_value=True)
+        rmse = calculate_rmse(y_true=all_y_cat, y_pred=all_x_cat)
+        ccc = get_ccc(x=all_x_cat, y=all_y_cat)
+
+        # Use ax.transAxes for text positioning so that annotations
+        # sit at a fixed fraction of the axes area, independent of data scale.
+        # Previously positions were fractions of x_max/y_max, which broke
+        # when values were close to 0 (e.g. rare cell types).
+        p_str = r'$p<$0.001' if p_value < 0.001 else rf'$p$={p_value:.3f}'
+        metrics_lines = [
+            rf'$r$={corr:.3f}  ({p_str})',
+            rf'RMSE={rmse:.3f}',
+            rf'CCC={ccc:.3f}',
+        ]
+        for i, line in enumerate(metrics_lines):
+            ax.text(
+                0.4, 0.22 - i * 0.07,  # x, y in axes-fraction coordinates
+                line,
+                transform=ax.transAxes,
+                fontsize=5,
+                verticalalignment='top',
+            )
+
+
+    # ── Axis Labels ───────────────────────────────────────────────────────────
+    ax.set_xlabel(x_label if x_label is not None else '', fontsize=5)
+    ax.set_ylabel(y_label if y_label is not None else '', fontsize=5)
+
+    # ── Legend ────────────────────────────────────────────────────────────────
     if show_legend:
-        plt.legend(loc='upper left', fontsize=5, ncol=1)
-    # plt.tight_layout()
+        legend = ax.legend(loc='upper left', fontsize=5, ncol=1)
+        for text in legend.get_texts():
+            # text.set_usetex(False)
+            text.set_text(text.get_text().replace('_', r'-'))  # Replace underscores with hyphens in legend labels
+
+    # ── Save ──────────────────────────────────────────────────────────────────
     if result_file_dir is not None:
-        plt.savefig(os.path.join(result_file_dir, f'y_true_vs_y_pred_{dataset_name}.svg'), dpi=300)
-    else:
-        return ax
+        out_path = os.path.join(
+            result_file_dir,
+            f'y_true_vs_y_pred_{dataset_name}.{figure_format}'
+        )
+        fig.savefig(out_path, dpi=300, bbox_inches='tight')
+
+    return fig, ax
 
 
 def compare_exp_and_cell_fraction(merged_file_path, result_dir,
@@ -842,8 +904,7 @@ def plot_single_cell_gep(
     cell_types: List[str],
     sc_gep_result_dir: str,
     n_samples: int = 3,
-    sct_gep_file_path: str = None,
-    sample2cell_id_file_path: str = None,
+    figure_format: str = 'svg',
     selected_sample2cell_id_file_path: str = None,
 ) -> None:
     """Plots the reconstructed single-cell GEPs."""
@@ -855,7 +916,13 @@ def plot_single_cell_gep(
     nrows = 4
     ncols = 4
     fig, axes = plt.subplots(nrows, ncols, sharex=False, sharey=False, figsize=(8, 8))
-    plt.subplots_adjust(wspace=0.1, hspace=0.25)
+    plt.subplots_adjust(
+        left=0.08,  # Left margin for y-axis label
+        right=0.98,
+        bottom=0.06,  # Bottom margin for x-axis label
+        top=0.98,
+        wspace=0.15,
+        hspace=0.25)
 
     # cell ids may have duplicate records
     selected_sample2cell_id = pd.read_csv(selected_sample2cell_id_file_path, index_col=0)
@@ -896,10 +963,11 @@ def plot_single_cell_gep(
                 y_label="y_recon_sc_gep",
                 figsize=(3.5, 3.5),
                 rasterized=True,
+                figure_format=figure_format,
             )
         row_index = i // nrows
         col_index = i % ncols
-        compare_y_y_pred_subplot(
+        fig, ax = compare_y_y_pred_subplot(
             y_pred=result_file_path,
             y_true=y,
             show_columns=query_ids,
@@ -909,17 +977,27 @@ def plot_single_cell_gep(
             dataset_name='',
             ax=axes[row_index, col_index],
             show_legend=True,
+            figure_format=figure_format,
         )
-    fig.add_subplot(111, frameon=False)
-    plt.tick_params(
+    # fig.add_subplot(111, frameon=False)
+    ax_shared = fig.add_axes((0.0, 0.0, 1.0, 1.0), frameon=False)
+    ax_shared.set_xlim(0, 1)
+    ax_shared.set_ylim(0, 1)
+
+    ax_shared.tick_params(
         labelcolor="none", which="both", top=False, bottom=False, left=False, right=False
     )
-    plt.xlabel("Predicted gene expression values", labelpad=15)
-    plt.ylabel("True gene expression values")
-    plt.savefig(
-        os.path.join(sc_gep_result_dir, "y_true_vs_y_pred_gep_all_cell_types.svg"),
+    ax_shared.set_xticks([])
+    ax_shared.set_yticks([])
+
+    ax_shared.set_xlabel("Predicted gene expression values", labelpad=2)
+    ax_shared.set_ylabel("True gene expression values", labelpad=2)
+    fig.savefig(
+        os.path.join(sc_gep_result_dir, f"y_true_vs_y_pred_gep_all_cell_types.{figure_format}"),
         dpi=300,
+        bbox_inches="tight",
     )
+    plt.close(fig)
 
 
 def plot_bulk_gep(
@@ -929,6 +1007,7 @@ def plot_bulk_gep(
     n_samples: int = 3,
     selected_sample2cell_id_file_path: str = None,
     random_seed: int | None = 42,
+    figure_format: str = 'svg',
 ) -> None:
     """Plots the reconstructed bulk GEPs."""
     bulk_gep_result_dir = os.path.join(gep_result_dir, "bulk_gep")
@@ -971,6 +1050,7 @@ def plot_bulk_gep(
             y_label=f"y_true of {sample_id} in Test set1",
             show_reg_line=False,
             rasterized=True,
+            figure_format=figure_format,
         )
 
 
@@ -981,6 +1061,7 @@ def plot_latent_space(
         test_set_result_dir: str,
         n_neighbors: int = 50,
         min_dist: float = 0.3,
+        figure_format: str = 'svg',
 ) -> None:
     """Plots the latent space using UMAP."""
     sample_ids = test_set.get_sample_ids()
@@ -1017,7 +1098,7 @@ def plot_latent_space(
                     palette="tab20",
                     hue_order=cell_types, linewidth=0,
                     data=sc_mu_df, ax=ax, rasterized=True)
-    f.savefig(os.path.join(latent_space_result_dir, f'sc_mu_deconv_{n_neighbors}_{min_dist}.svg'), dpi=300)
+    f.savefig(os.path.join(latent_space_result_dir, f'sc_mu_deconv_{n_neighbors}_{min_dist}.{figure_format}'), dpi=300)
     plt.close(f)
 
 

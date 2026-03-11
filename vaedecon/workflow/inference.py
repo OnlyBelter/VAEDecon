@@ -42,6 +42,8 @@ class VAEDeconPredictor:
         """
         self.model_dir = model_dir
         self.config = config or VAEDeconConfig()
+        self.save_reconstructed_gep = self.config.evaluation.save_reconstructed_gep
+        self.figure_format = self.config.evaluation.figure_format
 
         # Device setup
         if device == 'auto':
@@ -73,8 +75,6 @@ class VAEDeconPredictor:
             data_file_path: str,
             output_dir: Optional[str] = None,
             pred_cell_prop_file_path: Optional[str] = None,
-            # batch_size: int = 1024,
-            save_reconstructed_geps: bool = False,
             dataset_type: str = 'test'
     ) -> Dict[str, Any]:
         """
@@ -84,8 +84,6 @@ class VAEDeconPredictor:
             data_file_path: Input data file path
             output_dir: Output directory
             pred_cell_prop_file_path: Predicted cell proportion file path (for comparison)
-            batch_size: Batch size
-            save_reconstructed_geps: Whether to save reconstructed gene expression profiles
             dataset_type: Dataset type ('test', 'tcga', etc.)
 
         Returns:
@@ -128,7 +126,7 @@ class VAEDeconPredictor:
             pred_cell_prop_file_path=pred_cell_prop_file_path,
             model_config=self.config.model,
             val_batch_size=val_batch_size,
-            save_reconstructed_geps=save_reconstructed_geps,
+            save_reconstructed_geps=self.save_reconstructed_gep,
             dataset_type=dataset_type,
         )
 
@@ -164,8 +162,6 @@ class VAEDeconPredictor:
             data_file_path=data_file_path,
             output_dir=output_dir,
             pred_cell_prop_file_path=pred_cell_prop_file_path,
-            # batch_size=val_batch_size,
-            save_reconstructed_geps=True,
             dataset_type='test'
         )
 
@@ -221,7 +217,8 @@ class VAEDeconPredictor:
                 show_metrics=self.config.evaluation.show_metrics,
                 y_label='y_pred',
                 rasterized=self.config.evaluation.rasterized,
-                figsize=self.config.evaluation.figsize
+                figsize=self.config.evaluation.figsize,
+                figure_format=self.figure_format,
             )
 
         # 2. Plot single-cell gene expression profiles, comparing purified cell-type-specific GEPs with original sctGEPs
@@ -252,10 +249,9 @@ class VAEDeconPredictor:
                 test_set=test_set,
                 cell_types=cell_types,
                 pred_a=pred_a,
+                figure_format=self.figure_format,
                 sc_gep_result_dir=sc_gep_result_dir,
                 n_samples=self.config.evaluation.n_samples,
-                sct_gep_file_path=sct_gep_file_path,
-                sample2cell_id_file_path=sample2cell_id_file_path,
                 selected_sample2cell_id_file_path=selected_sample2cell_id_fp
             )
 
@@ -268,7 +264,8 @@ class VAEDeconPredictor:
                 cell_types=cell_types,
                 test_set_result_dir=test_set_result_dir,
                 n_neighbors=self.config.evaluation.n_neighbors,
-                min_dist=self.config.evaluation.min_dist
+                min_dist=self.config.evaluation.min_dist,
+                figure_format=self.figure_format,
             )
 
         # 4. Plot bulk gene expression profiles
@@ -283,6 +280,7 @@ class VAEDeconPredictor:
             plot_bulk_gep(
                 test_set=test_set,
                 pred_a=pred_a,
+                figure_format=self.figure_format,
                 gep_result_dir=gep_result_dir,
                 n_samples=self.config.evaluation.n_samples,
                 selected_sample2cell_id_file_path=selected_sample2cell_id_fp

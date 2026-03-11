@@ -579,6 +579,10 @@ class EvaluationConfig:
     figsize: Tuple[float, float] = (3.5, 3.5)
     rasterized: bool = True
     show_metrics: bool = True
+    figure_format: str = 'png'  # 'png', 'svg', or 'pdf' etc.
+
+    # Results
+    save_reconstructed_gep: bool = True  # Whether to save reconstructed GEPs for all test samples
 
 
 @dataclass
