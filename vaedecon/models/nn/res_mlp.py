@@ -8,7 +8,7 @@ from typing import List, Optional
 from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
                             LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
                             BaseEncoder, BaseDecoder)
-from vaedecon.models.gnn.positional_encoding import PositionalEncoding
+from vaedecon.models.base.positional_encoding import PositionalEncoding
 
 
 class ResidualBlock(nn.Module):

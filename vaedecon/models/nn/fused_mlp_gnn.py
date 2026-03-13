@@ -7,7 +7,7 @@ import warnings
 
 from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
                                   LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS, BaseEncoder)
-from ..gnn.positional_encoding import PositionalEncoding
+from vaedecon.models.base.positional_encoding import PositionalEncoding
 from .mlp import EncoderMLP
 from ..gnn import EncoderSGNN
 

@@ -16,7 +16,8 @@ from torch.distributions import Normal, Dirichlet, Gamma, kl_divergence
 from ...data.datasets import DatasetOutput
 
 from ...models.base import BaseAE, reparameterize_dirichlet, reparameterize_gaussian, ModelOutput, BaseDecoder, BaseEncoder
-from .vae_config import VAEConfig
+from ...configs.default_config import ModelConfig
+# from .vae_config import VAEConfig
 from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor, non_log2cpm_tensor
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ class VAE(BaseAE):
 
     def __init__(
         self,
-        model_config: VAEConfig,
+        model_config: ModelConfig,
         encoders: list[BaseEncoder] = None,
         decoder: Optional[BaseDecoder] = None,
     ):

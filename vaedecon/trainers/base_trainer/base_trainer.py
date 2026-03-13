@@ -17,8 +17,7 @@ from lightning.pytorch.loggers import CSVLogger
 
 from ...data.datasets import BaseDataset, collate_dataset_output
 from ...models import BaseAE
-from ...models.base import ModelOutput, set_seed
-from .base_training_config import BaseTrainerConfig
+from ...models.base import ModelOutput, set_seed, BaseTrainerConfig
 
 logger = logging.getLogger(__name__)
 

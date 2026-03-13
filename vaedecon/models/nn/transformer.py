@@ -1,13 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 from typing import List, Optional
 
 from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
                             LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
                             BaseEncoder)
-from vaedecon.models.gnn.positional_encoding import PositionalEncoding
+from vaedecon.models.base.positional_encoding import PositionalEncoding
 
 
 class GeneTransformerEncoder(BaseEncoder):

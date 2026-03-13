@@ -1,21 +1,18 @@
 import os
 import logging
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List
 
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import networkx as nx  # Kept for fallback, though tensor ops are preferred
-from torch_geometric.utils import from_networkx, add_self_loops
 from torch_geometric.nn import SAGEConv
 from torch.utils.checkpoint import checkpoint
 
-# Assuming these imports exist in your project structure
-from ..vae.vae_config import VAEConfig
+from ...configs import ModelConfig
 from ...models.base import (ModelOutput, reparameterize_dirichlet, LOGVAR_CLAMP_MIN,
                             LOGVAR_CLAMP_MAX, EPS, NETWORK_CUTOFF, BaseEncoder)
-from vaedecon.models.gnn.positional_encoding import PositionalEncoding
+from vaedecon.models.base.positional_encoding import PositionalEncoding
 
 logger = logging.getLogger(__name__)
 # Only add handler if not already added to avoid duplicate logs
@@ -35,7 +32,7 @@ class EncoderSGNN(BaseEncoder):
       4. Map to VAE parameters (mu / logvar) via MLP heads.
     """
 
-    def __init__(self, args: VAEConfig, position_encoding: Optional[PositionalEncoding] = None):
+    def __init__(self, args: ModelConfig, position_encoding: Optional[PositionalEncoding] = None):
         super().__init__()
         self.args = args
         # Dummy parameter used solely to track the current device.

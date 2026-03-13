@@ -2,7 +2,7 @@
 Default configuration for VAEDecon
 """
 from dataclasses import dataclass, field
-from ..models.vae.vae_config import VAEConfig
+from ..models.base import BaseTrainerConfig, BaseModelConfig
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
 from pydantic import Field, field_validator, model_validator
@@ -31,8 +31,8 @@ class DataConfig:
     force_reprocess: bool = False
 
 
-@dataclass
-class TrainingConfig:
+# @dataclass
+class TrainingConfig(BaseTrainerConfig):
     """training configuration"""
     # Basic settings
     output_dir: str | Path = Path('./output/vae')
@@ -68,11 +68,11 @@ class TrainingConfig:
     scheduler_params: Optional[Dict[str, Any]] = None
 
 
-class ModelConfig(VAEConfig):
+class ModelConfig(BaseModelConfig):
     """Complete model configuration for VAE-based deconvolution.
 
-    This configuration extends VAEConfig with specific settings for the
-    hybrid encoder architecture, GNN components, and custom loss functions.
+    This configuration extends BaseModelConfig with settings for the
+    hybrid encoder architecture, GNN components, and custom loss functions in the VAE model.
 
     Attributes:
         Architecture:
@@ -180,24 +180,18 @@ class ModelConfig(VAEConfig):
         description="List of decoder types to use"
     )
 
-    # ==================== Cell Proportion Prediction ====================
-    predict_cell_prop: bool = Field(
-        default=False,
-        description="Whether to predict cell type proportions"
-    )
-
     # ==================== Loss Coefficients ====================
     loss_coefficient: Dict[str, Any] = Field(
         default_factory=lambda: {
-            "cell_prop": 0.0,
-            "beta": 2.0,
-            "gamma": 0.005,
-            "kld_type": 'ave',
-            "weighting_gene_by_exp": True,
-            'weight_clamp_range': (0.2, 5.0),
-            'gene_mean_std_weight': 1.0,
+            "beta": 2,  # beta parameter for KLD loss, beta-VAE
+            "gamma": 0.005,  # gamma parameter for the repulsion loss
+            "kld_type": "ave",  # KL divergence loss
+            "cell_prop": 0,  # Cell type proportion prediction loss
+            "weighting_gene_by_exp": True,  # whether to weight the gene loss by the expression value across cell types
+            'weight_clamp_range': (0.2, 5.0), # the range of the weights for the genes across cell types
+            'gene_mean_std_weight': 1.0, # the weight for the gene mean and std loss
         },
-        description="Loss function coefficients and settings"
+        description="Coefficients for each term in total loss function"
     )
 
     # ==================== GNN Settings ====================
@@ -238,14 +232,32 @@ class ModelConfig(VAEConfig):
         description="Hidden dimension for gene projection"
     )
 
+    # ==================== Pathway DNN Settings ====================
+    input_dim_pathway: Tuple[int, int] = Field(
+        default=(1, 17834),
+        description="Input dimensions (channels, features)"
+    )
+    encoder_hidden_dims_pathway: List[int] = Field(
+        default_factory=lambda: [2048, 1024, 1024, 512],
+        description="Hidden layer dimensions for encoder"
+    )
+    encoder_dropout_rate_pathway: List[float] = Field(
+        default_factory=lambda: [0.0, 0.1, 0.1, 0.0],
+        description="Dropout rates for encoder layers"
+    )
+
     # ==================== File Paths ====================
-    ppi_file_path: Optional[Path] = Field(
+    ppi_file_path: Path = Field(
         default=None,
         description="Path to protein-protein interaction network file"
     )
+    pathway_file_path: list[Path] = Field(
+        default=None,
+        description="Path to Pathway files"
+    )
     input_gene_list_fp: Optional[Path] = Field(
         default=None,
-        description="Path to input gene list file"
+        description="Path to gene list file (after preprocessing) for GEP-level reconstruction"
     )
     cell_type_fp: Optional[Path] = Field(
         default=None,
@@ -263,12 +275,18 @@ class ModelConfig(VAEConfig):
     # ==================== Other Settings ====================
     using_positional_encoding: bool = Field(
         default=False,
-        description="Use positional encoding to distinguish cell types"
+        description="Use positional encoding in latent space to distinguish cell types if True."
     )
     scaling_by_constant: bool = Field(
         default=True,
-        description="Scale input GEP data by constant factor (20 by default)"
+        description="Scale input GEP data by constant factor (20 by default) if True."
     )
+    # ==================== Cell Proportion Prediction ====================
+    predict_cell_prop: bool = Field(
+        default=False,
+        description="Whether to predict cell type proportions"
+    )
+
 
     # Mask fraction for input dropout
     mask_ratio: float = Field(
@@ -278,7 +296,18 @@ class ModelConfig(VAEConfig):
         description="Fraction of input features (genes) to mask for dropout"
     )
 
-    learn_gep_residual: bool = False
+    # Whether to learn GEP residual compared to mean GEP of cell types instead of full GEP
+    learn_gep_residual: bool = Field(
+        default=False,
+        description="Whether to learn GEP residuals compared to the mean GEP of each cell type (instead of learning the full GEP)"
+    )
+
+    SCALING_FACTOR: float = Field(
+        default=20.0,
+        description='Constant factor to scale input GEP data after log transformation when scaling_by_constant=True. '
+                    'This can help stabilize training by normalizing the input into (0, 1) range'
+                    ' and improve performance.'
+    )
 
     # ==================== Validators ====================
 

@@ -1,6 +1,6 @@
 # from pydantic.dataclasses import dataclass
 
-from vaedecon.config import BaseConfig
+from ..base import BaseConfig
 
 
 # @dataclass
@@ -25,10 +25,10 @@ class AutoConfig(BaseConfig):
 
             model_config = BaseAEConfig.from_json_file(json_path)
 
-        elif config_name == "VAEConfig":
-            from ..vae import VAEConfig
+        elif config_name == "ModelConfig":
+            from ...configs import ModelConfig
 
-            model_config = VAEConfig.from_json_file(json_path)
+            model_config = ModelConfig.from_json_file(json_path)
 
         else:
             raise NameError(

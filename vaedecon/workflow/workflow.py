@@ -14,8 +14,9 @@ from ..models.base import BaseEncoder
 from ..models.gnn import EncoderSGNN
 from ..models.nn import (EncoderMLP, DecoderMLP, EncoderHybrid, EncoderResMLP, DecoderResMLP,
                          PositionalEncoding, GeneTransformerEncoder)
-from ..models.vae import VAE, VAEConfig
-from ..trainers import BaseTrainerConfig, BaseTrainerL, PLTrainer
+from ..models.vae import VAE
+from ..configs import ModelConfig, TrainingConfig
+from ..trainers import BaseTrainerL, PLTrainer
 from ..pipelines import TrainingPipeline
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -26,7 +27,11 @@ warnings.simplefilter(action='ignore', category=UserWarning)
 # T_Decoder = TypeVar('T_Decoder', bound=DecoderMLP)
 
 
-def create_model(model_config: VAEConfig, encoder_cls_name_list: List[str], decoder_cls: List[str]) -> VAE:
+def create_model(
+    model_config: ModelConfig,
+    encoder_cls_name_list: List[str],
+    decoder_cls: List[str],
+) -> VAE:
     """Creates the VAE model."""
     position_encoding = PositionalEncoding(
         d_model=model_config.latent_dim,
@@ -82,7 +87,7 @@ def train_model(
         train_set: torch.utils.data.Dataset,
         val_set: torch.utils.data.Dataset,
         trainer_cls: Type[BaseTrainerL],
-        config: BaseTrainerConfig,
+        config: TrainingConfig,
         device: str,
         result_dir: str,
 ) -> None:
@@ -100,7 +105,7 @@ def train_model(
     # return training_pipeline, output_dir
 
 
-def save_metadata(dataset: GEPDataset, model_config: VAEConfig) -> None:
+def save_metadata(dataset: GEPDataset, model_config: ModelConfig) -> None:
     """Saves the gene list and cell type list."""
     dataset.save_gene_list(Path(model_config.input_gene_list_fp))
     dataset.save_cell_types(Path(model_config.cell_type_fp))
@@ -115,7 +120,7 @@ def load_trained_model(model_dir: str) -> Union[AutoModel, BaseAE]:
         model_config_path = os.path.join(model_dir, "model_config.json")
         training_config_path = os.path.join(model_dir, "training_config.json")
         model_config = AutoConfig.from_json_file(model_config_path)
-        training_config = BaseTrainerConfig.from_json_file(training_config_path)
+        training_config = TrainingConfig.from_json_file(training_config_path)
 
         model = create_model(model_config=model_config, encoder_cls_name_list=model_config.encoders,
                              decoder_cls=model_config.decoders)
@@ -137,7 +142,7 @@ def evaluate_model(
         trained_model: AutoModel,
         test_set: Union[GEPDataset | DataLoader],
         result_dir: str,
-        model_config: VAEConfig,
+        model_config: ModelConfig,
         output_dir: str,
         device: str,
         pred_cell_prop_file_path: str = None,

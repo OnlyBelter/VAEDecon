@@ -391,12 +391,13 @@ def read_single_cell_type_dataset(sct_dataset_file_path: str, latent_z_nn_info_f
     return sct_dataset_obs, sct_dataset_df
 
 
-def read_gene_set(gene_set_file_path: list, max_n_genes: int = 300) -> pd.DataFrame:
+def read_gene_set(gene_set_file_path: list[str], max_n_genes: int = 300) -> pd.DataFrame:
     """
     read gene set from .gmt files and convert to DataFrame with genes as index and gene sets as columns,
      1 for a gene in a gene set and 0 for not
-    :param gene_set_file_path: the file path of gene set
-    :param max_n_genes: the maximum number of genes in a gene set
+    :param gene_set_file_path: the file paths of all gene sets (pathway)
+    :param max_n_genes: the maximum number of genes to keep in a gene set,
+      if a gene set has more genes than this number, only the top max_n_genes will be kept; other genes will be ignored
     :return: DataFrame of gene set with genes as index and gene sets as columns
     """
     gs2genes = {}

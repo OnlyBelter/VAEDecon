@@ -6,15 +6,10 @@ import torch
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-import warnings
 
 from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
                                   LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
-                                  BaseEncoder, BaseDecoder)
-from vaedecon.models.gnn.positional_encoding import PositionalEncoding
-# from ....models.base.base_utils import
-# from ..base_architectures import BaseDecoder, BaseEncoder
-# from ..utils import ResBlock
+                                  BaseEncoder, BaseDecoder, PositionalEncoding)
 
 
 class EncoderMLP(BaseEncoder):
@@ -22,20 +17,35 @@ class EncoderMLP(BaseEncoder):
     A Vectorized MLP encoder that predicts parameters for all cell types simultaneously.
     """
 
-    def __init__(self, args: BaseModelConfig, position_encoding: Optional[PositionalEncoding] = None):
+    def __init__(
+        self,
+        args: BaseModelConfig,
+        position_encoding: Optional[PositionalEncoding] = None,
+    ):
         super().__init__()
         self.args = args
-        self.input_dim = args.input_dim
         self.latent_dim = args.latent_dim
         self.n_cell_types = args.n_cell_types
         self.using_positional_encoding = args.using_positional_encoding
         self.predict_cell_prop = args.predict_cell_prop
 
-        # Configuration
+        # --- Params that subclasses may override BEFORE calling _build ---
+        self.input_dim = args.input_dim
         self.hidden_dims: List[int] = getattr(args, 'encoder_hidden_dims', [1024, 512, 512])
         self.dropout_rate = args.encoder_dropout_rate
 
-        # --- Body Layers ---
+        # Positional Encoding
+        if self.using_positional_encoding:
+            if position_encoding is None:
+                raise ValueError("position_encoding parameter must be provided if using_positional_encoding is True.")
+            self.position_encoding = position_encoding
+
+        # Build layers and heads using the (possibly overridden) parameters
+        self._build_layers()
+        self._build_heads()
+
+    def _build_layers(self) -> None:
+        """Build MLP body layers from self.input_dim, self.hidden_dims, self.dropout_rate."""
         self.layers = nn.ModuleList()
         current_input_size = np.prod(self.input_dim)
 
@@ -51,27 +61,28 @@ class EncoderMLP(BaseEncoder):
 
         self.depth = len(self.layers)
 
-        # --- Heads ---
+    def _build_heads(self) -> None:
+        """Build output heads from self.hidden_dims[-1]."""
         # 1. Mu and LogVar Head (Vectorized for all cell types)
         # Output shape: [Batch, n_cell_types * latent_dim * 2]
-        self.fc_mu_logvar = nn.Linear(self.hidden_dims[-1], self.n_cell_types * self.latent_dim * 2)
+        last_dim = self.hidden_dims[-1]
+        self.fc_mu_logvar = nn.Linear(last_dim, self.n_cell_types * self.latent_dim * 2)
 
         # 2. Cell Proportion Head (Dirichlet parameters)
         if self.predict_cell_prop:
             self.fc_dd_alpha = nn.Linear(self.hidden_dims[-1], self.n_cell_types)
 
-        # Positional Encoding
-        if self.using_positional_encoding:
-            if position_encoding is None:
-                raise ValueError("position_encoding parameter must be provided if using_positional_encoding is True.")
-            self.position_encoding = position_encoding
-
-    def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None,
-                output_layer_levels: Optional[List[int]] = None, eps: float = EPS) -> ModelOutput:
+    def forward(
+        self,
+        x: torch.Tensor,
+        y: Optional[torch.Tensor] = None,
+        output_layer_levels: Optional[List[int]] = None,
+        eps: float = EPS
+    ) -> ModelOutput:
 
         # x is already on the correct device. No need to move it.
         # Flatten input: (B, Genes)
-        out = x.view(x.size(0), -1)
+        out = x.reshape(x.size(0), -1)
 
         # --- Feature Extraction (MLP Body) ---
         output = ModelOutput()
@@ -84,13 +95,12 @@ class EncoderMLP(BaseEncoder):
             output[f"embedding_layer_{-1}"] = out
 
         # --- Latent Space Projection (Heads) ---
-
         # 1. Predict Mu and LogVar
         # Flat shape: (B, C * L * 2)
         mu_logvar_flat = self.fc_mu_logvar(out)
 
         # Reshape to (B, C, 2*L)
-        mu_logvar_structured = mu_logvar_flat.view(-1, self.n_cell_types, 2 * self.latent_dim)
+        mu_logvar_structured = mu_logvar_flat.reshape(-1, self.n_cell_types, 2 * self.latent_dim)
 
         # Split and Permute
         # raw shapes: (B, C, L)
@@ -118,32 +128,29 @@ class EncoderMLP(BaseEncoder):
             # warnings.warn(...)
 
         # --- Positional Encoding Logic ---
-        if self.using_positional_encoding and self.position_encoding is not None and cell_prop is not None:
+        if (self.using_positional_encoding
+            and self.position_encoding is not None
+            and cell_prop is not None
+        ):
             # Ensure cell_prop is (B, C)
-            if cell_prop.ndim == 3: cell_prop = cell_prop.squeeze(-1)
-
+            if cell_prop.ndim == 3:
+                cell_prop = cell_prop.squeeze(-1)
             # Mask for existing cell types
-            exists = (cell_prop >= 0.01).float()  # (B, C)
-            exists_mask = exists.unsqueeze(1)  # (B, 1, C)
+            exists_mask = (cell_prop >= 0.01).float().unsqueeze(1)  # (B, 1, C)
 
             # PE Matrix: (C, L) -> (1, L, C) for broadcasting
             # We use the registered buffer or move it to x.device
-            pe_matrix = self.position_encoding.to(x.device)
-            pe_to_add = pe_matrix.t().unsqueeze(0)
+            pe_to_add = self.position_encoding.to(x.device).t().unsqueeze(0)  # (1, L, C)
 
             # Add PE only to existing cell types
             mu_all_types = mu_all_types + (exists_mask * pe_to_add)
 
         # --- Final Aggregation ---
-        mu_mean = mu_all_types.mean(dim=-1)  # (B, L)
-        logvar_mean = logvar_all_types.mean(dim=-1)  # (B, L)
-
-        output['mu_mean'] = mu_mean
-        output['logvar_mean'] = logvar_mean
+        output['mu_mean'] = mu_all_types.mean(dim=-1)  # (B, L)
+        output['logvar_mean'] = logvar_all_types.mean(dim=-1)  # (B, L)
         output['logvar_all_types'] = logvar_all_types
         output['mu_all_types'] = mu_all_types
         output['cell_prop'] = cell_prop
-
         if cell_prop is not None:
             output['cell_type_existed'] = (cell_prop >= 0.01).float()
 
@@ -155,10 +162,12 @@ class EncoderMLP(BaseEncoder):
             out = layer_block(out)
         return out
 
-    def get_config(self):
-        return {"params": {"args": self.args.to_dict()},
+    def get_config(self) -> dict:
+        return {
+            "params": {"args": self.args.to_dict()},
                 "module_name": self.__class__.__module__,
-                "class_name": self.__class__.__name__}
+                "class_name": self.__class__.__name__,
+        }
 
 
 class DecoderMLP(BaseDecoder):

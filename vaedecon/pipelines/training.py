@@ -1,4 +1,3 @@
-import os
 import logging
 from typing import Optional, Union, Any, Type
 
@@ -10,9 +9,9 @@ from ..customexception import DatasetError
 from ..data.datasets import collate_dataset_output, BaseDataset
 from ..data.preprocessors import DataProcessor
 from ..models import BaseAE
-from ..trainers import BaseTrainerConfig, BaseTrainerL
+from ..models.base import BaseTrainerConfig
+from ..trainers import BaseTrainerL
 from .base_pipeline import Pipeline
-from ..utility import log_message
 
 logger = logging.getLogger(__name__)
 
