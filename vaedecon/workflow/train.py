@@ -35,12 +35,13 @@ class VAEDeconTrainer:
             config: VAEDeconConfig, using default VAEDeconConfig if None
         """
         self.config = config or VAEDeconConfig()
-        self._vae_config: Optional[ModelConfig] = None  # cached, built once in _prepare_data
+        self.model_dir: Path | str = ''
+        # self._vae_config: Optional[ModelConfig] = None  # cached, built once in _prepare_data
         self._precessed_training_set_dir: Optional[Path] = None  # exposed for cleanup after training
 
         self._setup_logging()
         self._setup_device()
-        self._setup_directories()
+        self._setup_directories()  # Set model_dir and result_dir, and update config.model paths
         set_fig_style(font_family='Arial', font_size=8)
 
     def _setup_logging(self):
@@ -125,25 +126,21 @@ class VAEDeconTrainer:
 
         logger.info(f"Train set: {len(train_set)}, Val set: {len(val_set)}")
 
-        # Update input_dim and build ModelConfig once
-        input_dim = dataset.data.shape[1]
-        self.config.model.input_dim = (1, input_dim)
+        # Update input_dim, gene_mean_std_fp, and build ModelConfig once
+        # Build and cache ModelConfig here; _create_model reuses it
+        self.config.model = self._build_vae_config(training_file_paths, dataset=dataset)
+        save_metadata(dataset=dataset, model_config=self.config.model)
 
         # TODO, only calculate gene mean/std when we need it, such as GNN or predict_gep_residual is true.
         # Calculate gene mean and std as features for GNN
-        self._compute_gene_statistics(dataset, training_file_paths, n_genes=input_dim)
-
-        # Build and cache ModelConfig here; _create_model reuses it
-        self._vae_config = self._build_vae_config()
-        save_metadata(dataset=dataset, model_config=self._vae_config)
+        self._compute_gene_statistics(dataset, self.config.model.gene_mean_std_fp)
 
         return dataset, train_set, val_set
 
     def _compute_gene_statistics(
         self,
         dataset: GEPDataset,
-        training_file_paths: list,
-        n_genes: int
+        gene_mean_std_fp: Path = None,
     ) -> None:
         """Compute or load per-gene mean/std statistics for GNN node features.
         Parameters:
@@ -152,15 +149,6 @@ class VAEDeconTrainer:
             n_genes: number of genes to consider
         """
         logger.info("Computing gene statistics...")
-        scaling_factor = self.config.model.SCALING_FACTOR
-        suffix = (
-            f"gene_mean_std_log2p1_scaled_by_{scaling_factor}_{len(training_file_paths)}training_files_{n_genes}genes.csv"
-            if self.config.model.scaling_by_constant
-            else f"gene_mean_std_log2p1_{len(training_file_paths)}training_files_{n_genes}genes.csv"
-        )
-        self.config.model.gene_mean_std_fp = (
-                Path(self.config.data.sct_gep_file_path).parent / suffix
-            )
 
         load_or_compute_gene_mean_std(
             sct_gep_fp=self.config.data.sct_gep_file_path,
@@ -170,40 +158,50 @@ class VAEDeconTrainer:
             scaling_by_constant=self.config.model.scaling_by_constant,
             scaling_factor=self.config.model.SCALING_FACTOR,
             log_fn=log_message,
-            out_fp=self.config.model.gene_mean_std_fp,
+            out_fp=gene_mean_std_fp,
         )
 
-    def _create_model(self):
+    def _create_model(self, model_config: ModelConfig):
         """Instantiate the VAE model using the cached ModelConfig."""
         logger.info("Creating model...")
 
-        # Construct ModelConfig from the config file (model section)
-        if self._vae_config is None:
-            self._vae_config = self._build_vae_config()
-
         # Create VAE model by combining encoder and decoder classes specified in the config
         model = create_model(
-            model_config=self._vae_config,
+            model_config=model_config,
             data_config=self.config.data,
-            encoder_cls_name_list=self.config.model.encoders,
-            decoder_cls=self.config.model.decoders
+            encoder_cls_name_list=model_config.encoders,
+            decoder_cls=model_config.decoders
         )
 
-        return model, self._vae_config
+        return model
 
-    def _build_vae_config(self) -> ModelConfig:
-        """Build a ModelConfig from self.config (model + data sections)."""
+    def _build_vae_config(self, training_file_paths, dataset: GEPDataset) -> ModelConfig:
+        """
+        Build a ModelConfig from self.config (model + data sections).
+
+        """
+        input_dim = dataset.data.shape[1]  # same as n_genes in each GEP
+        n_genes = input_dim
+        scaling_factor = self.config.model.SCALING_FACTOR
+        suffix = (
+            f"gene_mean_std_log2p1_scaled_by_{scaling_factor}_{len(training_file_paths)}training_files_{n_genes}genes.csv"
+            if self.config.model.scaling_by_constant
+            else f"gene_mean_std_log2p1_{len(training_file_paths)}training_files_{n_genes}genes.csv"
+        )
+        gene_mean_std_fp = (
+                Path(self.config.data.sct_gep_file_path).parent / suffix
+            )
 
         return ModelConfig(
             name='ModelConfig',
-            input_dim=self.config.model.input_dim,
+            input_dim=(1, n_genes),
             input_dim_pathway=self.config.model.input_dim_pathway,
             latent_dim=self.config.model.latent_dim,
             n_cell_types=self.config.model.n_cell_types,
             using_positional_encoding=self.config.model.using_positional_encoding,
             input_gene_list_fp=self.config.model.input_gene_list_fp,
             cell_type_fp=self.config.model.cell_type_fp,
-            gene_mean_std_fp=self.config.model.gene_mean_std_fp,
+            gene_mean_std_fp=gene_mean_std_fp,
             scaling_by_constant=self.config.model.scaling_by_constant,
             encoder_hidden_dims=self.config.model.encoder_hidden_dims,
             encoder_hidden_dims_pathway=self.config.model.encoder_hidden_dims_pathway,
@@ -229,6 +227,7 @@ class VAEDeconTrainer:
             mask_ratio=self.config.model.mask_ratio,
             learn_gep_residual=self.config.model.learn_gep_residual,
             SCALING_FACTOR=self.config.model.SCALING_FACTOR,
+            model_dir=self.config.model.model_dir,
         )
 
     def _build_trainer_config(self) -> TrainingConfig:
@@ -256,8 +255,8 @@ class VAEDeconTrainer:
         Return:
             VAEDecon configuration (maybe updated during training)
         """
-        dataset, train_set, val_set = self._prepare_data()
-        model, _ = self._create_model()
+        dataset, train_set, val_set = self._prepare_data()  # self.config.model is updated
+        model = self._create_model(model_config=self.config.model)
         trainer_config = self._build_trainer_config()
 
         # Train the model
