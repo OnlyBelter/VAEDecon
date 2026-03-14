@@ -321,8 +321,10 @@ class ModelConfig(BaseModelConfig):
             raise ValueError(f"All input dimensions must be positive, got {v}")
         return v
 
-    @field_validator('ppi_file_path', 'input_gene_list_fp', 'cell_type_fp',
-                     'gene_mean_std_fp', check_fields=False)
+    @field_validator('ppi_file_path',
+                     'input_gene_list_fp', 'cell_type_fp', 'gene_mean_std_fp',
+                     check_fields=False,
+                     mode='before')
     @classmethod
     def validate_file_paths(cls, v: Optional[Path]) -> Optional[Path]:
         """Validate file paths exist if provided."""
