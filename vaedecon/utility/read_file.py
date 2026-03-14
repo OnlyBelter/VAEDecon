@@ -234,7 +234,7 @@ class ReadExp(object):
         """
         Get the expression matrix
         """
-        return self.exp.round(3)
+        return self.exp.round(6)
 
     def save(self, file_path, sep=',', transpose: bool = False):
         """
@@ -391,7 +391,7 @@ def read_single_cell_type_dataset(sct_dataset_file_path: str, latent_z_nn_info_f
     return sct_dataset_obs, sct_dataset_df
 
 
-def read_gene_set(gene_set_file_path: list[str], max_n_genes: int = 300) -> pd.DataFrame:
+def read_gene_set(gene_set_file_path: list[str | Path], max_n_genes: int = 300) -> pd.DataFrame:
     """
     read gene set from .gmt files and convert to DataFrame with genes as index and gene sets as columns,
      1 for a gene in a gene set and 0 for not
@@ -403,6 +403,8 @@ def read_gene_set(gene_set_file_path: list[str], max_n_genes: int = 300) -> pd.D
     gs2genes = {}
     all_genes = set()
     for gs_file in gene_set_file_path:
+        if isinstance(gs_file, Path):
+            gs_file = str(gs_file)
         if not os.path.exists(gs_file):
             raise FileNotFoundError(f'gene set file {gs_file} not found')
         with open(gs_file, 'r') as f:

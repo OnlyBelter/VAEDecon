@@ -103,9 +103,7 @@ class VAEDeconTrainer:
             f'processed_training_sets_{self.config.training.naming_postfix}'
         )
 
-        # Load dataset
-
-        # TODO: how to load Pathway dataset?
+        # Load GEP dataset, PPI and Pathway data will be handled in each specified encoder class.
         dataset = GEPDataset(
             file_paths=training_file_paths,
             scaling_by_constant=self.config.data.scaling_by_constant,
@@ -114,7 +112,7 @@ class VAEDeconTrainer:
             force_reprocess=self.config.data.force_reprocess,
             use_memmap=True,  # use memory-mapped files for large datasets
             chunk_size=1000,
-            # compress=True, # compress cached files to save disk space
+            scaling_factor=self.config.model.SCALING_FACTOR,
         )
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
@@ -131,6 +129,7 @@ class VAEDeconTrainer:
         input_dim = dataset.data.shape[1]
         self.config.model.input_dim = (1, input_dim)
 
+        # TODO, only calculate gene mean/std when we need it, such as GNN or predict_gep_residual is true.
         # Calculate gene mean and std as features for GNN
         self._compute_gene_statistics(dataset, training_file_paths, n_genes=input_dim)
 
@@ -185,6 +184,7 @@ class VAEDeconTrainer:
         # Create VAE model by combining encoder and decoder classes specified in the config
         model = create_model(
             model_config=self._vae_config,
+            data_config=self.config.data,
             encoder_cls_name_list=self.config.model.encoders,
             decoder_cls=self.config.model.decoders
         )

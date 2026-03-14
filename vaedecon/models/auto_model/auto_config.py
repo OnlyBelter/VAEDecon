@@ -1,6 +1,6 @@
 # from pydantic.dataclasses import dataclass
 
-from ..base import BaseConfig
+from ...configs.base_config import BaseConfig
 
 
 # @dataclass

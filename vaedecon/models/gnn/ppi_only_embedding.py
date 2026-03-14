@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import SAGEConv
 from torch.utils.checkpoint import checkpoint
 
-from ...configs import ModelConfig
+from ...configs import ModelConfig, DataConfig
 from ...models.base import (ModelOutput, reparameterize_dirichlet, LOGVAR_CLAMP_MIN,
                             LOGVAR_CLAMP_MAX, EPS, NETWORK_CUTOFF, BaseEncoder)
 from vaedecon.models.base.positional_encoding import PositionalEncoding
@@ -31,10 +31,16 @@ class EncoderSGNN(BaseEncoder):
       3. Extract graph-level representation via PPIEncoder (GNN + Attention Pooling).
       4. Map to VAE parameters (mu / logvar) via MLP heads.
     """
-
-    def __init__(self, args: ModelConfig, position_encoding: Optional[PositionalEncoding] = None):
+    # TODO: consider using specific configure class for each encoder type, instead of a monolithic ModelConfig with many optional fields.
+    def __init__(
+        self,
+        args: ModelConfig,
+        data_config: DataConfig = None,
+        position_encoding: Optional[PositionalEncoding] = None
+    ):
         super().__init__()
         self.args = args
+        self.data_config = data_config
         # Dummy parameter used solely to track the current device.
         # nn.Parameter automatically moves with .to(device).
         self.device_param = nn.Parameter(torch.empty(0))
@@ -160,9 +166,11 @@ class EncoderSGNN(BaseEncoder):
         if self.predict_cell_prop:
             self.gnn_dd_alpha = nn.Linear(self.embd_col_dim, self.n_cell_types)
 
-    def forward(self, x: torch.Tensor,
-                y: Optional[torch.Tensor] = None,
-                sample_ids: Optional[List[str]] = None) -> ModelOutput:
+    def forward(
+        self, x: torch.Tensor,
+        y: Optional[torch.Tensor] = None,
+        sample_ids: Optional[List[str]] = None
+    ) -> ModelOutput:
         """
         Args:
             x:          Gene expression matrix [B, All_Genes].

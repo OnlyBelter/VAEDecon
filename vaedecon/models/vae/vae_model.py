@@ -13,10 +13,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal, Dirichlet, Gamma, kl_divergence
 
+from ...configs import DataConfig, ModelConfig
 from ...data.datasets import DatasetOutput
 
 from ...models.base import BaseAE, reparameterize_dirichlet, reparameterize_gaussian, ModelOutput, BaseDecoder, BaseEncoder
-from ...configs.default_config import ModelConfig
+# from ...configs.default_config import ModelConfig
 # from .vae_config import VAEConfig
 from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor, non_log2cpm_tensor
 
@@ -29,10 +30,14 @@ class VAE(BaseAE):
     def __init__(
         self,
         model_config: ModelConfig,
+        data_config: Optional[DataConfig] = None,
         encoders: list[BaseEncoder] = None,
         decoder: Optional[BaseDecoder] = None,
     ):
-        super().__init__(model_config=model_config, encoders=encoders, decoder=decoder)
+        super().__init__(model_config=model_config,
+                         data_config=data_config,
+                         encoders=encoders,
+                         decoder=decoder)
 
         self.n_encoders = len(self.encoders)
         assert self.n_encoders in (1, 2), 'Only 1 or 2 encoders are supported.'
@@ -52,6 +57,7 @@ class VAE(BaseAE):
         # Logits to weight anchors (Learnable parameters to associate cell types with anchors)
         self.logits = nn.Parameter(torch.zeros(n_cell_types, latent_dim))
 
+        # TODO: only read when it is necessary
         # --- Gene Statistics Setup ---
         if not os.path.exists(model_config.gene_mean_std_fp):
             raise FileNotFoundError(f"Gene features file not found: {model_config.gene_mean_std_fp}")
@@ -139,7 +145,7 @@ class VAE(BaseAE):
             mu_mean = mu_mean_list[0]
             logvar_mean = logvar_mean_list[0]
             dd_alpha = dd_alpha_list[0] if dd_alpha_list else None
-        else:
+        else:  # TODO: pleas check which fusion strategy is better, connect before calculating mu/logvar or after?
             # PoE Fusion for latent variables
             mu_types, log_var_types, mu_mean, logvar_mean = self._poe_fuse_per_celltype(
                 mu_lists_celltype=mu_list,

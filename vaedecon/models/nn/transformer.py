@@ -3,7 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Optional
 
-from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
+from ...configs import ModelConfig
+from ...models.base import (ModelOutput, reparameterize_dirichlet,
                             LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
                             BaseEncoder)
 from vaedecon.models.base.positional_encoding import PositionalEncoding
@@ -15,7 +16,7 @@ class GeneTransformerEncoder(BaseEncoder):
     Scales linearly with the number of genes O(N_genes), not quadratically.
     """
 
-    def __init__(self, args: BaseModelConfig, position_encoding: Optional[PositionalEncoding] = None):
+    def __init__(self, args: ModelConfig, position_encoding: Optional[PositionalEncoding] = None):
         super().__init__()
         self.args = args
         if isinstance(args.input_dim, (tuple, list)):

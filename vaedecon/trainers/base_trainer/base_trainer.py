@@ -17,7 +17,8 @@ from lightning.pytorch.loggers import CSVLogger
 
 from ...data.datasets import BaseDataset, collate_dataset_output
 from ...models import BaseAE
-from ...models.base import ModelOutput, set_seed, BaseTrainerConfig
+from ...configs import TrainingConfig, DataConfig
+from ...models.base import ModelOutput, set_seed
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ class PLTrainer(L.LightningModule):
     def __init__(
         self,
         model: BaseAE,
-        training_config: BaseTrainerConfig,
+        training_config: TrainingConfig,
         debug_model: Optional[bool] = False,
         monitor_metric: str = "val_loss",
     ):
@@ -321,7 +322,8 @@ class BaseTrainerL:
         result_dir: str,
         train_dataset: Union[DataLoader, Any],
         eval_dataset: Optional[Union[DataLoader, Any]] = None,
-        training_config: Optional[Any] = None,
+        training_config: Optional[TrainingConfig] = None,
+        data_config: Optional[DataConfig] = None,
         n_early_stopping_patience: int = 10,
         debug_model: Optional[bool] = False,
     ):
@@ -337,12 +339,16 @@ class BaseTrainerL:
             debug_model: Whether to enable debug mode.
         """
         if training_config is None:
-            training_config = BaseTrainerConfig()
+            training_config = TrainingConfig()
+
+        if data_config is None:
+            data_config = DataConfig()
 
         if training_config.output_dir is None:
             training_config.output_dir = "dummy_output_dir"
 
         self.training_config = training_config
+        self.data_config = data_config
         self.model_name = model.model_name
         self.n_early_stopping_patience = n_early_stopping_patience
         self.debug_model = debug_model
@@ -449,7 +455,9 @@ class BaseTrainerL:
         )
 
         # Save final model
-        self.pl_model.model.save(self.model_dir, training_config=self.training_config)
+        self.pl_model.model.save(self.model_dir,
+                                 training_config=self.training_config,
+                                 data_config=self.data_config)
 
         # Copy metrics.csv to self.model_dir
         self._copy_metrics_file(csv_logger)

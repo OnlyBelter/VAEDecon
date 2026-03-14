@@ -9,7 +9,8 @@ from ..customexception import DatasetError
 from ..data.datasets import collate_dataset_output, BaseDataset
 from ..data.preprocessors import DataProcessor
 from ..models import BaseAE
-from ..models.base import BaseTrainerConfig
+from ..configs import TrainingConfig, DataConfig
+# from ..models.base import BaseTrainerConfig
 from ..trainers import BaseTrainerL
 from .base_pipeline import Pipeline
 
@@ -81,7 +82,7 @@ class TrainingPipeline(Pipeline):
     Parameters:
         model (BaseAE): An instance of :class:`models.BaseAE` you want to train.
             If None, a default :class:`models.VAE` model is used. Default: None.
-        training_config (BaseTrainerConfig): An instance of
+        training_config (TrainingConfig): An instance of
             :class:`trainers.BaseTrainerConfig` stating the training
             parameters. If None, a default configuration is used.
         trainer_cls: The trainer class to use.
@@ -92,21 +93,26 @@ class TrainingPipeline(Pipeline):
     def __init__(self,
                  model: BaseAE = None,
                  trainer_cls: Type[BaseTrainerL] = None,
-                 training_config=None,
+                 training_config: TrainingConfig = None,
+                 data_config: Optional[DataConfig] = None,
                  result_dir: str = None,
                  debug_model: Optional[bool] = False):
         super().__init__()
         if training_config is None:
-            training_config = BaseTrainerConfig(name='VAETrainerConfig')
+            training_config = TrainingConfig(name='VAETrainerConfig')
 
-        if not isinstance(training_config, BaseTrainerConfig):
+        if data_config is None:
+            data_config = DataConfig(name='DataConfig')
+
+        if not isinstance(training_config, TrainingConfig):
             raise AssertionError(
-                "A 'BaseTrainerConfig' " "is expected for the pipeline"
+                "A 'TrainingConfig' " "is expected for the pipeline"
             )
 
         self.data_processor = DataProcessor()
         self.model = model
         self.training_config = training_config
+        self.data_config = data_config
         self.trainer_cls = trainer_cls
         self.n_early_stopping_patience = training_config.n_early_stopping_patience
         self.result_dir = result_dir  # model directory
@@ -174,6 +180,7 @@ class TrainingPipeline(Pipeline):
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             training_config=self.training_config,
+            data_config=self.data_config,
             n_early_stopping_patience=self.n_early_stopping_patience,
             debug_model=self.debug_model,
         )

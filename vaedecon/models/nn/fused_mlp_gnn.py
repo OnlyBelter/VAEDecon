@@ -5,8 +5,9 @@ import torch.nn.functional as F
 import logging
 import warnings
 
-from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
-                                  LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS, BaseEncoder)
+from ...configs import ModelConfig
+from ...models.base import (ModelOutput, reparameterize_dirichlet,
+                            LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS, BaseEncoder)
 from vaedecon.models.base.positional_encoding import PositionalEncoding
 from .mlp import EncoderMLP
 from ..gnn import EncoderSGNN
@@ -26,7 +27,7 @@ class EncoderHybrid(BaseEncoder):
     """
 
     def __init__(self,
-                 args: BaseModelConfig,  # Overall config for this hybrid encoder's output
+                 args: ModelConfig,  # Overall config for this hybrid encoder's output
                  mlp_encoder: EncoderMLP,  # Pre-initialized MLP encoder instance
                  gnn_encoder: EncoderSGNN,  # Pre-initialized GNN encoder instance
                  position_encoding: Optional[PositionalEncoding] = None,

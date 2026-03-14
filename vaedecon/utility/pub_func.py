@@ -510,7 +510,12 @@ def log_exp2cpm(exp_df: Union[pd.DataFrame, np.array], log_base=2, correct=1) ->
     return cpm
 
 
-def log_exp2cpm_tensor(exp: torch.Tensor, log_base=2, correct=1, transpose: bool = False) -> torch.Tensor:
+def log_exp2cpm_tensor(
+    exp: torch.Tensor,
+    log_base=2,
+    correct=1,
+    transpose: bool = False,
+) -> torch.Tensor:
     """
     Convert log2(CPM + 1) to non-log space values (CPM / TPM)
 

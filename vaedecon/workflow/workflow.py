@@ -13,9 +13,9 @@ from ..models import AutoModel, BaseAE, AutoConfig
 from ..models.base import BaseEncoder
 from ..models.gnn import EncoderSGNN
 from ..models.nn import (EncoderMLP, DecoderMLP, EncoderHybrid, EncoderResMLP, DecoderResMLP,
-                         PositionalEncoding, GeneTransformerEncoder)
+                         PositionalEncoding, GeneTransformerEncoder, EncoderPathNet)
 from ..models.vae import VAE
-from ..configs import ModelConfig, TrainingConfig
+from ..configs import ModelConfig, TrainingConfig, DataConfig
 from ..trainers import BaseTrainerL, PLTrainer
 from ..pipelines import TrainingPipeline
 
@@ -29,6 +29,7 @@ warnings.simplefilter(action='ignore', category=UserWarning)
 
 def create_model(
     model_config: ModelConfig,
+    data_config: DataConfig,
     encoder_cls_name_list: List[str],
     decoder_cls: List[str],
 ) -> VAE:
@@ -41,28 +42,41 @@ def create_model(
     encoders = []
     kwargs: Dict[str, Any] = {
         "args": model_config,
+        "data_config": data_config,
         "position_encoding": position_encoding,
     }
-    for encoder_cls_name in encoder_cls_name_list:
-        encoder_cls_name = encoder_cls_name.lower()
-        if encoder_cls_name == "EncoderSGNN".lower():
-            encoder_cls = EncoderSGNN
-        elif encoder_cls_name == "EncoderMLP".lower():
-            encoder_cls = EncoderMLP
-        elif encoder_cls_name == "EncoderResMLP".lower():
-            encoder_cls = EncoderResMLP
-        elif encoder_cls_name == "GeneTransformerEncoder".lower():
-            encoder_cls = GeneTransformerEncoder
-        elif encoder_cls_name == "EncoderHybrid".lower():
-            encoder_cls = EncoderHybrid
-            kwargs_for_hybrid = kwargs.copy()
-            kwargs_for_hybrid['mlp_encoder'] = EncoderMLP(**kwargs)
-            kwargs_for_hybrid['gnn_encoder'] = EncoderSGNN(**kwargs)
-            kwargs = kwargs_for_hybrid.copy()
-        else:
-            raise NotImplementedError(encoder_cls_name)
 
-        encoders.append(encoder_cls(**kwargs))
+    if not isinstance(encoder_cls_name_list, list):
+        raise TypeError("encoder_cls_name_list must be a list of encoder class names.")
+    
+    if not (1 <= len(encoder_cls_name_list) <= 3):
+        raise ValueError("encoder_cls_name_list must contain between 1 and 3 encoder names.")
+    
+    if any(not isinstance(name, str) or not name.strip() for name in encoder_cls_name_list):
+        raise ValueError("All encoder names in encoder_cls_name_list must be non-empty strings.")
+    
+    encoder_registry: Dict[str, Type[BaseEncoder]] = {
+        "encodersgnn": EncoderSGNN,
+        "encodermlp": EncoderMLP,
+        "encoderresmlp": EncoderResMLP,
+        "genetransformerencoder": GeneTransformerEncoder,
+        "encoderpathnet": EncoderPathNet,
+        "encoderhybrid": EncoderHybrid,
+    }
+    
+    normalized_encoder_names = [name.strip().lower() for name in encoder_cls_name_list]
+    unsupported = [name for name in normalized_encoder_names if name not in encoder_registry]
+    if unsupported:
+        raise NotImplementedError(f"Unsupported encoder class name(s): {unsupported}")
+    
+    for encoder_name in normalized_encoder_names:
+        if encoder_name == "encoderhybrid":
+            hybrid_kwargs = kwargs.copy()
+            hybrid_kwargs["mlp_encoder"] = EncoderMLP(**kwargs)
+            hybrid_kwargs["gnn_encoder"] = EncoderSGNN(**kwargs)
+            encoders.append(EncoderHybrid(**hybrid_kwargs))
+        else:
+            encoders.append(encoder_registry[encoder_name](**kwargs))
 
     for decoder_cls_name in decoder_cls:
         decoder_cls_name = decoder_cls_name.lower()
@@ -75,6 +89,7 @@ def create_model(
     decoder = decoder_cls(args=model_config)
     model = VAE(
         model_config=model_config,
+        data_config=data_config,
         encoders=encoders,
         decoder=decoder,
     )
@@ -98,11 +113,8 @@ def train_model(
         trainer_cls=trainer_cls,
         result_dir=result_dir,
         debug_model=config.debug_model,
-        # n_early_stopping_patience=n_early_stopping_patience,
     )
     training_pipeline(train_data=train_set, eval_data=val_set)
-    # output_dir = training_pipeline.final_output_dir
-    # return training_pipeline, output_dir
 
 
 def save_metadata(dataset: GEPDataset, model_config: ModelConfig) -> None:
@@ -118,11 +130,15 @@ def load_trained_model(model_dir: str) -> Union[AutoModel, BaseAE]:
         model_file = [f for f in os.listdir(model_dir) if f.endswith('.ckpt')]
         model_file_path = os.path.join(model_dir, model_file[0])
         model_config_path = os.path.join(model_dir, "model_config.json")
+        data_config_path = os.path.join(model_dir, "data_config.json")
         training_config_path = os.path.join(model_dir, "training_config.json")
-        model_config = AutoConfig.from_json_file(model_config_path)
+        model_config = ModelConfig.from_json_file(model_config_path)
         training_config = TrainingConfig.from_json_file(training_config_path)
+        data_config = DataConfig.from_json_file(data_config_path)
 
-        model = create_model(model_config=model_config, encoder_cls_name_list=model_config.encoders,
+        model = create_model(model_config=model_config,
+                             data_config=data_config,
+                             encoder_cls_name_list=model_config.encoders,
                              decoder_cls=model_config.decoders)
         trained_model = PLTrainer.load_from_checkpoint(
             checkpoint_path=model_file_path,

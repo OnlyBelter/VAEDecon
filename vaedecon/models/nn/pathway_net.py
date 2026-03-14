@@ -1,11 +1,15 @@
 import logging
+from pathlib import Path
 from typing import Optional
 
+import torch
 import numpy as np
 import pandas as pd
-from vaedecon.models import BaseModelConfig
+# from vaedecon.models import BaseModelConfig
 from vaedecon.models.base import PositionalEncoding, ModelOutput, EPS
+from vaedecon.configs import ModelConfig, DataConfig
 from vaedecon.models.nn import EncoderMLP
+from vaedecon.utility import log_exp2cpm_tensor
 from vaedecon.utility.read_file import ReadExp, read_gene_set
 
 logger = logging.getLogger(__name__)
@@ -19,18 +23,25 @@ class EncoderPathNet(EncoderMLP):
 
     def __init__(
         self,
-        args: BaseModelConfig,
+        args: ModelConfig,
+        data_config: DataConfig = None,
         position_encoding: Optional[PositionalEncoding] = None,
     ):
         # Override pathway-specific params BEFORE super().__init__()
         # so that _build_layers() and _build_heads() use them directly.
         # We temporarily patch the relevant attributes on args so the
         # parent __init__ picks them up cleanly.
-        self._pathway_input_dim    = args.input_dim_pathway
+        # self._pathway_input_dim    = args.input_dim_pathway
         self._pathway_hidden_dims  = getattr(args, 'encoder_hidden_dims_pathway', [1024, 512, 512])
         self._pathway_dropout_rate = args.encoder_dropout_rate_pathway
 
-        super().__init__(args, position_encoding)
+        # Read pathways from file and store as a buffer for use in forward pass
+        pathway_mask = get_pathway_mask(args.pathway_file_path, args.input_gene_list_fp)
+        self._pathway_input_dim = pathway_mask.shape[1]  # override input dim to match pathway count
+
+        super().__init__(args, data_config=data_config, position_encoding=position_encoding)
+
+        self.register_buffer('pathway_mask', torch.tensor(pathway_mask, dtype=torch.float32))
 
     def _build_layers(self) -> None:
         # Swap in pathway-specific params for the build step only
@@ -38,6 +49,21 @@ class EncoderPathNet(EncoderMLP):
         self.hidden_dims  = self._pathway_hidden_dims
         self.dropout_rate = self._pathway_dropout_rate
         super()._build_layers()
+
+    def _preprocess_input(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Project raw gene expression → pathway profiles.
+        x: (B, All_Genes)  →  returns (B, n_pathways)
+        """
+        if self.data_config.scaling_by_constant:
+            x = x * self.args.SCALING_FACTOR  # scale back to log2(TPM + 1)
+        # Convert to TPM and compute pathway profiles using the same logic as in get_pathway_profiles in GPU
+        x = log_exp2cpm_tensor(x)
+        pathway_profiles = x @ self.pathway_mask  # (B, n_genes) × (n_genes, n_pathways) → (B, n_pathways)
+        pathway_profiles = torch.log2(pathway_profiles + 1)  # log-transform the pathway profiles
+        if self.data_config.scaling_by_constant:
+            pathway_profiles = pathway_profiles / self.args.SCALING_FACTOR  # scale back down if needed
+        return pathway_profiles
 
     def get_config(self) -> dict:
         cfg = super().get_config()
@@ -129,5 +155,18 @@ def get_pathway_profiles(
     return ReadExp(x_out, exp_type='log_space')
 
 
-def get_pathway_mask(pathway_file_path: list[str]):
-    return read_gene_set(pathway_file_path)
+def get_pathway_mask(pathway_file_path: list[str | Path], gene_list_file_path: str | Path) -> np.ndarray:
+    """
+    
+    Args:
+        pathway_file_path: 
+        gene_list_file_path: 
+
+    Returns: n_genes × n_pathways binary mask where mask[i,j]=1 if gene i is in pathway j, else 0.
+
+    """
+    pathway_mask = read_gene_set(pathway_file_path)  # shape: (n_genes, n_pathways)
+    gene_list_file_path = pd.read_csv(gene_list_file_path, header=None)[0].tolist()  # list of genes in the same order as input x
+    # align pathway_mask to gene_list, filling missing genes with all-zero rows
+    pathway_mask = pathway_mask.reindex(gene_list_file_path, fill_value=0.0)
+    return pathway_mask.values

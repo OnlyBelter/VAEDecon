@@ -2,13 +2,13 @@
 Default configuration for VAEDecon
 """
 from dataclasses import dataclass, field
-from ..models.base import BaseTrainerConfig, BaseModelConfig
+from .base_config import BaseTrainerConfig, BaseModelConfig, BaseConfig
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
 from pydantic import Field, field_validator, model_validator
 
-@dataclass
-class DataConfig:
+# @dataclass
+class DataConfig(BaseConfig):
     """dataset configuration"""
     data_dir: str | Path = './datasets/'
 
@@ -434,7 +434,8 @@ class ModelConfig(BaseModelConfig):
         if not v:
             raise ValueError("encoders list cannot be empty")
 
-        valid_encoders = ['EncoderHybrid', 'EncoderMLP', 'EncoderSGNN', 'EncoderResMLP', 'GeneTransformerEncoder']
+        valid_encoders = ['EncoderHybrid', 'EncoderMLP', 'EncoderSGNN', 'EncoderResMLP',
+                          'GeneTransformerEncoder', 'EncoderPathNet']
         for encoder in v:
             if encoder not in valid_encoders:
                 raise ValueError(

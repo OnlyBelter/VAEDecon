@@ -7,9 +7,10 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
-                                  LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
-                                  BaseEncoder, BaseDecoder, PositionalEncoding)
+from ...models.base import (ModelOutput, reparameterize_dirichlet,
+                            LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
+                            BaseEncoder, BaseDecoder, PositionalEncoding)
+from ...configs import ModelConfig, DataConfig
 
 
 class EncoderMLP(BaseEncoder):
@@ -19,11 +20,13 @@ class EncoderMLP(BaseEncoder):
 
     def __init__(
         self,
-        args: BaseModelConfig,
+        args: ModelConfig,
+        data_config: DataConfig = None,
         position_encoding: Optional[PositionalEncoding] = None,
     ):
         super().__init__()
         self.args = args
+        self.data_config = data_config
         self.latent_dim = args.latent_dim
         self.n_cell_types = args.n_cell_types
         self.using_positional_encoding = args.using_positional_encoding
@@ -82,6 +85,7 @@ class EncoderMLP(BaseEncoder):
 
         # x is already on the correct device. No need to move it.
         # Flatten input: (B, Genes)
+        x = self._preprocess_input(x)
         out = x.reshape(x.size(0), -1)
 
         # --- Feature Extraction (MLP Body) ---
@@ -156,6 +160,14 @@ class EncoderMLP(BaseEncoder):
 
         return output
 
+    @staticmethod
+    def _preprocess_input(x: torch.Tensor) -> torch.Tensor:
+        """
+        Hook for input preprocessing before the MLP body.
+        Default: identity (no-op). Override in subclasses to transform x.
+        """
+        return x
+
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
         out = x.view(x.size(0), -1)
         for layer_block in self.layers:
@@ -176,7 +188,7 @@ class DecoderMLP(BaseDecoder):
     It can decode a single latent vector (B, L) OR a batch of cell types (B, L, C).
     """
 
-    def __init__(self, args: BaseModelConfig):
+    def __init__(self, args: ModelConfig):
         super().__init__()
         self.args = args
         self.input_dim = args.input_dim  # The output dimension, same as the input dimension of encoder

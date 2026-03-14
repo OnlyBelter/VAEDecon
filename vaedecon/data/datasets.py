@@ -121,17 +121,19 @@ class GEPDataset(Dataset):
     """
 
     def __init__(self,
-                 file_paths: List[str],
-                 processed_data_dir: Union[str, Path],
-                 scaling_by_constant: Union[bool, float] = True,
-                 gene_list_file: Optional[Union[str, Path]] = None,
-                 remove_low_var_genes: bool = False,
-                 min_var: float = 1.0,
-                 cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None,
-                 force_reprocess: bool = False,
-                 use_memmap: bool = True,  # Use memory mapping
-                 chunk_size: int = 1000,  # Process data in chunks
-                 compress: bool = False):  # Compress cached data
+        file_paths: List[str],
+        processed_data_dir: Union[str, Path],
+        scaling_by_constant: Union[bool, float] = True,
+        gene_list_file: Optional[Union[str, Path]] = None,
+        remove_low_var_genes: bool = False,
+        min_var: float = 1.0,
+        cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None,
+        force_reprocess: bool = False,
+        use_memmap: bool = True,  # Use memory mapping
+        chunk_size: int = 1000,  # Process data in chunks
+        compress: bool = False,
+        scaling_factor: Optional[float] = 20.0,
+    ):  # Compress cached data
         """
         Args:
             file_paths: List of file paths containing the H5AD data or CSV files
@@ -149,7 +151,7 @@ class GEPDataset(Dataset):
         self.use_memmap = use_memmap
         self.chunk_size = chunk_size
         self.compress = compress
-        self.scaling_value = 20.0 if scaling_by_constant is True else (
+        self.scaling_value = scaling_factor if scaling_by_constant is True else (
             scaling_by_constant if isinstance(scaling_by_constant, float) else 1.0
         )
         self.apply_scaling = bool(scaling_by_constant)
@@ -184,9 +186,11 @@ class GEPDataset(Dataset):
         else:
             log_message("Preprocessing data from scratch...")
             self._preprocess_and_cache(
-                file_paths, gene_list_file,
+                file_paths,
+                gene_list_file,
                 remove_low_var_genes,
-                min_var, cell_cell2ave_exp_file_path
+                min_var,
+                cell_cell2ave_exp_file_path
             )
 
     @property
@@ -292,8 +296,14 @@ class GEPDataset(Dataset):
         with open(file_path, 'r') as f:
             return f.read().splitlines()
 
-    def _preprocess_and_cache(self, file_paths, gene_list_file,
-                              remove_low_var_genes, min_var, cell_cell2ave_exp_file_path):
+    def _preprocess_and_cache(
+        self,
+        file_paths,
+        gene_list_file,
+        remove_low_var_genes,
+        min_var,
+        cell_cell2ave_exp_file_path,
+    ):
         """
         Preprocess data with memory-efficient chunked processing.
         """

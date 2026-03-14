@@ -5,7 +5,8 @@ import numpy as np
 from typing import List, Optional
 
 # ... (Keep your existing imports) ...
-from ...models.base import (BaseModelConfig, ModelOutput, reparameterize_dirichlet,
+from ...configs import ModelConfig
+from ...models.base import (ModelOutput, reparameterize_dirichlet,
                             LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
                             BaseEncoder, BaseDecoder)
 from vaedecon.models.base.positional_encoding import PositionalEncoding
@@ -39,7 +40,7 @@ class EncoderResMLP(BaseEncoder):
     Residual MLP Encoder.
     """
 
-    def __init__(self, args: BaseModelConfig, position_encoding: Optional[PositionalEncoding] = None):
+    def __init__(self, args: ModelConfig, position_encoding: Optional[PositionalEncoding] = None):
         super().__init__()
         self.args = args
         self.input_dim = args.input_dim
@@ -150,7 +151,7 @@ class DecoderResMLP(BaseDecoder):
     Residual MLP Decoder.
     """
 
-    def __init__(self, args: BaseModelConfig):
+    def __init__(self, args: ModelConfig):
         super().__init__()
         self.args = args
         self.input_dim = args.input_dim

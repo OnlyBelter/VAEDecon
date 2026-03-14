@@ -1,31 +1,24 @@
-import inspect
 import logging
 import os
 import sys
 import importlib
 import numpy as np
 from http.cookiejar import LoadError
-from typing import Optional, Dict, Any, List, Union, Sequence
+from typing import Optional, Dict, Any, List
 
-import cloudpickle
 import json
 import torch
 import torch.nn as nn
 import pandas as pd
 import lightning as L
 from ...data.datasets import BaseDataset, DatasetOutput
-from ...models.auto_model import AutoConfig
-# from ...models.vae import VAEConfig
-# from ..nn import BaseDecoder, BaseEncoder
-# from ..gnn import EncoderSGNN
-# from ..nn.default_architectures import Decoder_AE_MLP
-from .base_config import BaseModelConfig, EnvironmentConfig
+from ...models.auto_model import AutoConfig  # TODO, check why use AutoConfig and AutoModel???
+from ...configs import ModelConfig, DataConfig, TrainingConfig
+from ...configs.base_config import EnvironmentConfig
 from ...customexception import BadInheritanceError
 from ...models.base.base_utils import (
     CPU_Unpickler,
     ModelOutput,
-    # check_decoder,
-    # check_encoder,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,14 +61,20 @@ class BaseEncoder(L.LightningModule):
     def __init__(self):
         super().__init__()
 
-    def forward(self, x: torch.Tensor, knn_edge_index: Optional[Any], ppi_edge_index: Optional[Any]) -> Any:
+    def forward(
+        self, x: torch.Tensor,
+        knn_edge_index: Optional[Any],
+        ppi_edge_index: Optional[Any],
+    ) -> Any:
         """Forward pass of the encoder.
 
         This method must be implemented in child classes. It processes the input data
         and returns an encoded representation.
 
         Args:
-            x (torch.Tensor): Input data to be encoded
+            x (torch.Tensor): Input data to be encoded,
+              log2(TPM + 1) transformed and scaled to [0, 1] (by dividing by SCALING_FACTOR, default 20 in vaedecon).
+              Shape: (batch_size, num_genes)
             knn_edge_index (Optional[torch.Tensor]): KNN edge index, only for GNN
             ppi_edge_index (Optional[torch.Tensor]): PPI edge index, only for GNN
 
@@ -93,7 +92,8 @@ class BaseAE(L.LightningModule):
 
     def __init__(
         self,
-        model_config: BaseModelConfig,
+        model_config: ModelConfig,
+        data_config: DataConfig,
         encoders: list[BaseEncoder] = None,  # one or two encoders
         decoder: Optional[BaseDecoder] = None,
     ):
@@ -103,6 +103,7 @@ class BaseAE(L.LightningModule):
         self.input_dim = model_config.input_dim
         self.latent_dim = model_config.latent_dim
         self.model_config = model_config
+        self.data_config = data_config
 
         if decoder is None:
             if model_config.input_dim is None:
@@ -224,7 +225,12 @@ class BaseAE(L.LightningModule):
                 }
             }
 
-    def save(self, model_dir: str, training_config: Optional[Any] = None):
+    def save(
+        self,
+        model_dir: str,
+        training_config: Optional[TrainingConfig] = None,
+        data_config: Optional[DataConfig] = None,
+    ):
         """Saves the model and its configuration.
         Args:
             model_dir (str): The directory path where the model will be saved.
@@ -243,10 +249,16 @@ class BaseAE(L.LightningModule):
         # Save model configuration
         self.model_config.save_json(model_dir, "model_config")
 
+        # Save data configuration if provided
+        if data_config is not None and hasattr(data_config, "save_json"):
+            data_config.save_json(model_dir, "data_config")
+        elif hasattr(self, "data_config") and self.data_config is not None and hasattr(self.data_config, "save_json"):
+            self.data_config.save_json(model_dir, "data_config")
+
         # Save training configuration if provided
         if training_config is not None and hasattr(training_config, "save_json"):
             training_config.save_json(model_dir, "training_config")
-        elif hasattr(self, "training_config") and hasattr(self.training_config, "save_json"):
+        elif hasattr(self, "training_config") and self.data_config is not None and hasattr(self.training_config, "save_json"):
             self.training_config.save_json(model_dir, "training_config")
 
         # Copy training logs
@@ -303,7 +315,7 @@ class BaseAE(L.LightningModule):
             raise RuntimeError(f"Failed to instantiate {class_name}: {e}")
 
     @classmethod
-    def _load_model_config_from_folder(cls, dir_path: str) -> BaseModelConfig:
+    def _load_model_config_from_folder(cls, dir_path: str) -> ModelConfig:
         """Loads model config from a folder."""
         if "model_config.json" not in os.listdir(dir_path):
             raise FileNotFoundError(
@@ -480,7 +492,7 @@ class Decoder_AE_MLP(BaseDecoder):
     # It is a simple MLP that maps from the latent space to the original input space (gene expression profiles).
     # The output is passed through a sigmoid activation to ensure it is in the range [0, 1],
     # which is appropriate for gene expression data after log transformation and scaling.
-    def __init__(self, args: BaseModelConfig):
+    def __init__(self, args: ModelConfig):
         BaseDecoder.__init__(self)
 
         self.input_dim = args.input_dim  # The number of genes in each GEP
