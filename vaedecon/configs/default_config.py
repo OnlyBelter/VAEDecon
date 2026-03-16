@@ -3,10 +3,34 @@ Default configuration for VAEDecon
 """
 from dataclasses import dataclass, field
 from .base_config import BaseTrainerConfig, BaseModelConfig, BaseConfig
-from typing import List, Dict, Optional, Tuple, Any, Union
+from typing import List, Dict, Optional, Tuple, Any, Union, Literal
 from pathlib import Path
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator, BaseModel
 
+
+class LossCoefficient(BaseModel):
+    beta: float = 2.0
+    gamma: float = 0.005
+    kld_type: Literal["ave", "sep"] = "ave"   # your code uses 'sep', not 'sum'
+    cell_prop: float = 0.0
+    weighting_gene_by_exp: bool = True
+    weight_clamp_range: Tuple[float, float] = (0.2, 5.0)
+    gene_mean_std_weight: float = 1.0
+    z_score_reg_weight: float = 0.1
+
+    @field_validator("beta", "gamma", "cell_prop", "gene_mean_std_weight", "z_score_reg_weight")
+    @classmethod
+    def non_negative(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("must be non-negative")
+        return v
+
+    @model_validator(mode="after")
+    def check_weight_range(self):
+        mn, mx = self.weight_clamp_range
+        if mn <= 0 or mn >= mx:
+            raise ValueError("weight_clamp_range must satisfy 0 < min < max")
+        return self
 
 # @dataclass
 class DataConfig(BaseConfig):
@@ -255,17 +279,9 @@ class ModelConfig(BaseModelConfig):
     )
 
     # ==================== Loss Coefficients ====================
-    loss_coefficient: Dict[str, Any] = Field(
-        default_factory=lambda: {
-            "beta": 2,  # beta parameter for KLD loss, beta-VAE
-            "gamma": 0.005,  # gamma parameter for the repulsion loss
-            "kld_type": "ave",  # KL divergence loss
-            "cell_prop": 0,  # Cell type proportion prediction loss
-            "weighting_gene_by_exp": True,  # whether to weight the gene loss by the expression value across cell types
-            'weight_clamp_range': (0.2, 5.0), # the range of the weights for the genes across cell types
-            'gene_mean_std_weight': 1.0, # the weight for the gene mean and std loss
-        },
-        description="Coefficients for each term in total loss function"
+    loss_coefficient: LossCoefficient = Field(
+        default_factory=LossCoefficient,
+        description="Coefficients for different loss components"
     )
 
     # ==================== GNN Settings ====================
@@ -461,48 +477,6 @@ class ModelConfig(BaseModelConfig):
             raise ValueError(f"Fusion dropout rates must be in [0, 1], got {v}")
         return v
 
-    @field_validator('loss_coefficient')
-    @classmethod
-    def validate_loss_coefficient(cls, v: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate loss coefficient structure and values."""
-        required_keys = {
-            "cell_prop", "beta", "gamma", "kld_type",
-            "weighting_gene_by_exp", "weight_clamp_range", "gene_mean_std_weight"
-        }
-
-        # Check required keys
-        missing_keys = required_keys - set(v.keys())
-        if missing_keys:
-            raise ValueError(f"Missing required keys in loss_coefficient: {missing_keys}")
-
-        # Validate numeric values are non-negative
-        numeric_keys = ["cell_prop", "beta", "gamma", "gene_mean_std_weight"]
-        for key in numeric_keys:
-            if v[key] < 0:
-                raise ValueError(f"loss_coefficient['{key}'] must be non-negative, got {v[key]}")
-
-        # Validate kld_type
-        if v["kld_type"] not in ['ave', 'sum']:
-            raise ValueError(f"kld_type must be 'ave' or 'sum', got {v['kld_type']}")
-
-        # Validate weight_clamp_range
-        if not isinstance(v["weight_clamp_range"], (tuple, list)) or len(v["weight_clamp_range"]) != 2:
-            raise ValueError("weight_clamp_range must be a tuple/list of length 2")
-
-        min_weight, max_weight = v["weight_clamp_range"]
-        if min_weight >= max_weight:
-            raise ValueError(
-                f"weight_clamp_range min ({min_weight}) must be < max ({max_weight})"
-            )
-        if min_weight <= 0:
-            raise ValueError(f"weight_clamp_range min must be positive, got {min_weight}")
-
-        # Validate boolean
-        if not isinstance(v["weighting_gene_by_exp"], bool):
-            raise ValueError("weighting_gene_by_exp must be boolean")
-
-        return v
-
     @field_validator('encoders')
     @classmethod
     def validate_encoders(cls, v: List[str]) -> List[str]:
@@ -553,7 +527,7 @@ class ModelConfig(BaseModelConfig):
     @model_validator(mode='after')
     def validate_cell_prop_consistency(self):
         """Ensure cell proportion prediction settings are consistent."""
-        cell_prop_weight = self.loss_coefficient.get("cell_prop", 0)
+        cell_prop_weight = self.loss_coefficient.cell_prop
 
         if cell_prop_weight > 0 and not self.predict_cell_prop:
             raise ValueError(
