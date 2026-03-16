@@ -11,3 +11,4 @@ from .default_config import DataConfig
 from .default_config import ModelConfig
 from .default_config import TrainingConfig
 from .default_config import EvaluationConfig
+from .default_config import GEPDatasetConfig

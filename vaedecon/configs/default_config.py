@@ -3,9 +3,10 @@ Default configuration for VAEDecon
 """
 from dataclasses import dataclass, field
 from .base_config import BaseTrainerConfig, BaseModelConfig, BaseConfig
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple, Any, Union
 from pathlib import Path
 from pydantic import Field, field_validator, model_validator
+
 
 # @dataclass
 class DataConfig(BaseConfig):
@@ -26,9 +27,82 @@ class DataConfig(BaseConfig):
     cell_type2ave_exp_file_path: Optional[str] = None
 
     # Processing options
+    # Scale input GEP data by a constant factor after log transformation (range of the input data will be (0, 1)).
+    # This can help stabilize training and improve performance.
     scaling_by_constant: bool = True
-    remove_low_var_genes: bool = False
+    scaling_factor: float = 20.0  #  Default scaling divisor when scaling_by_constant is True.
+    remove_low_var_genes: bool = True  # If True, perform low-variance gene filtering.
+    min_var: float = 1.0  # Minimum variance threshold for gene filtering (if remove_low_var_genes is True).
+    force_reprocess: bool = False  # If True, ignore cache and re-run preprocessing.
+
+    # file_paths: List[Union[str, Path]]
+    # processed_data_dir: Optional[Union[str, Path]]
+
+    # gene_list_file: Optional[Union[str, Path]] = None
+    # cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None
+
+    use_memmap: bool = True  # Use np.memmap for .npy cache files to reduce RAM pressure.
+    chunk_size: int = 10000  # Chunk size for chunked transform. Increase for speed, decrease for memory.
+    # If True, use .npz compressed cache files (smaller, typically slower).
+    # Note: compressed .npz does not support true memmap behavior.
+    compress: bool = False
+
+
+# @dataclass(frozen=True)
+class GEPDatasetConfig(DataConfig):
+    """
+    Configuration for GEPDataset.
+
+    Why use a config object?
+    - Improves readability (fewer long argument lists)
+    - Prevents accidental positional argument bugs
+    - Easier to serialize/store with experiment artifacts
+
+    Args:
+        file_paths:
+            List of input file paths. Supported: .h5ad, .csv
+        processed_data_dir:
+            Cache directory for processed arrays and metadata.
+            Must be provided for this implementation.
+        force_reprocess:
+            If True, ignore cache and re-run preprocessing.
+        scaling_by_constant:
+            If True, use `scaling_factor`;
+            if float, use that value directly;
+            if False, do not scale.
+        scaling_factor:
+            Default scaling divisor when scaling_by_constant is True.
+        gene_list_file:
+            Optional gene list for gene alignment/filtering.
+        remove_low_var_genes:
+            If True, perform low-variance gene filtering.
+        min_var:
+            Minimum variance threshold for gene filtering.
+        cell_cell2ave_exp_file_path:
+            Optional reference expression file for additional gene filtering.
+        use_memmap:
+            Use np.memmap for .npy cache files to reduce RAM pressure.
+        chunk_size:
+            Chunk size for chunked transform. Increase for speed, decrease for memory.
+        compress:
+            If True, use .npz compressed cache files (smaller, typically slower).
+            Note: compressed .npz does not support true memmap behavior.
+    """
+    file_paths: List[Union[str, Path]]
+    processed_data_dir: Optional[Union[str, Path]]
     force_reprocess: bool = False
+
+    scaling_by_constant: Union[bool, float] = True
+    scaling_factor: float = 20.0
+
+    gene_list_file: Optional[Union[str, Path]] = None
+    remove_low_var_genes: bool = False
+    min_var: float = 1.0
+    cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None
+
+    use_memmap: bool = True
+    chunk_size: int = 10000
+    compress: bool = False
 
 
 # @dataclass

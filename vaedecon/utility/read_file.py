@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class ReadH5AD(object):
     """
     Read .h5ad file and provides methods to access and process its data.
-    Values are typically log2 transformed (e.g., log2(TPM+1) or log2(CPM+1)).
+    Expecte values are log2 transformed (e.g., log2(TPM+1) or log2(CPM+1)).
 
     :param file_path: Path to the .h5ad file.
     :param show_info: Whether to print dataset information upon loading.
@@ -138,7 +138,7 @@ class ReadH5AD(object):
             data=x_data,
             index=adata_slice.obs_names.to_list(),  # Use obs_names from the slice
             columns=adata_slice.var_names.to_list()  # Use var_names from the slice (or original if not subsetting vars)
-        ).round(3)
+        ).round(4)
 
         if result_file_path is not None:
             save_path = Path(result_file_path)

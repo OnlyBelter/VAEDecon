@@ -18,7 +18,7 @@ from ..plot import (
     plot_bulk_gep,
     plot_latent_space
 )
-from ..configs.default_config import VAEDeconConfig
+from ..configs.default_config import VAEDeconConfig, GEPDatasetConfig
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +64,9 @@ class VAEDeconPredictor:
 
         # Read gene list and cell type list
         # self.input_gene_list_fp = os.path.join(self.model_dir, 'input_gene_list.txt')
-        self.input_gene_list_fp = self.config.model.input_gene_list_fp
+        # self.input_gene_list_fp = self.config.model.input_gene_list_fp
         # self.cell_type_fp = os.path.join(self.model_dir, 'cell_type_list.txt')
-        self.cell_type_fp = self.config.model.cell_type_fp
+        # self.cell_type_fp = self.config.model.cell_type_fp
 
         logger.info("Model loaded successfully!")
 
@@ -99,19 +99,8 @@ class VAEDeconPredictor:
 
         logger.info(f"Processing data from: {data_file_path}")
 
-        # Prepare dataset
-        processed_data_dir = os.path.join(
-            os.path.dirname(data_file_path),
-            f'processed_{dataset_type}'
-        )
-
-        dataset = GEPDataset(
-            file_paths=[data_file_path],
-            scaling_by_constant=self.config.data.scaling_by_constant,
-            gene_list_file=Path(self.input_gene_list_fp),
-            processed_data_dir=processed_data_dir,
-            force_reprocess=self.config.data.force_reprocess,
-        )
+        gep_dataset_config = self._build_gepdataset_config(data_file_path=data_file_path)
+        dataset = GEPDataset(config=gep_dataset_config)
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
 
@@ -133,6 +122,32 @@ class VAEDeconPredictor:
         logger.info("Inference completed!")
 
         return results
+
+    def _build_gepdataset_config(
+        self,
+        data_file_path: str | Path,
+        dataset_type: str = 'test',
+    ) -> GEPDatasetConfig:
+        """
+        Build a config dict for GEPDataset from self.config.data
+        """
+        # Prepare dataset
+        processed_data_dir = os.path.join(
+            os.path.dirname(data_file_path),
+            f'processed_{dataset_type}'
+        )
+
+        return GEPDatasetConfig(
+            file_paths=[data_file_path],
+            scaling_by_constant=self.config.data.scaling_by_constant,
+            remove_low_var_genes=self.config.data.remove_low_var_genes,
+            force_reprocess=self.config.data.force_reprocess,
+            use_memmap=self.config.data.use_memmap,
+            chunk_size=self.config.data.chunk_size,
+            scaling_factor=self.config.data.scaling_factor,
+            processed_data_dir=processed_data_dir,
+            gene_list_file=Path(self.config.model.input_gene_list_fp),
+        )
 
     def predict_and_visualize(
             self,

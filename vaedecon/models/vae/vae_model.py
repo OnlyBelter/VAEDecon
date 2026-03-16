@@ -17,8 +17,6 @@ from ...configs import DataConfig, ModelConfig
 from ...data.datasets import DatasetOutput
 
 from ...models.base import BaseAE, reparameterize_dirichlet, reparameterize_gaussian, ModelOutput, BaseDecoder, BaseEncoder
-# from ...configs.default_config import ModelConfig
-# from .vae_config import VAEConfig
 from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor, non_log2cpm_tensor
 
 logger = logging.getLogger(__name__)
@@ -71,8 +69,8 @@ class VAE(BaseAE):
 
         g_mean = torch.tensor(g_mean, dtype=torch.float32)
         g_std = torch.tensor(g_std, dtype=torch.float32)
-        g_mean_non_log = torch.pow(2, g_mean * self.scaling_factor) - 1  # Convert mean GEP to non-log space
-        g_std_non_log = torch.pow(2, g_std * self.scaling_factor) - 1  # Convert gene std to non-log space
+        g_mean_non_log = to_non_log_space(g_mean, self.scaling_factor)  # Convert mean GEP to non-log space
+        g_std_non_log = to_non_log_space(g_std, self.scaling_factor)  # Convert gene std to non-log space
 
         # Register as buffers so they move to device automatically with the model
         self.register_buffer('g_mean', g_mean)
@@ -246,7 +244,8 @@ class VAE(BaseAE):
         # 7. Loss Calculation
         loss_outputs = self.loss_function(
             x=x, y=y,
-            logvar_types=log_var_types, mu_types=mu_types,
+            logvar_types=log_var_types,
+            mu_types=mu_types,
             dd_alpha=dd_alpha,
             recon_x_conv=recon_x_conv_log,
             beta=self.model_config.loss_coefficient['beta'],
@@ -276,9 +275,24 @@ class VAE(BaseAE):
             recon_x_all_types=recon_x_all_types_cpm,  # Usually return CPM format for analysis
         )
 
-    def loss_function(self, x, recon_x_conv, mu_types, logvar_types, y, dd_alpha,
-                      mu_prior, beta, gamma, recon_gene_mean, recon_gene_std,
-                      logvar_mean, mu_mean, device, eps=1e-6):
+    def loss_function(
+        self,
+        x,
+        recon_x_conv,
+        mu_types,
+        logvar_types,
+        y,
+        dd_alpha,
+        mu_prior,
+        beta,
+        gamma,
+        recon_gene_mean,
+        recon_gene_std,
+        logvar_mean,
+        mu_mean,
+        device,
+        eps=1e-6,
+    ):
 
         batch_size, latent_dim, n_cell_types = mu_types.shape
         lo = self.model_config.loss_coefficient
@@ -485,3 +499,73 @@ class VAE(BaseAE):
             avg_logvar_overall = torch.mean(logvar_overall_stacked, dim=0)
 
         return fused_mu_celltype, fused_logvar_celltype, avg_mu_overall, avg_logvar_overall
+
+
+def to_non_log_space(
+    x_log_scaled: torch.Tensor,
+    scaling_factor: float,
+    *,
+    clamp_min: float = 0.0,
+) -> torch.Tensor:
+    """
+    Convert scaled-log2 features to non-log space.
+
+    Expected transform pair:
+        x_log_scaled = log2(x_non_log + 1) / scaling_factor
+        x_non_log    = 2^(x_log_scaled * scaling_factor) - 1
+
+    Args:
+        x_log_scaled:
+            Tensor in scaled log2 space.
+        scaling_factor:
+            Positive scaling factor used in preprocessing.
+        clamp_min:
+            Optional lower bound after inverse transform.
+            Keep 0.0 for expression-like non-negative values.
+
+    Returns:
+        Tensor in non-log space.
+
+    Notes:
+        - Uses torch.pow for consistency with your current code.
+        - Clamp avoids tiny negative values from numerical noise.
+    """
+    if scaling_factor <= 0:
+        raise ValueError(f"scaling_factor must be > 0, got {scaling_factor}")
+
+    x_non_log = torch.pow(2.0, x_log_scaled * scaling_factor) - 1.0
+    if clamp_min is not None:
+        x_non_log = torch.clamp(x_non_log, min=clamp_min)
+    return x_non_log
+
+
+def to_log_space(
+    x_non_log: torch.Tensor,
+    scaling_factor: float,
+    *,
+    clamp_min: float = 0.0,
+) -> torch.Tensor:
+    """
+    Convert non-log features back to scaled-log2 space.
+
+    Expected transform pair:
+        x_log_scaled = log2(x_non_log + 1) / scaling_factor
+        x_non_log    = 2^(x_log_scaled * scaling_factor) - 1
+
+    Args:
+        x_non_log:
+            Tensor in non-log space (typically >= 0).
+        scaling_factor:
+            Positive scaling factor used in preprocessing.
+        clamp_min:
+            Clamp input before log to avoid invalid values (default 0).
+
+    Returns:
+        Tensor in scaled log2 space.
+    """
+    if scaling_factor <= 0:
+        raise ValueError(f"scaling_factor must be > 0, got {scaling_factor}")
+
+    x_non_log = torch.clamp(x_non_log, min=clamp_min)
+    x_log_scaled = torch.log2(x_non_log + 1.0) / scaling_factor
+    return x_log_scaled

@@ -19,7 +19,7 @@ from ..trainers import BaseTrainerL
 from ..utility import set_output_dir, log_message, set_fig_style
 from ..utility import load_or_compute_gene_mean_std, load_lightning_metrics
 from .workflow import create_model, train_model, save_metadata
-from ..configs.default_config import VAEDeconConfig, TrainingConfig, ModelConfig
+from ..configs.default_config import VAEDeconConfig, TrainingConfig, ModelConfig, GEPDatasetConfig
 
 logger = logging.getLogger(__name__)
 
@@ -87,11 +87,6 @@ class VAEDeconTrainer:
         """Load, preprocess, and split the training data"""
         logger.info("Loading and preparing data...")
 
-        # All training set files
-        simu_paths = self.config.data.simu_bulk_file_path or []
-        sct_paths  = self.config.data.sct_file_path or []
-        training_file_paths = [p for p in simu_paths + sct_paths if p is not None]
-
         # validate split ratios
         total_split = self.config.training.train_split + self.config.training.val_split
         if not abs(total_split - 1.0) < 1e-6:
@@ -105,16 +100,8 @@ class VAEDeconTrainer:
         )
 
         # Load GEP dataset, PPI and Pathway data will be handled in each specified encoder class.
-        dataset = GEPDataset(
-            file_paths=training_file_paths,
-            scaling_by_constant=self.config.data.scaling_by_constant,
-            remove_low_var_genes=self.config.data.remove_low_var_genes,
-            processed_data_dir=self._processed_training_set_dir,
-            force_reprocess=self.config.data.force_reprocess,
-            use_memmap=True,  # use memory-mapped files for large datasets
-            chunk_size=1000,
-            scaling_factor=self.config.model.SCALING_FACTOR,
-        )
+        gep_dataset_config = self._build_gepdataset_config()  # training file paths and preprocessing params
+        dataset = GEPDataset(config=gep_dataset_config)
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
 
@@ -128,7 +115,10 @@ class VAEDeconTrainer:
 
         # Update input_dim, gene_mean_std_fp, and build ModelConfig once
         # Build and cache ModelConfig here; _create_model reuses it
-        self.config.model = self._build_vae_config(training_file_paths, dataset=dataset)
+        self.config.model = self._build_vae_config(
+            training_file_paths=gep_dataset_config.file_paths,
+            dataset=dataset
+        )
         save_metadata(dataset=dataset, model_config=self.config.model)
 
         # TODO, only calculate gene mean/std when we need it, such as GNN or predict_gep_residual is true.
@@ -246,6 +236,27 @@ class VAEDeconTrainer:
             debug_model=self.config.training.debug_model,
             scheduler_cls=self.config.training.scheduler_cls,
             scheduler_params=self.config.training.scheduler_params,
+        )
+
+    def _build_gepdataset_config(self) -> GEPDatasetConfig:
+        """
+        Build a config dict for GEPDataset from self.config.data
+        """
+
+        # All training set files
+        simu_paths = self.config.data.simu_bulk_file_path or []
+        sct_paths  = self.config.data.sct_file_path or []
+        training_file_paths = [p for p in simu_paths + sct_paths if p is not None]
+
+        return GEPDatasetConfig(
+            file_paths=training_file_paths,
+            scaling_by_constant=self.config.data.scaling_by_constant,
+            remove_low_var_genes=self.config.data.remove_low_var_genes,
+            force_reprocess=self.config.data.force_reprocess,
+            use_memmap=self.config.data.use_memmap,
+            chunk_size=self.config.data.chunk_size,
+            scaling_factor=self.config.data.scaling_factor,
+            processed_data_dir=self._processed_training_set_dir,
         )
 
     def train(self) -> VAEDeconConfig:
