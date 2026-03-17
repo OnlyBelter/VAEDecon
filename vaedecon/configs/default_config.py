@@ -650,6 +650,7 @@ class EvaluationConfig:
     plot_bulk_gep: bool = True
     plot_latent_space: bool = True
     val_batch_size: int = 128
+    remove_low_var_genes: bool = False
 
     # UMAP settings
     n_neighbors: int = 15

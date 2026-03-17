@@ -140,7 +140,7 @@ class VAEDeconPredictor:
         return GEPDatasetConfig(
             file_paths=[data_file_path],
             scaling_by_constant=self.config.data.scaling_by_constant,
-            remove_low_var_genes=self.config.data.remove_low_var_genes,
+            remove_low_var_genes=self.config.evaluation.remove_low_var_genes,
             force_reprocess=self.config.data.force_reprocess,
             use_memmap=self.config.data.use_memmap,
             chunk_size=self.config.data.chunk_size,
