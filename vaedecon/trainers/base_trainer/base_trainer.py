@@ -455,7 +455,7 @@ class BaseTrainerL:
             val_dataloaders=self.eval_loader,
         )
 
-        # Save final model
+        # Save final model and config files after training
         self.pl_model.model.save(self.model_dir,
                                  training_config=self.training_config,
                                  data_config=self.data_config)

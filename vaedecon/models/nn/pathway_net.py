@@ -36,7 +36,12 @@ class EncoderPathNet(EncoderMLP):
         self._pathway_dropout_rate = args.encoder_dropout_rate_pathway
 
         # Read pathways from file and store as a buffer for use in forward pass
-        pathway_mask = get_pathway_mask(args.pathway_file_path, args.input_gene_list_fp)
+        if not data_config.pathway_file_path or any([not i.exists() for i in data_config.pathway_file_path]):
+            raise ValueError(
+                f"Invalid pathway file path(s): {data_config.pathway_file_path}. "
+                "Please provide valid file paths in the data configuration."
+            )
+        pathway_mask = get_pathway_mask(data_config.pathway_file_path, args.input_gene_list_fp)
         self._pathway_input_dim = pathway_mask.shape[1]  # override input dim to match pathway count
 
         super().__init__(args, data_config=data_config, position_encoding=position_encoding)

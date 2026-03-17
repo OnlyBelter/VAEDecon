@@ -57,9 +57,9 @@ class EncoderSGNN(BaseEncoder):
         self.gene_list: List[str] = pd.read_csv(args.input_gene_list_fp, header=None, usecols=[0]).iloc[:, 0].tolist()
 
         # --- 2. Load and Process PPI Network ---
-        if not os.path.exists(args.ppi_file_path):
-            raise FileNotFoundError(f"PPI file not found: {args.ppi_file_path}")
-        net_df = pd.read_csv(args.ppi_file_path)
+        if not data_config.ppi_file_path or not os.path.exists(data_config.ppi_file_path):
+            raise FileNotFoundError(f"PPI file not found: {data_config.ppi_file_path}")
+        net_df = pd.read_csv(data_config.ppi_file_path)
 
         # Filter and Standardize Columns
         if args.biogrid_flag:

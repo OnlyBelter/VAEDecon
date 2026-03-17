@@ -91,12 +91,13 @@ class TrainingPipeline(Pipeline):
     """
 
     def __init__(self,
-                 model: BaseAE = None,
-                 trainer_cls: Type[BaseTrainerL] = None,
-                 training_config: TrainingConfig = None,
-                 data_config: Optional[DataConfig] = None,
-                 result_dir: str = None,
-                 debug_model: Optional[bool] = False):
+       model: BaseAE = None,
+       trainer_cls: Type[BaseTrainerL] = None,
+       training_config: TrainingConfig = None,
+       data_config: DataConfig = None,
+       result_dir: str = None,
+       debug_model: Optional[bool] = False
+    ):
         super().__init__()
         if training_config is None:
             training_config = TrainingConfig(name='VAETrainerConfig')

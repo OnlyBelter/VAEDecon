@@ -293,23 +293,15 @@ class BaseModelConfig(BaseConfig):
         description="Dropout rates for fusion layers"
     )
 
-    # Pathway network parameters (if using pathway-aware encoder)
-    input_dim_pathway: Optional[tuple[int, ...]] = Field(
-        default=None,
-        description="Input data dimensions for Pathway network (channels, x_dim, y_dim)"
-    )
-    pathway_file_path: list[Path] = Field(
-        default=[],
-        description="Path to Pathway (gene set) files in .gmt format"
-    )
-
-    @field_validator('ppi_file_path')
-    @classmethod
-    def validate_ppi_file(cls, v: Optional[Path]) -> Optional[Path]:
-        """Validate PPI file exists if provided."""
-        if v is not None and not v.exists():
-            raise ValueError(f"PPI file not found: {v}")
-        return v
+    # # Pathway network parameters (if using pathway-aware encoder)
+    # input_dim_pathway: Optional[tuple[int, ...]] = Field(
+    #     default=None,
+    #     description="Input data dimensions for Pathway network (channels, x_dim, y_dim)"
+    # )
+    # pathway_file_path: list[Path] = Field(
+    #     default=[],
+    #     description="Path to Pathway (gene set) files in .gmt format"
+    # )
 
     @field_validator('fusion_hidden_dims')
     @classmethod

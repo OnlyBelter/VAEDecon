@@ -234,8 +234,8 @@ class BaseAE(L.LightningModule):
         """Saves the model and its configuration.
         Args:
             model_dir (str): The directory path where the model will be saved.
-            model_dir (str, optional): Optional directory path where training logs are stored. Defaults to None.
             training_config (Any, optional): The training configuration to be saved. Defaults to None.
+            data_config: Data Configuration to be saved. Defaults to None.
         """
         # Create directory if it doesn't exist
         os.makedirs(model_dir, exist_ok=True)

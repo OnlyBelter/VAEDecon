@@ -38,8 +38,8 @@ class DataConfig(BaseConfig):
     data_dir: str | Path = './datasets/'
 
     # Training data
-    sct_file_path: list[str | Path] = field(default_factory=list)
-    simu_bulk_file_path: list[str | Path] = field(default_factory=list)
+    sct_file_path: list[str | Path] = Field(default_factory=list)
+    simu_bulk_file_path: list[str | Path] = Field(default_factory=list)
 
     # Test data
     test_set_file_path: str | Path = ''
@@ -49,6 +49,23 @@ class DataConfig(BaseConfig):
     # Additional files
     pred_cell_prop_file_path: Optional[str] = None
     cell_type2ave_exp_file_path: Optional[str] = None
+    # PPI and Pathway file paths
+    ppi_file_path: Optional[Path] = Field(
+        default=None,
+        description="Path to protein-protein interaction network file"
+    )
+    pathway_file_path: Optional[list[Path]] = Field(
+        default=[],
+        description="Path to Pathway files in .gmt format. Can provide multiple files for different pathway databases (e.g., KEGG, Reactome)."
+    )
+
+    @field_validator('ppi_file_path')
+    @classmethod
+    def validate_ppi_file(cls, v: Optional[Path]) -> Optional[Path]:
+        """Validate PPI file exists if provided."""
+        if v is not None and not v.exists():
+            raise ValueError(f"PPI file not found: {v}")
+        return v
 
     # Processing options
     # Scale input GEP data by a constant factor after log transformation (range of the input data will be (0, 1)).
@@ -67,12 +84,6 @@ class DataConfig(BaseConfig):
     remove_low_var_genes: bool = True  # If True, perform low-variance gene filtering.
     min_var: float = 1.0  # Minimum variance threshold for gene filtering (if remove_low_var_genes is True).
     force_reprocess: bool = False  # If True, ignore cache and re-run preprocessing.
-
-    # file_paths: List[Union[str, Path]]
-    # processed_data_dir: Optional[Union[str, Path]]
-
-    # gene_list_file: Optional[Union[str, Path]] = None
-    # cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None
 
     use_memmap: bool = True  # Use np.memmap for .npy cache files to reduce RAM pressure.
     chunk_size: int = 10000  # Chunk size for chunked transform. Increase for speed, decrease for memory.
@@ -219,7 +230,6 @@ class ModelConfig(BaseModelConfig):
                 - gene_mean_std_weight: Weight for gene mean/std loss
 
         File Paths:
-            ppi_file_path: Path to PPI network file.
             input_gene_list_fp: Path to input gene list.
             cell_type_fp: Path to cell type definitions.
             gene_mean_std_fp: Path to gene statistics.
@@ -228,7 +238,6 @@ class ModelConfig(BaseModelConfig):
         Other Settings:
             predict_cell_prop: Whether to predict cell proportions.
             using_positional_encoding: Use positional encoding for cell types.
-            scaling_by_constant: Scale input by constant factor.
     """
 
     # ==================== Architecture ====================
@@ -346,14 +355,6 @@ class ModelConfig(BaseModelConfig):
     )
 
     # ==================== File Paths ====================
-    ppi_file_path: Path = Field(
-        default=None,
-        description="Path to protein-protein interaction network file"
-    )
-    pathway_file_path: list[Path] = Field(
-        default=None,
-        description="Path to Pathway files"
-    )
     input_gene_list_fp: Optional[Path] = Field(
         default=None,
         description="Path to gene list file (after preprocessing) for GEP-level reconstruction"
@@ -410,8 +411,7 @@ class ModelConfig(BaseModelConfig):
             raise ValueError(f"All input dimensions must be positive, got {v}")
         return v
 
-    @field_validator('ppi_file_path',
-                     'input_gene_list_fp', 'cell_type_fp', 'gene_mean_std_fp',
+    @field_validator('input_gene_list_fp', 'cell_type_fp', 'gene_mean_std_fp',
                      check_fields=False,
                      mode='before')
     @classmethod

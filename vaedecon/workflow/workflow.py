@@ -102,17 +102,19 @@ def train_model(
         train_set: torch.utils.data.Dataset,
         val_set: torch.utils.data.Dataset,
         trainer_cls: Type[BaseTrainerL],
-        config: TrainingConfig,
+        training_config: TrainingConfig,
+        data_config: DataConfig,
         device: str,
         result_dir: str,
 ) -> None:
     """Trains the model using the training pipeline."""
     training_pipeline = TrainingPipeline(
-        training_config=config,
+        training_config=training_config,
         model=model.to(device),
+        data_config=data_config,
         trainer_cls=trainer_cls,
         result_dir=result_dir,
-        debug_model=config.debug_model,
+        debug_model=training_config.debug_model,
     )
     training_pipeline(train_data=train_set, eval_data=val_set)
 
