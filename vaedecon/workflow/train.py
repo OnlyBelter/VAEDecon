@@ -255,6 +255,7 @@ class VAEDeconTrainer:
             force_reprocess=self.config.data.force_reprocess,
             use_memmap=self.config.data.use_memmap,
             chunk_size=self.config.data.chunk_size,
+            min_var=self.config.data.min_var,
             scaling_factor=self.config.data.scaling_factor,
             processed_data_dir=self._processed_training_set_dir,
         )
