@@ -260,7 +260,7 @@ class VAE(BaseAE):
 
         # Log -> CPM (Batch, Genes, C)
         if not self.model_config.learn_gep_residual:
-            if self.model_config.scaling_by_constant:
+            if self.data_config.scaling_by_constant:
                 # Scale back up if input was scaled down.
                 recon_x_all_types = recon_x_all_types * self.scaling_factor
             # Decoder outputs full GEP in log space -> convert to CPM for mixing.
@@ -303,7 +303,7 @@ class VAE(BaseAE):
 
         # Final Output Conversion
         recon_x_conv_log = non_log2log_cpm_tensor(recon_x_conv, transpose=False)
-        if self.model_config.scaling_by_constant:
+        if self.data_config.scaling_by_constant:
             recon_x_conv_log = recon_x_conv_log / self.scaling_factor
 
         # Ensure shape matches input x.

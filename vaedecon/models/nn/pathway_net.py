@@ -56,13 +56,13 @@ class EncoderPathNet(EncoderMLP):
         x: (B, All_Genes)  →  returns (B, n_pathways)
         """
         if self.data_config.scaling_by_constant:
-            x = x * self.args.SCALING_FACTOR  # scale back to log2(TPM + 1)
+            x = x * self.data_config.scaling_factor  # scale back to log2(TPM + 1)
         # Convert to TPM and compute pathway profiles using the same logic as in get_pathway_profiles in GPU
         x = log_exp2cpm_tensor(x)
         pathway_profiles = x @ self.pathway_mask  # (B, n_genes) × (n_genes, n_pathways) → (B, n_pathways)
         pathway_profiles = torch.log2(pathway_profiles + 1)  # log-transform the pathway profiles
         if self.data_config.scaling_by_constant:
-            pathway_profiles = pathway_profiles / self.args.SCALING_FACTOR  # scale back down if needed
+            pathway_profiles = pathway_profiles / self.data_config.scaling_factor  # scale back down if needed
         return pathway_profiles
 
     def get_config(self) -> dict:

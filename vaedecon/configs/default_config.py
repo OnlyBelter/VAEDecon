@@ -16,7 +16,7 @@ class LossCoefficient(BaseModel):
     weighting_gene_by_exp: bool = True
     weight_clamp_range: Tuple[float, float] = (0.2, 5.0)
     gene_mean_std_weight: float = 1.0
-    z_score_reg_weight: float = 0.1
+    z_score_reg_weight: float = 0.0
 
     @field_validator("beta", "gamma", "cell_prop", "gene_mean_std_weight", "z_score_reg_weight")
     @classmethod
@@ -53,8 +53,17 @@ class DataConfig(BaseConfig):
     # Processing options
     # Scale input GEP data by a constant factor after log transformation (range of the input data will be (0, 1)).
     # This can help stabilize training and improve performance.
-    scaling_by_constant: bool = True
-    scaling_factor: float = 20.0  #  Default scaling divisor when scaling_by_constant is True.
+    scaling_by_constant: bool = Field(
+        default=True,
+        description='Whether to scale input GEP data by a constant factor after log transformation. '
+    )
+    scaling_factor: float = Field(
+        default=20.0,
+        description='Constant factor to scale input GEP data after log transformation when scaling_by_constant=True. '
+                    'This can help stabilize training by normalizing the input into (0, 1) range'
+                    ' and improve performance.'
+    )
+
     remove_low_var_genes: bool = True  # If True, perform low-variance gene filtering.
     min_var: float = 1.0  # Minimum variance threshold for gene filtering (if remove_low_var_genes is True).
     force_reprocess: bool = False  # If True, ignore cache and re-run preprocessing.
@@ -367,10 +376,7 @@ class ModelConfig(BaseModelConfig):
         default=False,
         description="Use positional encoding in latent space to distinguish cell types if True."
     )
-    scaling_by_constant: bool = Field(
-        default=True,
-        description="Scale input GEP data by constant factor (20 by default) if True."
-    )
+
     # ==================== Cell Proportion Prediction ====================
     predict_cell_prop: bool = Field(
         default=False,
@@ -390,13 +396,6 @@ class ModelConfig(BaseModelConfig):
     learn_gep_residual: bool = Field(
         default=False,
         description="Whether to learn GEP residuals compared to the mean GEP of each cell type (instead of learning the full GEP)"
-    )
-
-    SCALING_FACTOR: float = Field(
-        default=20.0,
-        description='Constant factor to scale input GEP data after log transformation when scaling_by_constant=True. '
-                    'This can help stabilize training by normalizing the input into (0, 1) range'
-                    ' and improve performance.'
     )
 
     # ==================== Validators ====================

@@ -135,8 +135,8 @@ class VAEDeconTrainer:
         """Compute or load per-gene mean/std statistics for GNN node features.
         Parameters:
             dataset: GEPDataset
-            training_file_paths: list of training file paths
-            n_genes: number of genes to consider
+            gene_mean_std_fp: Path to save or load the gene mean/std statistics.
+                If the file exists, it will be loaded; otherwise, it will be computed and saved to this path.
         """
         logger.info("Computing gene statistics...")
 
@@ -145,8 +145,8 @@ class VAEDeconTrainer:
             gene_list=dataset.gene_list,
             cell_type_fp=self.config.model.cell_type_fp,
             input_gene_list_fp=self.config.model.input_gene_list_fp,
-            scaling_by_constant=self.config.model.scaling_by_constant,
-            scaling_factor=self.config.model.SCALING_FACTOR,
+            scaling_by_constant=self.config.data.scaling_by_constant,
+            scaling_factor=self.config.data.scaling_factor,
             log_fn=log_message,
             out_fp=gene_mean_std_fp,
         )
@@ -172,10 +172,10 @@ class VAEDeconTrainer:
         """
         input_dim = dataset.data.shape[1]  # same as n_genes in each GEP
         n_genes = input_dim
-        scaling_factor = self.config.model.SCALING_FACTOR
+        scaling_factor = self.config.data.scaling_factor
         suffix = (
             f"gene_mean_std_log2p1_scaled_by_{scaling_factor}_{len(training_file_paths)}training_files_{n_genes}genes.csv"
-            if self.config.model.scaling_by_constant
+            if self.config.data.scaling_by_constant
             else f"gene_mean_std_log2p1_{len(training_file_paths)}training_files_{n_genes}genes.csv"
         )
         gene_mean_std_fp = (
@@ -192,7 +192,7 @@ class VAEDeconTrainer:
             input_gene_list_fp=self.config.model.input_gene_list_fp,
             cell_type_fp=self.config.model.cell_type_fp,
             gene_mean_std_fp=gene_mean_std_fp,
-            scaling_by_constant=self.config.model.scaling_by_constant,
+            # scaling_by_constant=self.config.data.scaling_by_constant,
             encoder_hidden_dims=self.config.model.encoder_hidden_dims,
             encoder_hidden_dims_pathway=self.config.model.encoder_hidden_dims_pathway,
             decoder_hidden_dims=self.config.model.decoder_hidden_dims,
@@ -216,7 +216,7 @@ class VAEDeconTrainer:
             decoders=self.config.model.decoders,
             mask_ratio=self.config.model.mask_ratio,
             learn_gep_residual=self.config.model.learn_gep_residual,
-            SCALING_FACTOR=self.config.model.SCALING_FACTOR,
+            # SCALING_FACTOR=self.config.model.SCALING_FACTOR,
             model_dir=self.config.model.model_dir,
         )
 
