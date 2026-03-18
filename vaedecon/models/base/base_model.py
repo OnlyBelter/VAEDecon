@@ -467,8 +467,8 @@ def check_encoder(encoders: list[BaseEncoder]) -> list[BaseEncoder]:
     assert isinstance(encoders, list), "Encoder must be a list instance of BaseEncoder."
     if len(encoders) == 0:
         raise ValueError("Encoder must be a non-empty list of BaseEncoder instances.")
-    if len(encoders) > 2:
-        raise ValueError("Encoder must be a list of 1 or 2 BaseEncoder instances.")
+    if len(encoders) > 3:
+        raise ValueError("Encoder must be a list of 1, 2 or 3 BaseEncoder instances.")
 
     for idx, encoder in enumerate(encoders):
         if not issubclass(type(encoder), BaseEncoder):

@@ -85,8 +85,8 @@ class VAE(BaseAE):
         # ---------------------------------------------------------------------
         self.z_scores = None
         self.n_encoders = len(self.encoders)
-        if self.n_encoders not in (1, 2):
-            raise ValueError(f"Only 1 or 2 encoders are supported, got {self.n_encoders}.")
+        if self.n_encoders not in (1, 2, 3):
+            raise ValueError(f"Only 1, 2, or 3 encoders are supported, got {self.n_encoders}.")
 
         self.model_name = "VAE"
         self.scaling_factor = float(data_config.scaling_factor)
