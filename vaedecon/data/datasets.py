@@ -1,15 +1,9 @@
-"""The pythae's Datasets inherit from
-:class:`torch.utils.data.Dataset` and must be used to convert the data before
-training. As of today, it only contains the :class:`pythae.data.BaseDatset` useful to train a
-VAE model but other Datatsets will be added as models are added.
-"""
 from __future__ import annotations
 import gc
 import json
 import warnings
 from collections import OrderedDict
 from pathlib import Path
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import logging

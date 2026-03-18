@@ -18,4 +18,5 @@ __all__ = [
     "EncoderResMLP",
     "DecoderResMLP",
     "GeneTransformerEncoder",
+    "EncoderPathNet",
 ]

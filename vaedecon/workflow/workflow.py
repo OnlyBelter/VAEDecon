@@ -3,28 +3,23 @@ import numpy as np
 import pandas as pd
 import warnings
 from pathlib import Path
-from typing import Dict, Any, Type, Union, TypeVar, Sequence, List
+from typing import Dict, Any, Type, Union, List
 import torch
 from torch.utils.data import DataLoader
 
 from ..utility import check_dir, non_log2log_cpm
 from ..data import GEPDataset
-from ..models import AutoModel, BaseAE, AutoConfig
+from ..models import AutoModel, BaseAE
 from ..models.base import BaseEncoder
 from ..models.gnn import EncoderSGNN
 from ..models.nn import (EncoderMLP, DecoderMLP, EncoderHybrid, EncoderResMLP, DecoderResMLP,
                          PositionalEncoding, GeneTransformerEncoder, EncoderPathNet)
 from ..models.vae import VAE
 from ..configs import ModelConfig, TrainingConfig, DataConfig
-from ..trainers import BaseTrainerL, PLTrainer
-from ..pipelines import TrainingPipeline
+from ..trainers import BaseTrainerL, PLTrainer, TrainingPipeline
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
-
-# Define type variables for better type hinting
-# T_Encoder = TypeVar('T_Encoder', bound=BaseEncoder)
-# T_Decoder = TypeVar('T_Decoder', bound=DecoderMLP)
 
 
 def create_model(

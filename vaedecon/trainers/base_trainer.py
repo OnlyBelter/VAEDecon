@@ -1,31 +1,39 @@
 import os
+from pathlib import Path
+
+import numpy as np
+import anndata
 import logging
 import platform
 import shutil
 
 import matplotlib.pyplot as plt
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, Type
 
 import torch
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 import lightning as L
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import CSVLogger
 
-from ...data.datasets import BaseDataset, collate_dataset_output
-from ...models import BaseAE
-from ...configs import TrainingConfig, DataConfig
-from ...models.base import ModelOutput, set_seed
+from vaedecon.data.datasets import BaseDataset, collate_dataset_output
+from vaedecon.models import BaseAE
+from vaedecon.configs import TrainingConfig, DataConfig
+from vaedecon.models.base import ModelOutput, set_seed
+from vaedecon.customexception import DatasetError
+
+# Optional dependency
+try:
+    import anndata
+    HAS_ANNDATA = True
+except Exception:
+    HAS_ANNDATA = False
+    anndata = None  # type: ignore
 
 logger = logging.getLogger(__name__)
-
-# make it print to the console.
-console = logging.StreamHandler()
-logger.addHandler(console)
-logger.setLevel(logging.INFO)
 
 
 def get_dataloader(
@@ -100,6 +108,101 @@ def get_dataloader(
         pin_memory=actual_pin_memory,
         persistent_workers=persistent_workers if num_workers > 0 else False,
     )
+
+
+def _is_map_style_dataset(obj) -> bool:
+    return hasattr(obj, "__len__") and hasattr(obj, "__getitem__")
+
+
+# -----------------------------
+# Data Adapter (thin + strict)
+# -----------------------------
+class DataAdapter:
+    """Convert input data into Dataset/DataLoader-ready objects."""
+
+    def process_array_like(
+        self,
+        data: Union[np.ndarray, torch.Tensor, "anndata.AnnData"],
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        x = self._to_tensor(data, dtype=dtype)
+        self._validate_tensor(x)
+        return x
+
+    def to_dataset(
+        self,
+        data: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+    ):
+        if labels is None:
+            labels = torch.ones(data.shape[0], dtype=torch.float32)
+        return BaseDataset(data, labels)
+
+    def prepare_for_training(
+        self,
+        data: Optional[Union[np.ndarray, torch.Tensor, Dataset, DataLoader, "anndata.AnnData", BaseDataset]],
+        data_type: str = "train",
+    ) -> Optional[Union[Dataset, DataLoader]]:
+        if data is None:
+            return None
+
+        if isinstance(data, DataLoader):
+            logger.info(f"Using provided {data_type} DataLoader.")
+            return data
+
+        if isinstance(data, BaseDataset):
+            logger.info(f"Using provided {data_type} Dataset.")
+            _check_dataset(data)
+            return data
+
+        if HAS_ANNDATA and isinstance(data, anndata.AnnData):
+            logger.info(f"Processing {data_type} AnnData...")
+            x = self.process_array_like(data)
+            ds = self.to_dataset(x)
+            _check_dataset(ds)
+            return ds
+
+        if isinstance(data, (np.ndarray, torch.Tensor)):
+            logger.info(f"Processing {data_type} array/tensor...")
+            x = self.process_array_like(data)
+            ds = self.to_dataset(x)
+            _check_dataset(ds)
+            return ds
+
+        if _is_map_style_dataset(data):
+            logger.info(f"Using provided {data_type} map-style dataset: {type(data)}")
+            _check_dataset(data)
+            return data
+
+        raise TypeError(f"Unsupported {data_type} data type: {type(data)}")
+
+    @staticmethod
+    def _to_tensor(
+        data: Union[np.ndarray, torch.Tensor, "anndata.AnnData"],
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if HAS_ANNDATA and isinstance(data, anndata.AnnData):
+            x = data.X
+            if hasattr(x, "toarray"):  # scipy sparse
+                x = x.toarray()
+            return torch.as_tensor(x, dtype=dtype)
+
+        if torch.is_tensor(data):
+            return data.to(dtype=dtype)
+
+        if isinstance(data, np.ndarray):
+            return torch.as_tensor(data, dtype=dtype)
+
+        raise TypeError(f"Cannot convert type {type(data)} to tensor.")
+
+    @staticmethod
+    def _validate_tensor(x: torch.Tensor) -> None:
+        if x.ndim != 2:
+            raise ValueError(f"Expected 2D tensor [n_samples, n_features], got shape={tuple(x.shape)}")
+        if x.numel() == 0:
+            raise ValueError("Input data is empty.")
+        if not torch.isfinite(x).all():
+            raise ValueError("Input contains NaN or Inf.")
 
 
 class PLTrainer(L.LightningModule):
@@ -314,37 +417,27 @@ class PLTrainer(L.LightningModule):
         )
 
 
+# -----------------------------
+# Trainer (execution layer)
+# -----------------------------
 class BaseTrainerL:
-    """Trainer class that uses PyTorch Lightning."""
+    """PyTorch Lightning trainer wrapper."""
 
     def __init__(
         self,
-        model: BaseAE,
+        model: "BaseAE",
         result_dir: str,
         train_dataset: Union[DataLoader, Any],
         eval_dataset: Optional[Union[DataLoader, Any]] = None,
-        training_config: Optional[TrainingConfig] = None,
-        data_config: Optional[DataConfig] = None,
+        training_config: Optional["TrainingConfig"] = None,
+        data_config: Optional["DataConfig"] = None,
         n_early_stopping_patience: int = 10,
-        debug_model: Optional[bool] = False,
+        debug_model: bool = False,
     ):
-        """Initializes the Trainer.
-
-        Args:
-            model: The BaseAE model to train.
-            result_dir: Directory to save checkpoints and logs.
-            train_dataset: Training dataset or dataloader.
-            eval_dataset: Evaluation dataset or dataloader.
-            training_config: Training configuration.
-            n_early_stopping_patience: Early stopping patience.
-            debug_model: Whether to enable debug mode.
-        """
         if training_config is None:
             training_config = TrainingConfig()
-
         if data_config is None:
             data_config = DataConfig()
-
         if training_config.output_dir is None:
             training_config.output_dir = "dummy_output_dir"
 
@@ -353,47 +446,15 @@ class BaseTrainerL:
         self.model_name = model.model_name
         self.n_early_stopping_patience = n_early_stopping_patience
         self.debug_model = debug_model
-
-        if isinstance(train_dataset, DataLoader):
-            train_loader = train_dataset
-            logger.warning(
-                "Using the provided train dataloader! Careful: this may overwrite "
-                "some parameters provided in your training config."
-            )
-        else:
-            train_loader = get_dataloader(
-                train_dataset,
-                batch_size=training_config.per_device_train_batch_size,
-                num_workers=training_config.train_dataloader_num_workers,
-                shuffle=True,
-                collate_fn=collate_dataset_output,
-            )
-
-        if eval_dataset is not None:
-            if isinstance(eval_dataset, DataLoader):
-                eval_loader = eval_dataset
-                logger.warning(
-                    "Using the provided eval dataloader! Careful: this may overwrite "
-                    "some parameters provided in your training config."
-                )
-            else:
-                eval_loader = get_dataloader(
-                    eval_dataset,
-                    batch_size=training_config.per_device_eval_batch_size,
-                    num_workers=training_config.eval_dataloader_num_workers,
-                    shuffle=False,
-                    collate_fn=collate_dataset_output,
-                )
-        else:
-            logger.info("! No eval dataset provided ! -> keeping best model on train.\n")
-            self.training_config.keep_best_on_train = True
-            eval_loader = None
-
-        self.train_loader = train_loader
-        self.eval_loader = eval_loader
         self.model_dir = result_dir
 
-        # Dynamic monitor metric
+        self.train_loader = self._build_loader(train_dataset, is_train=True)
+        self.eval_loader = self._build_loader(eval_dataset, is_train=False) if eval_dataset is not None else None
+
+        if self.eval_loader is None:
+            logger.info("No eval dataset provided -> keep_best_on_train=True")
+            self.training_config.keep_best_on_train = True
+
         self.monitor_metric = "val_loss" if self.eval_loader is not None else "train_loss"
 
         self.pl_model = PLTrainer(
@@ -403,40 +464,56 @@ class BaseTrainerL:
             monitor_metric=self.monitor_metric,
         )
 
+    def _build_loader(self, ds_or_loader, is_train: bool) -> DataLoader:
+        if isinstance(ds_or_loader, DataLoader):
+            logger.warning("Using provided DataLoader; config batch_size/num_workers may be ignored.")
+            return ds_or_loader
+
+        if is_train:
+            return get_dataloader(
+                ds_or_loader,
+                batch_size=self.training_config.per_device_train_batch_size,
+                num_workers=self.training_config.train_dataloader_num_workers,
+                shuffle=True,
+                collate_fn=collate_dataset_output,
+            )
+        return get_dataloader(
+            ds_or_loader,
+            batch_size=self.training_config.per_device_eval_batch_size,
+            num_workers=self.training_config.eval_dataloader_num_workers,
+            shuffle=False,
+            collate_fn=collate_dataset_output,
+        )
+
     def _copy_metrics_file(self, csv_logger: CSVLogger) -> None:
-        """Copy Lightning metrics.csv to self.model_dir."""
         try:
-            src_metrics = os.path.join(csv_logger.log_dir, "metrics.csv")
-            dst_metrics = os.path.join(self.model_dir, "metrics.csv")
-
-            if os.path.exists(src_metrics):
-                shutil.copy2(src_metrics, dst_metrics)
-                logger.info(f"Copied metrics file to: {dst_metrics}")
+            src = os.path.join(csv_logger.log_dir, "metrics.csv")
+            dst = os.path.join(self.model_dir, "metrics.csv")
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+                logger.info(f"Copied metrics.csv -> {dst}")
             else:
-                logger.warning(f"metrics.csv not found at: {src_metrics}")
+                logger.warning(f"metrics.csv not found: {src}")
         except Exception as e:
-            logger.warning(f"Failed to copy metrics.csv to model_dir: {e}")
+            logger.warning(f"Failed to copy metrics.csv: {e}")
 
-    def train(self) -> None:
-        """Trains the model using PyTorch Lightning."""
+    def train(self) -> str:
         set_seed(self.training_config.seed)
         os.makedirs(self.model_dir, exist_ok=True)
 
-        checkpoint_callback = ModelCheckpoint(
+        ckpt = ModelCheckpoint(
             dirpath=self.model_dir,
             filename="best_model_epoch={epoch}",
             monitor=self.monitor_metric,
             mode="min",
             save_top_k=1,
         )
-
-        early_stop_callback = EarlyStopping(
+        early = EarlyStopping(
             monitor=self.monitor_metric,
             patience=self.n_early_stopping_patience,
             mode="min",
             min_delta=0.001,
         )
-
         lr_monitor = LearningRateMonitor(logging_interval="epoch")
         csv_logger = CSVLogger(save_dir=self.model_dir, name="training_logs")
 
@@ -444,7 +521,7 @@ class BaseTrainerL:
             max_epochs=self.training_config.num_epochs,
             accelerator="auto",
             devices=self.training_config.devices,
-            callbacks=[checkpoint_callback, lr_monitor, early_stop_callback],
+            callbacks=[ckpt, lr_monitor, early],
             logger=csv_logger,
             precision="16-mixed" if self.training_config.amp else 32,
         )
@@ -455,49 +532,137 @@ class BaseTrainerL:
             val_dataloaders=self.eval_loader,
         )
 
-        # Save final model and config files after training
-        self.pl_model.model.save(self.model_dir,
-                                 training_config=self.training_config,
-                                 data_config=self.data_config)
+        self.pl_model.model.save(
+            self.model_dir,
+            training_config=self.training_config,
+            data_config=self.data_config,
+        )
 
-        # Copy metrics.csv to self.model_dir
         self._copy_metrics_file(csv_logger)
 
-        logger.info("Training ended!")
-        logger.info(f"Saved final model in {self.model_dir}")
-        logger.info(f"Lightning CSV logs saved in: {csv_logger.log_dir}")
-        logger.info(f"Monitor metric used: {self.monitor_metric}")
+        logger.info(f"Training done. Model saved to: {self.model_dir}")
+        return self.model_dir
 
     def predict(self) -> Dict[str, torch.Tensor]:
-        """Generates predictions from the trained model."""
         if self.eval_loader is None:
             raise ValueError("eval_loader is None. Cannot run predict().")
 
-        inputs = next(iter(self.eval_loader))
         self.pl_model.eval()
-
-        # Move batch to device if needed
+        batch = next(iter(self.eval_loader))
         device = self.pl_model.device
-        moved_inputs = {}
-        for k, v in inputs.items():
-            if torch.is_tensor(v):
-                moved_inputs[k] = v.to(device)
-            else:
-                moved_inputs[k] = v
 
+        moved = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
         with torch.no_grad():
-            outputs = self.pl_model(moved_inputs)
+            out = self.pl_model(moved)
+        return out
 
-        return outputs
+    def __call__(self) -> str:
+        return self.train()
 
+
+# -----------------------------
+# Base Pipeline
+# -----------------------------
+class Pipeline:
     def __call__(self, *args, **kwargs):
-        pass
+        raise NotImplementedError
 
 
-def plot_loss(losses_df, result_dir, train_loss_col_name, val_loss_col_name):
-    fig, ax = plt.subplots(figsize=(6, 2.5))
-    ax.plot(losses_df[train_loss_col_name], label='train_loss')
-    ax.plot(losses_df[val_loss_col_name], label='eval_loss')
-    ax.legend(loc='best')
-    plt.savefig(os.path.join(result_dir, 'losses.png'), dpi=200)
-    plt.close()
+# -----------------------------
+# Training Pipeline (orchestration)
+# -----------------------------
+class TrainingPipeline(Pipeline):
+    def __init__(
+        self,
+        model: "BaseAE",
+        trainer_cls: Type[BaseTrainerL] = BaseTrainerL,
+        training_config: Optional["TrainingConfig"] = None,
+        data_config: Optional["DataConfig"] = None,
+        result_dir: Optional[str | Path] = None,
+        debug_model: bool = False,
+        data_adapter: Optional[DataAdapter] = None,
+    ):
+        if model is None:
+            raise ValueError("model must not be None.")
+        self.model = model
+
+        self.training_config = training_config or TrainingConfig(name="VAETrainerConfig")
+        self.data_config = data_config or DataConfig(name="DataConfig")
+
+        if not isinstance(self.training_config, TrainingConfig):
+            raise TypeError("training_config must be TrainingConfig")
+
+        self.trainer_cls = trainer_cls
+        self.result_dir = result_dir or self.training_config.output_dir or "dummy_output_dir"
+        self.debug_model = debug_model
+        self.data_adapter = data_adapter or DataAdapter()
+        self.n_early_stopping_patience = self.training_config.n_early_stopping_patience
+        self.trainer: Optional[BaseTrainerL] = None
+
+    def __call__(
+        self,
+        train_data: Optional[Union[np.ndarray, torch.Tensor, Dataset, DataLoader, "anndata.AnnData"]] = None,
+        eval_data: Optional[Union[np.ndarray, torch.Tensor, Dataset, DataLoader, "anndata.AnnData"]] = None,
+    ) -> str:
+        train_dataset = self.data_adapter.prepare_for_training(train_data, data_type="train")
+        eval_dataset = self.data_adapter.prepare_for_training(eval_data, data_type="eval")
+
+        if train_dataset is None:
+            raise ValueError("train_data cannot be None.")
+
+        logger.info(f"Using trainer: {self.trainer_cls.__name__}")
+        self.trainer = self.trainer_cls(
+            model=self.model,
+            result_dir=self.result_dir,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            training_config=self.training_config,
+            data_config=self.data_config,
+            n_early_stopping_patience=self.n_early_stopping_patience,
+            debug_model=self.debug_model,
+        )
+        return self.trainer.train()
+
+
+def _check_dataset(dataset: BaseDataset):
+    """Checks if the dataset is valid."""
+    try:
+        dataset_output = dataset[0]
+    except Exception as e:
+        raise DatasetError(
+            "Error when trying to collect data from the dataset. Check `__getitem__` method. "
+            "The Dataset should output a dictionary with at least the key 'data'. "
+            "Please check documentation.\n"
+            f"Exception raised: {type(e)} with message: {e}"
+        ) from e
+
+    if not isinstance(dataset_output, dict) or "data" not in dataset_output.keys():
+        raise DatasetError(
+            "The Dataset should output a dictionary with at least the key 'data'."
+        )
+    try:
+        len(dataset)
+    except Exception as e:
+        raise DatasetError(
+            "Error when trying to get dataset len. Check `__len__` method. "
+            "Please check documentation.\n"
+            f"Exception raised: {type(e)} with message: {e}"
+        ) from e
+
+    # check if the dataset works with the data loader
+    # from torch.utils.data import DataLoader
+    try:
+        dataloader = DataLoader(
+            dataset=dataset,
+            batch_size=min(len(dataset), 2),
+            collate_fn=collate_dataset_output,
+        )
+        loader_out = next(iter(dataloader))
+        assert loader_out.data.shape[0] == min(
+            len(dataset), 2
+        ), "Error when combining dataset with loader."
+    except Exception as e:
+        raise DatasetError(
+            "Error when combining dataset with DataLoader. \n"
+            f"Exception raised: {type(e)} with message: {e}"
+        ) from e
