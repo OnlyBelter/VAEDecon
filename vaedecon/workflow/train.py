@@ -236,6 +236,7 @@ class VAEDeconTrainer:
             debug_model=self.config.training.debug_model,
             scheduler_cls=self.config.training.scheduler_cls,
             scheduler_params=self.config.training.scheduler_params,
+            warmup_epochs=self.config.training.warmup_epochs,
         )
 
     def _build_gepdataset_config(self) -> GEPDatasetConfig:

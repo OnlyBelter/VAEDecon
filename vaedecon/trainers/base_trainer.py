@@ -2,17 +2,16 @@ import os
 from pathlib import Path
 
 import numpy as np
-import anndata
 import logging
 import platform
 import shutil
 
-import matplotlib.pyplot as plt
 from typing import Any, Dict, Optional, Union, Type
 
 import torch
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
+from torch.optim.lr_scheduler import LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Dataset
 
 import lightning as L
@@ -22,8 +21,9 @@ from lightning.pytorch.loggers import CSVLogger
 from vaedecon.data.datasets import BaseDataset, collate_dataset_output
 from vaedecon.models import BaseAE
 from vaedecon.configs import TrainingConfig, DataConfig
-from vaedecon.models.base import ModelOutput, set_seed
+from vaedecon.models.base import set_seed
 from vaedecon.customexception import DatasetError
+from .training_scheduler import build_scheduler, _WarmupReduceOnPlateauScheduler
 
 # Optional dependency
 try:
@@ -34,6 +34,9 @@ except Exception:
     anndata = None  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+
+CUSTOM_SCHEDULER_NAMES = {"WarmupCosine", "WarmupReduceOnPlateau"}
 
 
 def get_dataloader(
@@ -301,7 +304,24 @@ class PLTrainer(L.LightningModule):
                 )
 
     def configure_optimizers(self) -> Dict[str, Any]:
-        """Configures optimizer and optional learning rate scheduler."""
+        """Configures optimizer and learning rate scheduler.
+
+        Supports an optional linear warmup phase prepended to any scheduler.
+        Controlled by training_config.warmup_epochs (default 0 = no warmup).
+
+        Scheduler combinations:
+          - warmup_epochs=0 : original behaviour, unchanged
+          - warmup_epochs>0 + scheduler_cls="ReduceLROnPlateau"
+                            : LinearLR warmup → ReduceLROnPlateau
+                              (via _WarmupReduceOnPlateauScheduler wrapper)
+          - warmup_epochs>0 + scheduler_cls="CosineAnnealingLR"
+                            : LinearLR warmup → CosineAnnealingLR
+                              (via SequentialLR, natively supported by Lightning)
+          - warmup_epochs>0 + scheduler_cls=None
+                            : LinearLR warmup only, then constant lr
+        """
+
+        # ── 1. Build optimizer (unchanged from original) ─────────────────────────
         optimizer_cls = getattr(optim, self.training_config.optimizer_cls)
 
         if self.training_config.optimizer_params is not None:
@@ -316,32 +336,103 @@ class PLTrainer(L.LightningModule):
                 lr=self.training_config.learning_rate,
             )
 
-        if self.training_config.scheduler_cls is None:
+        # TODO: try to use "build_scheduler" to replace the following part to simplify
+        warmup_epochs = getattr(self.training_config, "warmup_epochs", 0)
+        scheduler_cls_name = self.training_config.scheduler_cls
+        # Route custom names before touching torch.optim.lr_scheduler
+        if scheduler_cls_name in CUSTOM_SCHEDULER_NAMES:
+            scheduler_cls_name = {
+                "WarmupCosine": "CosineAnnealingLR",
+                "WarmupReduceOnPlateau": "ReduceLROnPlateau",
+            }[scheduler_cls_name]
+        # warmup_epochs = max(1, warmup_epochs)  # Force warmup to be active
+
+        scheduler_params = self.training_config.scheduler_params or {}
+
+        # ── 2. No scheduler at all ────────────────────────────────────────────────
+        if scheduler_cls_name is None and warmup_epochs == 0:
             return {"optimizer": optimizer}
 
-        scheduler_cls = getattr(lr_scheduler, self.training_config.scheduler_cls)
-
-        if self.training_config.scheduler_params is not None:
-            scheduler = scheduler_cls(
-                optimizer, **self.training_config.scheduler_params
+        # ── 3. Warmup-only (no decay scheduler) ──────────────────────────────────
+        if scheduler_cls_name is None and warmup_epochs > 0:
+            warmup_sched = LinearLR(
+                optimizer,
+                start_factor=1e-8,
+                end_factor=1.0,
+                total_iters=warmup_epochs,
             )
-        else:
-            scheduler = scheduler_cls(optimizer)
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": warmup_sched,
+                    "interval": "epoch",
+                    "frequency": 1,
+                },
+            }
 
-        scheduler_config = {
-            "scheduler": scheduler,
-            "interval": "epoch",
-            "frequency": 1,
-        }
+        # ── 4. Scheduler without warmup (original behaviour) ─────────────────────
+        if warmup_epochs == 0:
+            scheduler_cls = getattr(lr_scheduler, scheduler_cls_name)
+            scheduler = scheduler_cls(optimizer, **scheduler_params)
 
-        # For ReduceLROnPlateau, a monitored metric is required
-        if self.training_config.scheduler_cls == "ReduceLROnPlateau":
-            scheduler_config["monitor"] = self.monitor_metric
-            scheduler_config["strict"] = True
+            scheduler_config = {
+                "scheduler": scheduler,
+                "interval": "epoch",
+                "frequency": 1,
+            }
+            if scheduler_cls_name == "ReduceLROnPlateau":
+                scheduler_config["monitor"] = self.monitor_metric
+                scheduler_config["strict"] = True
 
+            return {"optimizer": optimizer, "lr_scheduler": scheduler_config}
+
+        # ── 5. Warmup + ReduceLROnPlateau ─────────────────────────────────────────
+        # ReduceLROnPlateau is NOT compatible with SequentialLR (it needs a metric).
+        # We use a thin wrapper that handles the phase switch internally.
+        if scheduler_cls_name == "ReduceLROnPlateau":
+            plateau_sched = lr_scheduler.ReduceLROnPlateau(
+                optimizer, **scheduler_params
+            )
+            combined = _WarmupReduceOnPlateauScheduler(
+                optimizer=optimizer,
+                warmup_epochs=warmup_epochs,
+                plateau_sched=plateau_sched,
+            )
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": combined,
+                    "interval": "epoch",
+                    "frequency": 1,
+                    "monitor": self.monitor_metric,  # Lightning passes this to .step()
+                    "strict": True,
+                    "reduce_on_plateau": True,  # tells Lightning it's plateau-style
+                },
+            }
+
+        # ── 6. Warmup + any other scheduler (e.g. CosineAnnealingLR) ─────────────
+        # SequentialLR chains them natively — fully compatible with Lightning.
+        scheduler_cls = getattr(lr_scheduler, scheduler_cls_name)
+        decay_sched = scheduler_cls(optimizer, **scheduler_params)
+
+        warmup_sched = LinearLR(
+            optimizer,
+            start_factor=1e-8,
+            end_factor=1.0,
+            total_iters=warmup_epochs,
+        )
+        combined = SequentialLR(
+            optimizer,
+            schedulers=[warmup_sched, decay_sched],
+            milestones=[warmup_epochs],
+        )
         return {
             "optimizer": optimizer,
-            "lr_scheduler": scheduler_config,
+            "lr_scheduler": {
+                "scheduler": combined,
+                "interval": "epoch",
+                "frequency": 1,
+            },
         }
 
     def loss_monitor(

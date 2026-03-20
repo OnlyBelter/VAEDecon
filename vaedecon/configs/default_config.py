@@ -184,6 +184,7 @@ class TrainingConfig(BaseTrainerConfig):
     # Scheduler
     scheduler_cls: Optional[str] = None
     scheduler_params: Optional[Dict[str, Any]] = None
+    warmup_epochs: int = 0
 
 
 class ModelConfig(BaseModelConfig):

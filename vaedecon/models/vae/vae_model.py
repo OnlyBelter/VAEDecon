@@ -8,7 +8,7 @@ import os
 from dataclasses import dataclass
 import pandas as pd
 import logging
-from typing import Optional, List, Tuple, Union, Sequence, Literal
+from typing import Optional, List, Tuple, Literal
 
 import torch
 import torch.nn as nn
@@ -17,7 +17,7 @@ from torch.distributions import Dirichlet, kl_divergence
 
 from ...configs import DataConfig, ModelConfig
 from ...data.datasets import DatasetOutput
-from ...models.base import BaseAE, reparameterize_gaussian, ModelOutput, BaseDecoder, BaseEncoder
+from ...models.base import BaseAE, reparameterize_gaussian, ModelOutput, BaseDecoder, BaseEncoder, EPS
 from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor, non_log2cpm_tensor
 
 logger = logging.getLogger(__name__)
@@ -270,9 +270,8 @@ class VAE(BaseAE):
             # We multiply by std and add mean GEP in non-log space, then normalize to CPM.
 
             # Redefine minimum z-score to guarantee all values >= 0 after adding mean GEP.
-            eps = 1e-6
             mu = self.g_mean_non_log.unsqueeze(0)                           # (1, G, C)
-            std = torch.clamp(self.g_std_non_log, min=eps).unsqueeze(0)     # (1, G, C)
+            std = torch.clamp(self.g_std_non_log, min=EPS).unsqueeze(0)     # (1, G, C)
             z_min = torch.maximum(torch.full_like(std, -3.0), -mu / std)
             # Now recon_x_all_types is in range (z_min, 3).
             recon_x_all_types = z_min + (3.0 - z_min) * recon_x_all_types
@@ -426,7 +425,6 @@ class VAE(BaseAE):
         repulsion_loss = self._repulsion_loss(
             mu_types=mu_types,
             gamma=gamma,
-            eps=eps,
         )                                                                                   # (B,)
 
         # --- Total Loss ---
@@ -557,11 +555,10 @@ class VAE(BaseAE):
 
         return torch.zeros(batch_size, device=device)
 
+    @staticmethod
     def _repulsion_loss(
-        self,
         mu_types: torch.Tensor,
         gamma: float,
-        eps: float = 1e-6,
     ) -> torch.Tensor:
         """
         Repulsion between cell-type centroids in latent space.
@@ -582,7 +579,7 @@ class VAE(BaseAE):
             mask = torch.eye(n_cell_types, device=device).unsqueeze(0)
             dist_matrix = dist_matrix + mask * 1e9
 
-            inv_dist = 1.0 / (dist_matrix + eps)
+            inv_dist = 1.0 / (dist_matrix + EPS)
             # Zero out diagonal contribution.
             inv_dist = inv_dist * (1 - mask)
 
@@ -596,7 +593,6 @@ class VAE(BaseAE):
     def compute_gene_weights(
         self,
         low_weight_coef: float = 1.0,
-        eps: float = 1e-6,
         clamp_range: Tuple[float, float] = (0.5, 2.0),
     ) -> torch.Tensor:
         """
@@ -609,7 +605,7 @@ class VAE(BaseAE):
         4) Optional exponent scaling.
         """
         # 1) Choose raw weight based on variance of gene expression in each cell type.
-        w_g = 1.0 / (self.g_std + eps)  # (G, C)
+        w_g = 1.0 / (self.g_std + EPS)  # (G, C)
 
         # 2) Normalize so that average weight = 1.
         w_g = w_g / w_g.mean(dim=0, keepdim=True)
@@ -645,7 +641,6 @@ class VAE(BaseAE):
         mu_list_overall: List[torch.Tensor],
         logvar_list_overall: List[torch.Tensor],
         strategy: Literal["poe_posterior", "avg_posterior", "pre_latent"],
-        eps: float = 1e-8,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Fuse multiple encoder outputs.
@@ -667,12 +662,10 @@ class VAE(BaseAE):
             fused_mu_celltype, fused_logvar_celltype = self._poe_fuse_core(
                 mu_list=mu_lists_celltype,
                 logvar_list=logvar_lists_celltype,
-                eps=eps,
             )
             fused_mu_overall, fused_logvar_overall = self._poe_fuse_core(
                 mu_list=mu_list_overall,
                 logvar_list=logvar_list_overall,
-                eps=eps,
             )
             return fused_mu_celltype, fused_logvar_celltype, fused_mu_overall, fused_logvar_overall
 
@@ -690,7 +683,6 @@ class VAE(BaseAE):
     def _poe_fuse_core(
         mu_list: List[torch.Tensor],
         logvar_list: List[torch.Tensor],
-        eps: float = 1e-8,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Core Product-of-Experts (PoE) fusion logic.
@@ -708,24 +700,24 @@ class VAE(BaseAE):
         if len(mu_list) == 1:
             return mu_list[0], logvar_list[0]
 
-        # Stack expert parameters.
+        # Stack expert parameters. [n_encoder, batch_size, latent_dim, n_cell_type]
         mus_stacked = torch.stack(mu_list, dim=0)
         logvars_stacked = torch.stack(logvar_list, dim=0)
 
         # Calculate precisions: P_i = 1 / sigma_i^2 = exp(-logvar_i).
         precisions_stacked = torch.exp(-logvars_stacked)
 
-        # Sum of precisions: P_poe = sum(P_i).
+        # Sum of precisions: P_poe = sum(P_i). [batch_size, latent_dim, n_cell_type]
         sum_of_precisions = torch.sum(precisions_stacked, dim=0)
 
         # Fused log variance: logvar_poe = -log(P_poe + eps).
-        fused_logvar = -torch.log(sum_of_precisions + eps)
+        fused_logvar = -torch.log(sum_of_precisions + EPS)
 
         # Weighted sum of means: sum(mu_i * P_i).
         sum_of_weighted_mus = torch.sum(mus_stacked * precisions_stacked, dim=0)
 
-        # Fused mean: mu_poe = sum(mu_i * P_i) / (P_poe + eps).
-        fused_mu = sum_of_weighted_mus / (sum_of_precisions + eps)
+        # Fused mean: mu_poe = sum(mu_i * P_i) / (P_poe + eps) = sum_of_weighted_mus * e^{fused_logvar}.
+        fused_mu = sum_of_weighted_mus * torch.exp(fused_logvar)
 
         return fused_mu, fused_logvar
 
