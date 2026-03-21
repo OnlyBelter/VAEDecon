@@ -10,8 +10,6 @@ from typing import Any, Dict, Optional, Union, Type
 
 import torch
 import torch.optim as optim
-import torch.optim.lr_scheduler as lr_scheduler
-from torch.optim.lr_scheduler import LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Dataset
 
 import lightning as L
@@ -23,7 +21,7 @@ from vaedecon.models import BaseAE
 from vaedecon.configs import TrainingConfig, DataConfig
 from vaedecon.models.base import set_seed
 from vaedecon.customexception import DatasetError
-from .training_scheduler import build_scheduler, _WarmupReduceOnPlateauScheduler
+from .training_scheduler import build_scheduler, WarmupThenReduceOnPlateau
 
 # Optional dependency
 try:
@@ -34,9 +32,6 @@ except Exception:
     anndata = None  # type: ignore
 
 logger = logging.getLogger(__name__)
-
-
-CUSTOM_SCHEDULER_NAMES = {"WarmupCosine", "WarmupReduceOnPlateau"}
 
 
 def get_dataloader(
@@ -323,7 +318,6 @@ class PLTrainer(L.LightningModule):
 
         # ── 1. Build optimizer (unchanged from original) ─────────────────────────
         optimizer_cls = getattr(optim, self.training_config.optimizer_cls)
-
         if self.training_config.optimizer_params is not None:
             optimizer = optimizer_cls(
                 self.model.parameters(),
@@ -336,100 +330,33 @@ class PLTrainer(L.LightningModule):
                 lr=self.training_config.learning_rate,
             )
 
-        # TODO: try to use "build_scheduler" to replace the following part to simplify
-        warmup_epochs = getattr(self.training_config, "warmup_epochs", 0)
-        scheduler_cls_name = self.training_config.scheduler_cls
-        # Route custom names before touching torch.optim.lr_scheduler
-        if scheduler_cls_name in CUSTOM_SCHEDULER_NAMES:
-            scheduler_cls_name = {
-                "WarmupCosine": "CosineAnnealingLR",
-                "WarmupReduceOnPlateau": "ReduceLROnPlateau",
-            }[scheduler_cls_name]
-        # warmup_epochs = max(1, warmup_epochs)  # Force warmup to be active
-
-        scheduler_params = self.training_config.scheduler_params or {}
-
-        # ── 2. No scheduler at all ────────────────────────────────────────────────
-        if scheduler_cls_name is None and warmup_epochs == 0:
+        # ── 2. No scheduler ───────────────────────────────────────────────────────
+        if self.training_config.scheduler_cls is None:
             return {"optimizer": optimizer}
 
-        # ── 3. Warmup-only (no decay scheduler) ──────────────────────────────────
-        if scheduler_cls_name is None and warmup_epochs > 0:
-            warmup_sched = LinearLR(
-                optimizer,
-                start_factor=1e-8,
-                end_factor=1.0,
-                total_iters=warmup_epochs,
-            )
+        # ── 3. Build scheduler via build_scheduler ────────────────────────────────
+        scheduler = build_scheduler(optimizer, self.training_config)
+
+        # ── 4. Wrap into Lightning scheduler config ───────────────────────────────
+        # WarmupThenReduceOnPlateau needs monitor + reduce_on_plateau flag.
+        if isinstance(scheduler, WarmupThenReduceOnPlateau):
             return {
                 "optimizer": optimizer,
                 "lr_scheduler": {
-                    "scheduler": warmup_sched,
+                    "scheduler": scheduler,
                     "interval": "epoch",
                     "frequency": 1,
-                },
-            }
-
-        # ── 4. Scheduler without warmup (original behaviour) ─────────────────────
-        if warmup_epochs == 0:
-            scheduler_cls = getattr(lr_scheduler, scheduler_cls_name)
-            scheduler = scheduler_cls(optimizer, **scheduler_params)
-
-            scheduler_config = {
-                "scheduler": scheduler,
-                "interval": "epoch",
-                "frequency": 1,
-            }
-            if scheduler_cls_name == "ReduceLROnPlateau":
-                scheduler_config["monitor"] = self.monitor_metric
-                scheduler_config["strict"] = True
-
-            return {"optimizer": optimizer, "lr_scheduler": scheduler_config}
-
-        # ── 5. Warmup + ReduceLROnPlateau ─────────────────────────────────────────
-        # ReduceLROnPlateau is NOT compatible with SequentialLR (it needs a metric).
-        # We use a thin wrapper that handles the phase switch internally.
-        if scheduler_cls_name == "ReduceLROnPlateau":
-            plateau_sched = lr_scheduler.ReduceLROnPlateau(
-                optimizer, **scheduler_params
-            )
-            combined = _WarmupReduceOnPlateauScheduler(
-                optimizer=optimizer,
-                warmup_epochs=warmup_epochs,
-                plateau_sched=plateau_sched,
-            )
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": combined,
-                    "interval": "epoch",
-                    "frequency": 1,
-                    "monitor": self.monitor_metric,  # Lightning passes this to .step()
+                    "monitor": self.monitor_metric,
                     "strict": True,
-                    "reduce_on_plateau": True,  # tells Lightning it's plateau-style
+                    "reduce_on_plateau": True,
                 },
             }
 
-        # ── 6. Warmup + any other scheduler (e.g. CosineAnnealingLR) ─────────────
-        # SequentialLR chains them natively — fully compatible with Lightning.
-        scheduler_cls = getattr(lr_scheduler, scheduler_cls_name)
-        decay_sched = scheduler_cls(optimizer, **scheduler_params)
-
-        warmup_sched = LinearLR(
-            optimizer,
-            start_factor=1e-8,
-            end_factor=1.0,
-            total_iters=warmup_epochs,
-        )
-        combined = SequentialLR(
-            optimizer,
-            schedulers=[warmup_sched, decay_sched],
-            milestones=[warmup_epochs],
-        )
+        # SequentialLR (WarmupCosine) — no monitor needed.
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": combined,
+                "scheduler": scheduler,
                 "interval": "epoch",
                 "frequency": 1,
             },

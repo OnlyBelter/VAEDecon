@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 from ..configs import TrainingConfig
-import torch.optim.lr_scheduler as lr_scheduler
 from torch.optim.lr_scheduler import (
+    LRScheduler,
     LinearLR,
     CosineAnnealingLR,
     ReduceLROnPlateau,
@@ -58,7 +58,7 @@ def build_warmup_cosine_scheduler(
 # NOTE: ReduceLROnPlateau is NOT compatible with SequentialLR directly,
 #       so we handle it manually with a wrapper.
 
-class WarmupThenReduceOnPlateau:
+class WarmupThenReduceOnPlateau(LRScheduler):
     """
     Manual wrapper: LinearLR warmup, then ReduceLROnPlateau.
 
@@ -82,6 +82,7 @@ class WarmupThenReduceOnPlateau:
         self.optimizer     = optimizer
         self.warmup_epochs = warmup_epochs
         self.current_epoch = 0
+        self._last_lr = self.get_last_lr()
 
         # Get base lr from optimizer
         self.base_lrs = [pg["lr"] for pg in optimizer.param_groups]
@@ -101,23 +102,28 @@ class WarmupThenReduceOnPlateau:
             verbose=verbose,
         )
 
-    def step(self, val_loss: float = None):
+    def step(self, metrics: float = None):
         if self.current_epoch < self.warmup_epochs:
             self.warmup_scheduler.step()
         else:
-            if val_loss is None:
+            if metrics is None:
                 raise ValueError(
                     "val_loss must be provided after warmup phase."
                 )
-            self.plateau_scheduler.step(val_loss)
+            self.plateau_scheduler.step(metrics)
+        self._last_lr = self.get_last_lr()
         self.current_epoch += 1
 
     def get_last_lr(self):
         return [pg["lr"] for pg in self.optimizer.param_groups]
 
+    def get_lr(self):                           # required by LRScheduler ABC
+        return self._last_lr
+
     def state_dict(self):
         return {
             "current_epoch"      : self.current_epoch,
+            "_last_lr": self._last_lr,
             "warmup_scheduler"   : self.warmup_scheduler.state_dict(),
             "plateau_scheduler"  : self.plateau_scheduler.state_dict(),
         }
@@ -148,61 +154,7 @@ def build_scheduler(optimizer, cfg: TrainingConfig):
             **sched_params,
         )
     else:
-        raise ValueError(f"Unknown scheduler: {sched_cls}")
-
-# ── Wrapper: makes ReduceLROnPlateau work after a warmup phase ───────────────
-class _WarmupReduceOnPlateauScheduler(lr_scheduler.LRScheduler):
-    """
-    A LRScheduler-compatible wrapper that:
-      - Phase 1 (epoch < warmup_epochs): linear warmup via LinearLR
-      - Phase 2 (epoch >= warmup_epochs): delegates to ReduceLROnPlateau
-
-    Lightning calls .step(metrics) on plateau schedulers automatically,
-    so this wrapper just needs to route the call to the right phase.
-    """
-
-    def __init__(self, optimizer: torch.optim.Optimizer, warmup_epochs: int,
-                 plateau_sched: lr_scheduler.ReduceLROnPlateau):
-        # NOTE: do NOT call super().__init__() here —
-        # ReduceLROnPlateau itself doesn't follow the standard LRScheduler
-        # interface, and we manage epoch counting manually.
-        super().__init__(optimizer)
-        self.optimizer     = optimizer
-        self.warmup_epochs = warmup_epochs
-        self.plateau_sched = plateau_sched
-        self._epoch        = 0
-
-        self._warmup_sched = LinearLR(
-            optimizer,
-            start_factor=1e-8,
-            end_factor=1.0,
-            total_iters=warmup_epochs,
-        )
-
-    # Lightning calls this every epoch (passes `metrics` for plateau schedulers)
-    def step(self, metrics=None):
-        if self._epoch < self.warmup_epochs:
-            self._warmup_sched.step()
-        else:
-            if metrics is not None:
-                self.plateau_sched.step(metrics)
-        self._epoch += 1
-
-    # Required by Lightning's LR monitor
-    def get_last_lr(self):
-        return [pg["lr"] for pg in self.optimizer.param_groups]
-
-    def state_dict(self):
-        return {
-            "_epoch"        : self._epoch,
-            "_warmup_sched" : self._warmup_sched.state_dict(),
-            "plateau_sched" : self.plateau_sched.state_dict(),
-        }
-
-    def load_state_dict(self, state: dict):
-        self._epoch = state["_epoch"]
-        self._warmup_sched.load_state_dict(state["_warmup_sched"])
-        self.plateau_sched.load_state_dict(state["plateau_sched"])
+        raise ValueError(f"Unknown scheduler: {sched_cls}, only WarmupCosine and WarmupReduceOnPlateau are supported")
 
 
 # ── Quick visual test ────────────────────────────────────────────────────────

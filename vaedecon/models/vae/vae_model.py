@@ -557,33 +557,48 @@ class VAE(BaseAE):
 
     @staticmethod
     def _repulsion_loss(
-        mu_types: torch.Tensor,
-        gamma: float,
+            mu_types: torch.Tensor,
+            gamma: float,
+            margin: float = 1.0,
     ) -> torch.Tensor:
         """
         Repulsion between cell-type centroids in latent space.
-        Returns per-sample vector, shape (B,).
+        Uses a margin-based hinge penalty: only penalizes pairs of centroids
+        whose Euclidean distance is smaller than `margin`.
+
+        Loss per pair:  max(0, margin - d(i, j))
+        → zero gradient when centroids are already far enough apart.
+        → linear penalty when centroids are too close.
+
+        Args:
+            mu_types : (B, L, C)  cell-type centroid means in latent space.
+            gamma    : float       loss weight; if 0, returns zeros immediately.
+            margin   : float       minimum desired distance between any two centroids.
+
+        Returns:
+            repulsion_loss : (B,)  per-sample repulsion scalar.
         """
         batch_size, _, n_cell_types = mu_types.shape
         device = mu_types.device
-        repulsion_loss = torch.zeros(batch_size, device=device)
 
-        if gamma > 0:
-            # Calculate Euclidean distance between Cell Type Centroids.
-            mu_types_perm = mu_types.permute(0, 2, 1)  # (B, C, L)
+        if gamma == 0 or n_cell_types < 2:
+            return torch.zeros(batch_size, device=device)
 
-            # Efficient distance calculation using torch.cdist.
-            dist_matrix = torch.cdist(mu_types_perm, mu_types_perm, p=2)  # (B, C, C)
+        mu_types_perm = mu_types.permute(0, 2, 1)  # (B, C, L)
+        dist_matrix = torch.cdist(mu_types_perm, mu_types_perm, p=2)  # (B, C, C)
 
-            # Add identity * large number to avoid division by zero on diagonal.
-            mask = torch.eye(n_cell_types, device=device).unsqueeze(0)
-            dist_matrix = dist_matrix + mask * 1e9
+        # Upper triangle mask — count each pair (i, j) only once
+        triu_mask = torch.triu(
+            torch.ones(n_cell_types, n_cell_types, device=device), diagonal=1
+        ).unsqueeze(0)  # (1, C, C)
 
-            inv_dist = 1.0 / (dist_matrix + EPS)
-            # Zero out diagonal contribution.
-            inv_dist = inv_dist * (1 - mask)
+        # Hinge penalty: penalize only pairs closer than margin
+        hinge = torch.clamp(margin - dist_matrix, min=0.0)  # (B, C, C)
+        hinge = hinge * triu_mask  # upper triangle only
 
-            repulsion_loss = inv_dist.sum(dim=(1, 2))
+        # Normalize by number of pairs so loss scale is independent of C
+        n_pairs = n_cell_types * (n_cell_types - 1) / 2
+        repulsion_loss = hinge.sum(dim=(1, 2)) / n_pairs  # (B,)
 
         return repulsion_loss
 
