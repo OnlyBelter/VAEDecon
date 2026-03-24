@@ -1008,6 +1008,8 @@ def plot_bulk_gep(
     selected_sample2cell_id_file_path: str = None,
     random_seed: int | None = 42,
     figure_format: str = 'svg',
+    save_bulk_gep_input: bool = True,
+    save_recon_bulk_gep_conv: bool = True,
 ) -> None:
     """Plots the reconstructed bulk GEPs."""
     bulk_gep_result_dir = os.path.join(gep_result_dir, "bulk_gep")
@@ -1022,12 +1024,14 @@ def plot_bulk_gep(
     bulk_gep_input_df = pd.DataFrame(
         bulk_gep_input, index=sample_ids, columns=gene_list
     )
-    recon_bulk_gep_conv_df.to_csv(
-        os.path.join(bulk_gep_result_dir, "recon_bulk_gep_conv.csv")
-    )
-    bulk_gep_input_df.to_csv(
-        os.path.join(bulk_gep_result_dir, "bulk_gep_input.csv")
-    )
+    if save_recon_bulk_gep_conv:
+        recon_bulk_gep_conv_df.to_csv(
+            os.path.join(bulk_gep_result_dir, "recon_bulk_gep_conv.csv")
+        )
+    if save_bulk_gep_input:
+        bulk_gep_input_df.to_csv(
+            os.path.join(bulk_gep_result_dir, "bulk_gep_input.csv")
+        )
     if selected_sample2cell_id_file_path is not None and os.path.exists(selected_sample2cell_id_file_path):
         selected_sample2cell_id = pd.read_csv(selected_sample2cell_id_file_path, index_col=0)
         selected_sample_ids = selected_sample2cell_id.index.drop_duplicates().to_list()

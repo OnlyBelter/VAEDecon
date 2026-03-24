@@ -298,7 +298,9 @@ class VAEDeconPredictor:
                 figure_format=self.figure_format,
                 gep_result_dir=gep_result_dir,
                 n_samples=self.config.evaluation.n_samples,
-                selected_sample2cell_id_file_path=selected_sample2cell_id_fp
+                selected_sample2cell_id_file_path=selected_sample2cell_id_fp,
+                save_bulk_gep_input=self.config.evaluation.save_bulk_gep_input,
+                save_recon_bulk_gep_conv=self.config.evaluation.save_recon_bulk_gep_conv,
             )
 
         logger.info("Visualizations completed!")

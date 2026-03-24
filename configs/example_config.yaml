@@ -27,9 +27,25 @@ training:
   debug_model: false
   train_split: 0.8
   val_split: 0.2
-  scheduler_cls: "ReduceLROnPlateau"
+  
+  # ── Warmup settings (NEW) ──────────────────────────────────────
+  warmup_epochs: 50              # epochs to ramp up from ~0 → peak lr
+
+  # Option A: Warmup + Cosine
+  #Epoch:   0 ──── warmup_epochs ──────────────── num_epochs
+  #                    │
+  #         LinearLR   │   CosineAnnealingLR
+  #         (warmup)   │   (T_max)
+  #         ◄─────────►│◄──────────────────────────►
+  # scheduler_cls: "WarmupCosine"
+  # scheduler_params:
+  #   T_max: 950  # Total number of epochs for cosine annealing (including warmup)
+  #   eta_min: 1.0e-7
+
+  #  Option B: Warmup + ReduceLROnPlateau  (comment out A, use this)
+  scheduler_cls: "WarmupReduceOnPlateau"
   scheduler_params:
-    patience: 3
+    patience: 10
     factor: 0.5
     min_lr: 1.0e-7
     verbose: true
@@ -82,3 +98,9 @@ evaluation:
   rasterized: true
   show_metrics: true
   val_batch_size: 128
+  val_batch_size: 128
+  figure_format: 'png'  # 'png', 'svg', or 'pdf'
+  save_reconstructed_gep: false
+  save_bulk_gep_input: true
+  save_recon_bulk_gep_conv: true
+  remove_low_var_genes: false
