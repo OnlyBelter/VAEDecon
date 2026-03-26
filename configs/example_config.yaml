@@ -81,6 +81,7 @@ model:
   gnn_num_layers: 3
   gnn_drop_p: 0.25
   gene_hidden_dim: 10
+  gnn_topk_attention: 1024
   using_positional_encoding: false
   scaling_by_constant: true
   mask_ratio: 0.4

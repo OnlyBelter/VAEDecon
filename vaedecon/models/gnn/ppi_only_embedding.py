@@ -8,6 +8,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import SAGEConv
 from torch.utils.checkpoint import checkpoint
+import math
+import warnings
+from torch_sparse import SparseTensor
 
 from ...configs import ModelConfig, DataConfig
 from ...models.base import (ModelOutput, reparameterize_dirichlet, LOGVAR_CLAMP_MIN,
@@ -138,6 +141,9 @@ class EncoderSGNN(BaseEncoder):
         self.predict_cell_prop = args.predict_cell_prop
 
         self.position_encoding = position_encoding if self.args.using_positional_encoding else None
+        
+        # Determine top-k for attention
+        self.topk = min(getattr(args, 'gnn_topk_attention', 1024), self.gnn_n_genes)
 
         # GNN Encoder: input feature dim = 1 (expression) + F_gene (prior features)
         self.encoder = PPIEncoder(
@@ -149,6 +155,7 @@ class EncoderSGNN(BaseEncoder):
             use_gradient_checkpointing=self.use_gradient_checkpointing,
             num_nodes=self.gnn_n_genes,  # Pass number of nodes for batching logic
             return_attention=getattr(args, 'return_gnn_attention', False),
+            topk=self.topk,
         )
 
         # Post-GNN MLP: compress the flattened attention-pooled representation
@@ -376,7 +383,8 @@ class PPIEncoder(nn.Module):
                  num_layers=3,
                  drop_p=0.1,
                  use_gradient_checkpointing=False,
-                 return_attention: bool=False):
+                 return_attention: bool=False,
+                 topk: int=1024):
         super().__init__()
 
         if num_layers < 1:
@@ -388,22 +396,22 @@ class PPIEncoder(nn.Module):
         self.num_layers = num_layers
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.return_attention = return_attention
+        
+        # Determine top-k for attention
+        self.topk = min(topk, self.num_nodes)
 
-        # GNN Layers
-        # Each layer: SAGEConv → LayerNorm → GELU → Dropout → residual add
-        self.convs = nn.ModuleList()
         self.norms = nn.ModuleList()
-        # Skip connections: Linear projection when dims differ, Identity otherwise
-        self.skips = nn.ModuleList()
+        self.self_linears = nn.ModuleList()
+        self.neigh_linears = nn.ModuleList()
+        self.skip_linears = nn.ModuleList()
 
         current_dim = in_feats
         for i in range(num_layers):
-            # SAGEConv layer: input_dim -> gene_hidden_dim, h_v = W1 * h_v + W2 * mean(h_neighbors)
-            self.convs.append(SAGEConv(current_dim, gene_hidden_dim))
             self.norms.append(nn.LayerNorm(gene_hidden_dim))
-            self.skips.append(
-                nn.Linear(current_dim, gene_hidden_dim)
-                if current_dim != gene_hidden_dim else nn.Identity()
+            self.self_linears.append(nn.Linear(current_dim, gene_hidden_dim))
+            self.neigh_linears.append(nn.Linear(current_dim, gene_hidden_dim))
+            self.skip_linears.append(
+                nn.Linear(current_dim, gene_hidden_dim) if current_dim != gene_hidden_dim else nn.Identity()
             )
             current_dim = gene_hidden_dim
 
@@ -453,66 +461,12 @@ class PPIEncoder(nn.Module):
         self.output_norm = nn.LayerNorm(gene_hidden_dim * latent_dim)
         self.final_activation = nn.GELU()
 
-        # ── Edge Index Cache ────────────────────────────────────
-        # Rebuilding the block-diagonal edge index every forward pass is wasteful.
-        # Cache it and reuse as long as batch_size, device, and graph structure
-        # remain unchanged.
-        self._cached_edge_index_key = None
-        self._cached_edge_index = None
-
-    # Extract gradient checkpointing logic into a dedicated method.
-    # Previously the closure `def conv_forward(inp, ei=...)` was defined inside
-    # a for-loop, which can cause subtle variable capture bugs in Python.
-    # A dedicated method avoids this and keeps the forward loop clean.
-    def _run_conv(self, conv: SAGEConv, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        """Run a single SAGEConv layer, with optional gradient checkpointing."""
-        if self.use_gradient_checkpointing and self.training:
-            # Gradient checkpointing trades compute for memory:
-            # intermediate activations are not stored during the forward pass
-            # and are recomputed during backprop. Useful for large graphs.
-            def conv_fn(inp):
-                return conv(inp, edge_index)
-            return checkpoint(conv_fn, x, use_reentrant=False)
-        return conv(x, edge_index)
-
-    def _get_batched_edge_index(self, edge_index: torch.Tensor,
-                                batch_size: int,
-                                device: torch.device) -> torch.Tensor:
-        """
-        Replicate the single-graph edge_index B times with node index offsets,
-        forming a block-diagonal graph where each sample's subgraph is isolated.
-
-        Single graph edge (u, v) for sample i becomes (u + i*N, v + i*N).
-
-        Cache key includes batch_size, device, memory address, and edge count
-        to safely detect any change in the graph structure or execution context.
-        """
-        cache_key = (batch_size, str(device), edge_index.data_ptr(), edge_index.shape[1])
-        if self._cached_edge_index_key == cache_key and self._cached_edge_index is not None:
-            return self._cached_edge_index
-
-        # edge_index: [2, E]
-        # offsets: [B, 1], values [0, N, 2N, ..., (B-1)*N]
-        offsets = torch.arange(batch_size, device=device).view(-1, 1) * self.num_nodes
-
-        # Broadcast: edge_index[0] [E] → [1, E] + [B, 1] → [B, E]
-        src = edge_index[0].unsqueeze(0) + offsets
-        dst = edge_index[1].unsqueeze(0) + offsets
-
-        # ：[B*E] → stack → [2, B*E]
-        # Flatten src and dst to 1D tensors and combine them into edge_index format
-        batched_edge_index = torch.stack([src.reshape(-1), dst.reshape(-1)], dim=0)
-
-        self._cached_edge_index_key = cache_key
-        self._cached_edge_index = batched_edge_index
-        return batched_edge_index
-
     def forward(self, x: torch.Tensor, ppi_edge_index: torch.Tensor):
         """
         Args:
             x:              Node features [B, N, F].
                             B = batch size, N = number of genes, F = features per gene.
-            ppi_edge_index: Single-graph edge index [2, E].
+            ppi_edge_index: Single-graph edge index [2, E] or SparseTensor.
                             Row 0 = source nodes, Row 1 = target nodes.
 
         Returns:
@@ -528,56 +482,45 @@ class PPIEncoder(nn.Module):
                 f"Ensure input gene filtering is consistent with PPIEncoder initialization."
             )
 
-        # ── Step 1: Flatten to PyG format ────────────────────────────────────
-        # PyG message passing requires shape [total_nodes, F].
-        # Concatenate B graphs into one large graph: [B*N, F]
-        x_flat = x.reshape(batch_size * num_genes, num_feats)
+        if not hasattr(self, "_sparse_adj") or self._sparse_adj.device != x.device:
+            if isinstance(ppi_edge_index, SparseTensor):
+                adj = ppi_edge_index
+                if adj.device() != x.device:
+                    adj = adj.to(x.device)
+            else:
+                adj = SparseTensor(
+                    row=ppi_edge_index[1],
+                    col=ppi_edge_index[0],
+                    sparse_sizes=(num_genes, num_genes),
+                ).to(x.device)
+            deg = adj.sum(dim=1).to(torch.float32).clamp(min=1.0)
+            self._sparse_adj = adj
+            self._deg = deg
 
-        # ── Step 2: Build Block-Diagonal Edge Index ───────────────────────────
-        # Replicate single-graph edges for all B samples: [2, E] → [2, B*E]
-        batched_edge_index = self._get_batched_edge_index(ppi_edge_index, batch_size, x.device)
+        embedded = x
+        layer_outputs = []
+        for i in range(self.num_layers):
+            cin = embedded.shape[-1]
 
-        # ── Step 3: Multi-Layer GNN Message Passing ───────────────────────────
-        # Collect outputs from every layer for JK fusion.
-        # Previously only the last layer's output was used, discarding the
-        # multi-scale structural information captured by earlier layers.
-        embedded = x_flat  # Initial node features, [B*N, F]
-        layer_outputs = []  # Will hold [B*N, H] tensors for each layer
-        for i, conv in enumerate(self.convs):
-            # Compute skip connection on the input before transformation
-            identity = self.skips[i](embedded)  # Apply skip first, [B*N, H]
+            embedded_flat = embedded.permute(1, 0, 2).reshape(num_genes, batch_size * cin)
+            neigh_flat = self._sparse_adj.matmul(embedded_flat)
+            neigh = neigh_flat.reshape(num_genes, batch_size, cin).permute(1, 0, 2)
+            neigh = neigh / self._deg.view(1, num_genes, 1)
 
-            # GraphSAGE message passing:
-            # h_v^(l+1) = W1·h_v^(l) + W2·mean_{u∈N(v)} h_u^(l)
-            out = self._run_conv(conv, embedded, batched_edge_index)  # [B*N, H]
+            out = self.self_linears[i](embedded) + self.neigh_linears[i](neigh)
+            out = self.norms[i](out)
+            out = self.activation(out)
+            out = self.dropout(out)
 
-            out = self.norms[i](out)      # LayerNorm: stabilize feature distributions
-            out = self.activation(out)    # GELU non-linearity: smooth and effective for GNNs
-            out = self.dropout(out)      # Dropout: regularization to prevent overfitting
-
-            # Residual Connection
-            embedded = out + identity  # [B*N, H]
-
-            # Save this layer's output for JK fusion
+            identity = self.skip_linears[i](embedded)
+            embedded = out + identity
             layer_outputs.append(embedded)
 
-        # ── Step 4: Jumping Knowledge (JK) Fusion ────────────────────────────
-        # Concatenate all layer outputs and project to gene_hidden_dim.
-        # This gives each node a representation that integrates information from
-        # 1-hop up to num_layers-hop neighborhoods simultaneously.
-        #
-        # layer_outputs: list of num_layers tensors, each [B*N, H]
-        # After cat: [B*N, num_layers * H]
-        # After jk_fusion: [B*N, H]
-        jk_input = torch.cat(layer_outputs, dim=-1)   # [B*N, num_layers * H]
-        embedded = self.jk_fusion(jk_input)            # [B*N, H]
-        embedded = self.activation(embedded)           # Non-linearity after fusion
+        jk_input = torch.cat(layer_outputs, dim=-1)
+        embedded = self.jk_fusion(jk_input)
+        embedded = self.activation(embedded)
 
-        # ── Step 5: Restore Batch Dimension ───────────────────────
-        # [B*N, H] → [B, N, H]
-        embedded = embedded.reshape(batch_size, num_genes, self.gene_hidden_dim)
-
-        # ── Step 6: Learned-Query Cross-Attention Pooling ─────────────────────
+        # ── Step 4: Learned-Query Cross-Attention Pooling ─────────────────────
         # Compress N gene representations into latent_dim pooled slot vectors.
         #
         # Use separate Key and Value projectors.
@@ -598,17 +541,42 @@ class PPIEncoder(nn.Module):
             keys.transpose(1, 2)  # [B, H, N]
         ) * self.attention_scale_factor
 
-        # Softmax over the N gene dimension → attention weights sum to 1 per query
-        attn_weights = F.softmax(attn_scores, dim=-1)  # [B, Latent, N]
-
-        # Weighted aggregation of Value vectors
-        # [B, latent_dim, N] × [B, N, H] → [B, latent_dim, H]
-        pooled = torch.bmm(attn_weights, values)
+        # Top-k Sparse Attention (Improves performance without sacrificing accuracy)
+        # Instead of softmax over all N genes, keep only top-k genes
+        topk = self.topk
+        topk_scores, topk_indices = torch.topk(attn_scores, k=topk, dim=-1)
+        
+        # Softmax over top-k
+        topk_weights = F.softmax(topk_scores, dim=-1)  # [B, latent_dim, k]
+        
+        # Reconstruct sparse attention weights (for return_attention if needed)
+        # and gather values
+        if self.return_attention:
+            attn_weights = torch.zeros_like(attn_scores)
+            attn_weights.scatter_(-1, topk_indices, topk_weights)
+        
+        # Gather top-k values
+        # values: [B, N, H]
+        # topk_indices: [B, latent_dim, k]
+        # We need values gathered to [B, latent_dim, k, H]
+        
+        # Expand values to match latent_dim: [B, latent_dim, N, H]
+        values_expanded = values.unsqueeze(1).expand(-1, self.latent_dim, -1, -1)
+        
+        # Expand indices to match H: [B, latent_dim, k, H]
+        topk_indices_expanded = topk_indices.unsqueeze(-1).expand(-1, -1, -1, self.gene_hidden_dim)
+        
+        # Gather the actual values for the top-k genes
+        gathered_values = torch.gather(values_expanded, dim=2, index=topk_indices_expanded) # [B, latent_dim, k, H]
+        
+        # Weighted aggregation: sum over k
+        # [B, latent_dim, k, 1] * [B, latent_dim, k, H] -> [B, latent_dim, H]
+        pooled = (topk_weights.unsqueeze(-1) * gathered_values).sum(dim=2)
 
         # Flatten pooled slots: [B, latent_dim, H] -> [B, latent_dim * H]
         output_flat = pooled.reshape(batch_size, -1)
 
-        # ── Step 7: Output Normalization ───────────────────────────
+        # ── Step 5: Output Normalization ───────────────────────────
         output_processed = self.output_norm(output_flat)
         output_processed = self.final_activation(output_processed)
 

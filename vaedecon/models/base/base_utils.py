@@ -13,7 +13,7 @@ from torch.distributions import Gamma
 import random
 import numpy as np
 
-EPS = 1e-6
+EPS = 1e-8
 # MAX_LOGSTD = 10
 LOGVAR_CLAMP_MIN = -10
 LOGVAR_CLAMP_MAX = 15

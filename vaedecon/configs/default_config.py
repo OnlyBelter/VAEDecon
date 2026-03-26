@@ -340,6 +340,11 @@ class ModelConfig(BaseModelConfig):
         gt=0,
         description="Hidden dimension for gene projection"
     )
+    gnn_topk_attention: int = Field(
+        default=1024,
+        gt=0,
+        description="Number of top genes to keep in the cross-attention pooling layer of the GNN"
+    )
 
     # ==================== Pathway DNN Settings ====================
     input_dim_pathway: Tuple[int, int] = Field(
