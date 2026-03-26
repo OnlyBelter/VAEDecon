@@ -29,6 +29,10 @@ pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https
 # For Mac OS
 pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2
 
+# If you use the SGNN encoder, you will need to install torch-sparse and torch-scatter manually.
+# Ensure the version matches your PyTorch and CUDA versions. For example, with PyTorch 2.2.2 and CUDA 12.1:
+pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.2.2+cu121.html
+
 # Install VAEDecon
 pip install vaedecon
 ```
