@@ -6,11 +6,6 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import SAGEConv
-from torch.utils.checkpoint import checkpoint
-import math
-import warnings
-from torch_sparse import SparseTensor
 
 from ...configs import ModelConfig, DataConfig
 from ...models.base import (ModelOutput, reparameterize_dirichlet, LOGVAR_CLAMP_MIN,
@@ -156,6 +151,7 @@ class EncoderSGNN(BaseEncoder):
             num_nodes=self.gnn_n_genes,  # Pass number of nodes for batching logic
             return_attention=getattr(args, 'return_gnn_attention', False),
             topk=self.topk,
+            ppi_edge_index=edge_index,
         )
 
         # Post-GNN MLP: compress the flattened attention-pooled representation
@@ -217,7 +213,7 @@ class EncoderSGNN(BaseEncoder):
         # PPIEncoder handles flattening, message passing, and attention pooling.
         # Output: [B, latent_dim * gene_hidden_dim]
         # Unpack tuple when return_attention is enabled
-        encoder_out = self.encoder(node_features, self.edge_index)
+        encoder_out = self.encoder(node_features)
         if isinstance(encoder_out, tuple):
             gene_embeddings, attn_weights = encoder_out
         else:
@@ -344,7 +340,7 @@ class EncoderSGNN(BaseEncoder):
         node_features = torch.cat([x_sub, gf], dim=-1)
 
         # 2. GNN Forward (Returns [B, latent_dim * Hidden]), flattened gene embeddings for each sample
-        encoder_out = self.encoder(node_features, self.edge_index)
+        encoder_out = self.encoder(node_features)
         flattened_gene_embeddings = encoder_out[0] if isinstance(encoder_out, tuple) else encoder_out
 
         # 3. MLP (Get the cell embedding: [B, embd_col_dim])
@@ -365,225 +361,342 @@ class PPIEncoder(nn.Module):
     GNN Encoder operating on a PPI graph.
 
     Responsibilities:
-      1. Multi-layer GraphSAGE message passing with residual connections.
-      2. Jumping Knowledge (JK) fusion: aggregate all layer outputs for
+      1. Build a sparse adjacency matrix from the PPI edge index (done once in __init__).
+      2. Multi-layer GraphSAGE message passing with residual connections.
+      3. Jumping Knowledge (JK) fusion: aggregate all layer outputs for
          richer, multi-scale gene representations.
-      3. Learned-query cross-attention pooling: compress N gene node
-         representations into a fixed-length vector.
+      4. Learned-query cross-attention pooling with top-k sparsity: compress
+         N gene node representations into a fixed-length vector.
 
-    Input:  x [B, N, F],  ppi_edge_index [2, E]
+    Input:  x [B, N, F]
     Output: [B, latent_dim * gene_hidden_dim]
             (optionally also attn_weights [B, latent_dim, N])
+
+    Notation used throughout:
+        B          : batch size
+        N          : number of gene nodes
+        F          : input feature dimension per gene
+        H          : gene_hidden_dim (hidden feature dimension after each GNN layer)
+        L          : num_layers
+        E          : number of edges in the PPI graph
+        latent_dim : number of learnable query slots for attention pooling
+        k          : topk (number of genes selected per query in sparse attention)
     """
+
     def __init__(self,
                  in_feats: int,
                  gene_hidden_dim: int,
                  latent_dim: int,
                  num_nodes: int,
-                 num_layers=3,
-                 drop_p=0.1,
-                 use_gradient_checkpointing=False,
-                 return_attention: bool=False,
-                 topk: int=1024):
+                 ppi_edge_index: torch.Tensor,
+                 num_layers: int = 3,
+                 drop_p: float = 0.1,
+                 use_gradient_checkpointing: bool = False,
+                 return_attention: bool = False,
+                 topk: int = 1024):
         super().__init__()
 
         if num_layers < 1:
             raise ValueError("num_layers must be >= 1")
 
-        self.gene_hidden_dim = gene_hidden_dim  # Dimension of each gene's embedding after GNN layers
-        self.num_nodes = num_nodes  # Number of nodes in the graph, i.e., number of genes considered
-        self.latent_dim = latent_dim
-        self.num_layers = num_layers
+        self.gene_hidden_dim = gene_hidden_dim  # H: hidden dim per gene node
+        self.num_nodes       = num_nodes        # N: total number of gene nodes
+        self.latent_dim      = latent_dim       # number of attention query slots
+        self.num_layers      = num_layers       # L: number of GraphSAGE layers
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.return_attention = return_attention
-        
-        # Determine top-k for attention
+
+        # Top-k genes to attend to per query slot; capped at N
         self.topk = min(topk, self.num_nodes)
 
-        self.norms = nn.ModuleList()
-        self.self_linears = nn.ModuleList()
-        self.neigh_linears = nn.ModuleList()
-        self.skip_linears = nn.ModuleList()
+        # ── Step 1: Pre-Build Sparse Adjacency Matrix ─────────────────────────
+        # Convert the edge index [2, E] into a sparse COO adjacency matrix A
+        # of shape [N, N], using pure PyTorch (no torch_sparse dependency).
+        #
+        # Note on row/col convention:
+        #   ppi_edge_index[0] = source nodes  (message senders)
+        #   ppi_edge_index[1] = target nodes  (message receivers)
+        # We construct A such that A[target, source] = 1, so that the
+        # matrix-vector product A @ h aggregates source features into targets.
+        #
+        #   row indices : ppi_edge_index[1]  (targets)  shape [E]
+        #   col indices : ppi_edge_index[0]  (sources)  shape [E]
+        #   values      : all-ones           shape [E]
+        #   A           : sparse [N, N],  A[i,j] = 1 if gene j -> gene i
+        row = ppi_edge_index[1]  # target node indices, shape [E]
+        col = ppi_edge_index[0]  # source node indices, shape [E]
+        val = torch.ones(row.size(0), dtype=torch.float32, device=row.device)  # shape [E]
+        adj = torch.sparse_coo_tensor(
+            indices=torch.stack([row, col]),  # shape [2, E]
+            values=val,                       # shape [E]
+            size=(num_nodes, num_nodes),      # [N, N]
+        ).coalesce()  # coalesce() merges any duplicate (row, col) entries
 
-        current_dim = in_feats
+        # Degree vector: deg[i] = number of in-neighbors of node i, shape [N]
+        # Clamped to >= 1.0 to avoid division by zero for isolated nodes.
+        deg = torch.sparse.sum(adj, dim=1).to_dense().clamp(min=1.0)  # [N]
+
+        # register_buffer does NOT support sparse tensors directly.
+        # Instead, store the sparse components (indices + values) as dense
+        # buffers and reconstruct the sparse tensor in forward().
+        # Buffers are:
+        #   - automatically moved with .to(device) / .cuda()
+        #   - saved and restored in state_dict checkpoints
+        #   - NOT treated as trainable parameters
+        self.register_buffer("_adj_indices", adj.indices())  # [2, E]
+        self.register_buffer("_adj_values",  adj.values())   # [E]
+        self.register_buffer("_deg",         deg)            # [N]
+
+        # ── Step 2: GraphSAGE Layer Parameters ────────────────────────────────
+        # Each layer i has four components:
+        #   self_linear  : W_self^(i)  [current_dim -> H]  transforms the node\'s own features
+        #   neigh_linear : W_neigh^(i) [current_dim -> H]  transforms aggregated neighbor features
+        #   skip_linear  : W_skip^(i)  [current_dim -> H]  residual projection (Identity if dims match)
+        #   norm         : LayerNorm(H) applied after the SAGE update, before activation
+        self.norms         = nn.ModuleList()
+        self.self_linears  = nn.ModuleList()
+        self.neigh_linears = nn.ModuleList()
+        self.skip_linears  = nn.ModuleList()
+
+        current_dim = in_feats  # tracks the feature dimension across layers (F -> H -> H -> ...)
         for i in range(num_layers):
             self.norms.append(nn.LayerNorm(gene_hidden_dim))
             self.self_linears.append(nn.Linear(current_dim, gene_hidden_dim))
             self.neigh_linears.append(nn.Linear(current_dim, gene_hidden_dim))
             self.skip_linears.append(
+                # Use a learned projection when dimensions differ (first layer: F != H),
+                # otherwise use Identity to avoid unnecessary parameters.
                 nn.Linear(current_dim, gene_hidden_dim) if current_dim != gene_hidden_dim else nn.Identity()
             )
-            current_dim = gene_hidden_dim
+            current_dim = gene_hidden_dim  # all subsequent layers operate at dim H
 
-        self.dropout = nn.Dropout(drop_p)
+        self.dropout    = nn.Dropout(drop_p)
         self.activation = nn.GELU()
 
-        # ── Jumping Knowledge (JK) Fusion ──────────────────────────
+        # ── Step 3: Jumping Knowledge (JK) Fusion ─────────────────────────────
         # Problem: using only the last GNN layer discards information from
         # earlier layers. Shallow layers capture local PPI neighborhoods;
         # deeper layers capture global pathway-level context. JK fusion
         # combines all layers so the final representation is multi-scale.
         #
-        # Implementation: concatenate all layer outputs along the feature dim,
-        # then project back to gene_hidden_dim with a learned linear layer.
+        # Implementation: concatenate all L layer outputs along the feature dim,
+        # then project back to H with a learned linear layer.
         #
-        # Input to jk_fusion: [B*N, num_layers * gene_hidden_dim]
-        # Output:              [B*N, gene_hidden_dim]
+        #   Input  shape: [B, N, L * H]
+        #   Output shape: [B, N, H]
         self.jk_fusion = nn.Linear(num_layers * gene_hidden_dim, gene_hidden_dim)
 
-        # ── Attention Pooling ───────────────────────────────────────
-        # Goal: compress N gene node representations [B, N, H] into a fixed
+        # ── Step 4: Learned-Query Cross-Attention Pooling ─────────────────────
+        # Goal: compress N gene representations [B, N, H] into a fixed-length
         # vector [B, latent_dim * H] using learned cross-attention.
         #
-        # latent_dim learnable Query vectors each attend over all N nodes,
+        # latent_dim learnable Query vectors each attend over all N gene nodes,
         # producing latent_dim pooled slot representations. This is more
         # expressive than simple mean/max pooling because each query can
-        # specialize to a different functional gene group.
+        # specialize to a different functional gene group (e.g., immune, metabolic).
 
-        # Separate Key and Value projectors for richer attention
-        # Previously K and V shared the same projection (feature_projector),
-        # which limits expressiveness. Separate projectors allow the model to
-        # learn different transformations for computing similarity (K) vs.
-        # aggregating information (V).
-        self.key_projector = nn.Linear(gene_hidden_dim, gene_hidden_dim)
+        # Separate Key and Value projectors:
+        #   key_projector   : determines which genes each query attends to ("where to look")
+        #   value_projector : determines what information is aggregated   ("what to read")
+        # Sharing K = V is a valid simplification but limits expressiveness by
+        # coupling similarity matching with information aggregation.
+        self.key_projector   = nn.Linear(gene_hidden_dim, gene_hidden_dim)
         self.value_projector = nn.Linear(gene_hidden_dim, gene_hidden_dim)
 
-        # Learnable Query matrix: [1, latent_dim, H]
-        # Xavier init keeps attention scores in a stable range at the start.
+        # Learnable Query matrix: shape [1, latent_dim, H]
+        # Xavier uniform init keeps initial attention scores in a stable range.
         self.attention_queries = nn.Parameter(torch.empty(1, latent_dim, gene_hidden_dim))
         nn.init.xavier_uniform_(self.attention_queries)
 
-        # Scale factor 1/sqrt(H) prevents dot-product scores from growing too
+        # Scale factor 1/sqrt(H): prevents dot-product scores from growing too
         # large, which would push softmax into saturation (near-zero gradients).
         self.attention_scale_factor = 1.0 / (gene_hidden_dim ** 0.5)
 
-        # Output normalization after flattening the pooled slots
-        self.output_norm = nn.LayerNorm(gene_hidden_dim * latent_dim)
+        # Output normalization applied after flattening the pooled slots
+        self.output_norm      = nn.LayerNorm(gene_hidden_dim * latent_dim)
         self.final_activation = nn.GELU()
 
-    def forward(self, x: torch.Tensor, ppi_edge_index: torch.Tensor):
+    # ──────────────────────────────────────────────────────────────────────────
+    def forward(self, x: torch.Tensor):
         """
         Args:
-            x:              Node features [B, N, F].
-                            B = batch size, N = number of genes, F = features per gene.
-            ppi_edge_index: Single-graph edge index [2, E] or SparseTensor.
-                            Row 0 = source nodes, Row 1 = target nodes.
+            x : Node features, shape [B, N, F].
+                B = batch size, N = number of genes, F = features per gene.
 
         Returns:
-            output_processed: [B, latent_dim * gene_hidden_dim]
-            attn_weights (optional): [B, latent_dim, N]  returned when return_attention=True
+            output_processed : [B, latent_dim * H]
+            attn_weights     : [B, latent_dim, N]  (only when return_attention=True)
         """
-        batch_size, num_genes, num_feats = x.shape
+        batch_size, num_genes, num_feats = x.shape  # B, N, F
 
-        # Validate that the input graph size matches the encoder's configuration.
+        # Validate that the runtime graph size matches the encoder\'s configuration.
         if num_genes != self.num_nodes:
             raise ValueError(
                 f"Expected {self.num_nodes} genes (nodes), but got {num_genes}. "
                 f"Ensure input gene filtering is consistent with PPIEncoder initialization."
             )
 
-        if not hasattr(self, "_sparse_adj") or self._sparse_adj.device != x.device:
-            if isinstance(ppi_edge_index, SparseTensor):
-                adj = ppi_edge_index
-                if adj.device() != x.device:
-                    adj = adj.to(x.device)
-            else:
-                adj = SparseTensor(
-                    row=ppi_edge_index[1],
-                    col=ppi_edge_index[0],
-                    sparse_sizes=(num_genes, num_genes),
-                ).to(x.device)
-            deg = adj.sum(dim=1).to(torch.float32).clamp(min=1.0)
-            self._sparse_adj = adj
-            self._deg = deg
+        # Reconstruct the sparse adjacency matrix from buffered indices and values.
+        # This is a lightweight operation (no new memory allocation for the data).
+        # The buffers are already on the correct device thanks to register_buffer.
+        if not hasattr(self, "_adj_cache") or self._adj_cache_device != x.device:
+            self._adj_cache = torch.sparse_coo_tensor(
+                self._adj_indices,
+                self._adj_values,
+                size=(self.num_nodes, self.num_nodes),
+            ).coalesce()
+            self._adj_cache_device = x.device
+        adj = self._adj_cache  # [N, N] sparse COO
 
-        embedded = x
-        layer_outputs = []
+        # ── Step 2: Multi-layer GraphSAGE Message Passing ─────────────────────
+        # For each layer i, the update rule is:
+        ##
+        #   h^(i) = LayerNorm( W_self^(i) h^(i-1) + W_neigh^(i) Ã h^(i-1) ) + W_skip^(i) h^(i-1)
+        #
+        #   where  Ã = D⁻¹A  (degree-normalized adjacency matrix)
+        #          Ã h^(i-1) = A @ h^(i-1) / deg   (mean neighbor aggregation)
+        #
+        ## In each step code:
+        #   h_neigh^(i) = (1 / deg) * A @ h^(i-1)                 mean neighbor aggregation
+        #   h_raw^(i)   = W_self^(i) h^(i-1) + W_neigh^(i) h_neigh^(i)
+        #   h_norm^(i)  = LayerNorm( h_raw^(i) )
+        #   h_act^(i)   = Dropout( GELU( h_norm^(i) ) )
+        #   h^(i)       = h_act^(i) + W_skip^(i) h^(i-1)          residual connection
+        #
+        # Shape progression per layer:
+        #   embedded        : [B, N, current_dim]  (current_dim = F for i=0, H for i>0)
+        #   embedded_flat   : [N, B * current_dim] (reshape for batched sparse matmul)
+        #   neigh_flat      : [N, B * current_dim] (result of A @ embedded_flat)
+        #   neigh           : [B, N, current_dim]  (reshape back, then degree-normalize)
+        #   out             : [B, N, H]             (after self + neigh linear transforms)
+        #   identity        : [B, N, H]             (skip connection)
+        #   embedded (new)  : [B, N, H]             (out + identity)
+        #
+        # Key trick: instead of looping over the batch dimension, we reshape
+        # [B, N, C] -> [N, B*C] so that a single sparse matmul A @ [N, B*C]
+        # simultaneously aggregates neighbors for all B samples.
+
+        embedded      = x            # [B, N, F]  initial node features
+        layer_outputs = []           # will collect h^(1), h^(2), ..., h^(L) for JK fusion
+
         for i in range(self.num_layers):
-            cin = embedded.shape[-1]
+            cin = embedded.shape[-1]  # current feature dim: F (i=0) or H (i>0)
 
-            embedded_flat = embedded.permute(1, 0, 2).reshape(num_genes, batch_size * cin)
-            neigh_flat = self._sparse_adj.matmul(embedded_flat)
-            neigh = neigh_flat.reshape(num_genes, batch_size, cin).permute(1, 0, 2)
-            neigh = neigh / self._deg.view(1, num_genes, 1)
+            # ── 2a. Batched Neighbor Aggregation via Sparse MatMul ─────────────
+            # Reshape [B, N, C] -> [N, B*C] to enable a single sparse matmul.
+            #   embedded_flat : [N, B * cin]
+            #   neigh_flat    : [N, B * cin]   A @ embedded_flat aggregates neighbor features
+            #   neigh         : [B, N, cin]    reshape back to batch format
+            #   neigh (norm)  : [B, N, cin]    divide by degree for mean aggregation
+            embedded_flat = embedded.permute(1, 0, 2).reshape(num_genes, batch_size * cin)  # [N, B*C]
+            neigh_flat    = torch.sparse.mm(adj, embedded_flat)                              # [N, B*C]
+            neigh         = neigh_flat.reshape(num_genes, batch_size, cin).permute(1, 0, 2) # [B, N, C]
+            neigh         = neigh / self._deg.view(1, num_genes, 1)                          # [B, N, C]
 
-            out = self.self_linears[i](embedded) + self.neigh_linears[i](neigh)
-            out = self.norms[i](out)
-            out = self.activation(out)
-            out = self.dropout(out)
+            # ── 2b. GraphSAGE Linear Transform + Norm + Activation ────────────
+            #   out : [B, N, H]
+            out = self.self_linears[i](embedded) + self.neigh_linears[i](neigh)  # [B, N, H]
+            out = self.norms[i](out)       # LayerNorm over H
+            out = self.activation(out)     # GELU
+            out = self.dropout(out)        # Dropout
 
-            identity = self.skip_linears[i](embedded)
-            embedded = out + identity
-            layer_outputs.append(embedded)
+            # ── 2c. Residual (Skip) Connection ────────────────────────────────
+            #   identity : [B, N, H]  (Linear projection or Identity)
+            #   embedded : [B, N, H]  (updated node features for next layer)
+            identity = self.skip_linears[i](embedded)  # [B, N, H]
+            embedded = out + identity                  # [B, N, H]
 
-        jk_input = torch.cat(layer_outputs, dim=-1)
-        embedded = self.jk_fusion(jk_input)
-        embedded = self.activation(embedded)
+            layer_outputs.append(embedded)  # save h^(i) for JK fusion
+
+        # ── Step 3: Jumping Knowledge (JK) Fusion ─────────────────────────────
+        # Concatenate all L layer outputs along the feature dimension, then
+        # project back to H with a learned linear layer.
+        #
+        #   jk_input : [B, N, L * H]   (concat of h^(1), ..., h^(L))
+        #   embedded : [B, N, H]       (after jk_fusion linear + GELU)
+        jk_input = torch.cat(layer_outputs, dim=-1)  # [B, N, L * H]
+        embedded  = self.jk_fusion(jk_input)          # [B, N, H]
+        embedded  = self.activation(embedded)          # GELU
 
         # ── Step 4: Learned-Query Cross-Attention Pooling ─────────────────────
-        # Compress N gene representations into latent_dim pooled slot vectors.
-        #
-        # Use separate Key and Value projectors.
-        # K determines which genes each query attends to (similarity).
-        # V determines what information is aggregated (content).
-        # Sharing K=V (original code) is a valid simplification but limits
-        # the model's ability to decouple "where to look" from "what to read".
+        # Compress N gene representations [B, N, H] into latent_dim pooled
+        # slot vectors [B, latent_dim, H], then flatten to [B, latent_dim * H].
 
-        keys = F.gelu(self.key_projector(embedded))      # [B, N, H]
+        # ── 4a. Key and Value Projections ─────────────────────────────────────
+        #   K = GELU( W_key   @ embedded )   [B, N, H]  "where to look"
+        #   V = GELU( W_value @ embedded )   [B, N, H]  "what to read"
+        keys   = F.gelu(self.key_projector(embedded))    # [B, N, H]
         values = F.gelu(self.value_projector(embedded))  # [B, N, H]
 
-        # Calculate Attention Scores: Q * K^T / sqrt(H)
-        # Q: attention_queries, [1, latent_dim, H] -> expand -> [B, latent_dim, H]
-        # K^T: projected [B, N, H] -> transpose -> [B, H, N]
-        # scores: [B, latent_dim, N], i.e., bmm: [B, latent_dim, H] x [B, H, N] -> [B, latent_dim, N]
-        attn_scores = torch.bmm(  # Batched Matrix Multiplication
+        # ── 4b. Attention Score Computation ───────────────────────────────────
+        # Scaled dot-product attention between learnable queries Q and keys K:
+        #
+        #   scores = Q @ K^T / sqrt(H)
+        #
+        #   Q      : attention_queries expanded  [B, latent_dim, H]
+        #   K^T    : keys transposed             [B, H, N]
+        #   scores : [B, latent_dim, N]
+        #            scores[b, q, n] = similarity of query q to gene n in sample b
+        attn_scores = torch.bmm(
             self.attention_queries.expand(batch_size, -1, -1),  # [B, latent_dim, H]
-            keys.transpose(1, 2)  # [B, H, N]
-        ) * self.attention_scale_factor
+            keys.transpose(1, 2)                                 # [B, H, N]
+        ) * self.attention_scale_factor                          # [B, latent_dim, N]
 
-        # Top-k Sparse Attention (Improves performance without sacrificing accuracy)
-        # Instead of softmax over all N genes, keep only top-k genes
-        topk = self.topk
-        topk_scores, topk_indices = torch.topk(attn_scores, k=topk, dim=-1)
-        
-        # Softmax over top-k
-        topk_weights = F.softmax(topk_scores, dim=-1)  # [B, latent_dim, k]
-        
-        # Reconstruct sparse attention weights (for return_attention if needed)
-        # and gather values
+        # ── 4c. Top-k Sparse Attention ────────────────────────────────────────
+        # Retain only the top-k highest-scoring genes per query slot.
+        # This reduces noise from irrelevant genes and lowers memory usage.
+        #
+        #   topk_scores   : [B, latent_dim, k]  raw scores of selected genes
+        #   topk_indices  : [B, latent_dim, k]  gene indices of selected genes
+        #   topk_weights  : [B, latent_dim, k]  softmax-normalized attention weights
+        topk_scores, topk_indices = torch.topk(attn_scores, k=self.topk, dim=-1)  # [B, latent_dim, k]
+        topk_weights = F.softmax(topk_scores, dim=-1)                              # [B, latent_dim, k]
+
+        # ── 4d. Reconstruct Full Attention Map (optional) ─────────────────────
+        # For interpretability: scatter top-k weights back into a dense [B, latent_dim, N]
+        # tensor so downstream code can identify which genes each query focuses on.
         if self.return_attention:
-            attn_weights = torch.zeros_like(attn_scores)
-            attn_weights.scatter_(-1, topk_indices, topk_weights)
-        
-        # Gather top-k values
-        # values: [B, N, H]
-        # topk_indices: [B, latent_dim, k]
-        # We need values gathered to [B, latent_dim, k, H]
-        
-        # Expand values to match latent_dim: [B, latent_dim, N, H]
-        values_expanded = values.unsqueeze(1).expand(-1, self.latent_dim, -1, -1)
-        
-        # Expand indices to match H: [B, latent_dim, k, H]
-        topk_indices_expanded = topk_indices.unsqueeze(-1).expand(-1, -1, -1, self.gene_hidden_dim)
-        
-        # Gather the actual values for the top-k genes
-        gathered_values = torch.gather(values_expanded, dim=2, index=topk_indices_expanded) # [B, latent_dim, k, H]
-        
-        # Weighted aggregation: sum over k
-        # [B, latent_dim, k, 1] * [B, latent_dim, k, H] -> [B, latent_dim, H]
-        pooled = (topk_weights.unsqueeze(-1) * gathered_values).sum(dim=2)
+            attn_weights = torch.zeros_like(attn_scores)           # [B, latent_dim, N]
+            attn_weights.scatter_(-1, topk_indices, topk_weights)  # fill top-k positions
 
-        # Flatten pooled slots: [B, latent_dim, H] -> [B, latent_dim * H]
-        output_flat = pooled.reshape(batch_size, -1)
+        # ── 4e. Gather Top-k Value Vectors ────────────────────────────────────
+        # Retrieve the value vectors V[n] for the top-k selected gene indices.
+        #
+        #   values              : [B, N, H]
+        #   values_expanded     : [B, latent_dim, N, H]  broadcast over query slots
+        #                         .expand() creates a memory-efficient view (no copy);
+        #                         safe here since torch.gather only reads from it.
+        #   topk_indices_exp    : [B, latent_dim, k, H]  index tensor expanded over H
+        #   gathered_values     : [B, latent_dim, k, H]  value vectors for top-k genes
+        values_expanded       = values.unsqueeze(1).expand(-1, self.latent_dim, -1, -1)          # [B, latent_dim, N, H]
+        topk_indices_expanded = topk_indices.unsqueeze(-1).expand(-1, -1, -1, self.gene_hidden_dim)  # [B, latent_dim, k, H]
+        gathered_values       = torch.gather(values_expanded, dim=2, index=topk_indices_expanded)    # [B, latent_dim, k, H]
 
-        # ── Step 5: Output Normalization ───────────────────────────
-        output_processed = self.output_norm(output_flat)
-        output_processed = self.final_activation(output_processed)
+        # ── 4f. Weighted Aggregation over Top-k Genes ─────────────────────────
+        # Compute a weighted sum of the top-k value vectors for each query slot:
+        #
+        #   pooled[b, q, :] = sum_{j=1}^{k} topk_weights[b, q, j] * gathered_values[b, q, j, :]
+        #
+        #   topk_weights unsqueezed : [B, latent_dim, k, 1]   (broadcast over H)
+        #   gathered_values         : [B, latent_dim, k, H]
+        #   pooled                  : [B, latent_dim, H]
+        pooled = (topk_weights.unsqueeze(-1) * gathered_values).sum(dim=2)  # [B, latent_dim, H]
 
-        # Optionally return attention weights for downstream
-        # interpretability analysis (e.g., identifying which genes each
-        # latent query focuses on across cell types).
+        # ── 4g. Flatten Pooled Slots ───────────────────────────────────────────
+        # Concatenate all latent_dim slot vectors into a single representation.
+        #   output_flat : [B, latent_dim * H]
+        output_flat = pooled.reshape(batch_size, -1)  # [B, latent_dim * H]
+
+        # ── Step 5: Output Normalization ──────────────────────────────────────
+        # Apply LayerNorm over the full flattened vector, then GELU activation.
+        #   output_processed : [B, latent_dim * H]
+        output_processed = self.output_norm(output_flat)         # LayerNorm
+        output_processed = self.final_activation(output_processed)  # GELU
+
+        # Optionally return the full attention weight map for downstream
+        # interpretability (e.g., identifying which genes each latent query
+        # focuses on across cell types or conditions).
         if self.return_attention:
-            return output_processed, attn_weights
+            return output_processed, attn_weights  # [B, latent_dim * H], [B, latent_dim, N]
 
-        return output_processed
+        return output_processed  # [B, latent_dim * H]
