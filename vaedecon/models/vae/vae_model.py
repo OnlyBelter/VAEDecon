@@ -433,7 +433,8 @@ class VAE(BaseAE):
             + beta * (kld_z_types + kld_p)
             + lo.cell_prop * cell_prop_loss
             + gamma * repulsion_loss
-            + lo.gene_mean_std_weight * (gm_loss + gs_loss)
+            + lo.gene_mean_weight * gm_loss
+            + lo.gene_std_weight * gs_loss
             + z_score_reg_weight * (1 / mean_z_scores)
         ).mean()
 
@@ -474,7 +475,7 @@ class VAE(BaseAE):
         - GS: MSE for std
         """
         lo = self.model_config.loss_coefficient
-        if lo.gene_mean_std_weight == 0:
+        if lo.gene_mean_weight == 0 and lo.gene_std_weight == 0:
             return torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
 
         # Note: self.g_mean and self.w are buffers, so they are on the correct device.

@@ -402,13 +402,6 @@ class BaseTrainerConfig(BaseConfig):
     steps_predict: Union[int, None] = None
     keep_best_on_train: bool = False
     seed: int = 8
-    # no_cuda: bool = False
-    # world_size: int = field(default=-1)
-    # local_rank: int = field(default=-1)
-    # rank: int = field(default=-1)
-    # dist_backend: str = field(default="nccl")
-    # master_addr: str = field(default="localhost")
-    # master_port: str = field(default="12345")
     amp: bool = False
     # The number of epochs to wait before stopping the training if no improvement is observed.
     n_early_stopping_patience: int = 5

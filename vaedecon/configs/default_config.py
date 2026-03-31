@@ -15,13 +15,23 @@ class LossCoefficient(BaseModel):
     cell_prop: float = 0.0
     weighting_gene_by_exp: bool = True
     weight_clamp_range: Tuple[float, float] = (0.2, 5.0)
-    gene_mean_std_weight: float = 1.0
+    gene_mean_weight: float = 1.0
+    gene_std_weight: float = 0.0
+    gene_mean_std_weight: Optional[float] = None
     z_score_reg_weight: float = 0.0
 
-    @field_validator("beta", "gamma", "cell_prop", "gene_mean_std_weight", "z_score_reg_weight")
+    @field_validator(
+        "beta",
+        "gamma",
+        "cell_prop",
+        "gene_mean_weight",
+        "gene_std_weight",
+        "gene_mean_std_weight",
+        "z_score_reg_weight",
+    )
     @classmethod
-    def non_negative(cls, v: float) -> float:
-        if v < 0:
+    def non_negative(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v < 0:
             raise ValueError("must be non-negative")
         return v
 
@@ -30,6 +40,14 @@ class LossCoefficient(BaseModel):
         mn, mx = self.weight_clamp_range
         if mn <= 0 or mn >= mx:
             raise ValueError("weight_clamp_range must satisfy 0 < min < max")
+        return self
+
+    @model_validator(mode="after")
+    def reconcile_gene_stat_weights(self):
+        if self.gene_mean_std_weight is not None:
+            if self.gene_mean_weight == 1.0 and self.gene_std_weight == 1.0:
+                self.gene_mean_weight = self.gene_mean_std_weight
+                self.gene_std_weight = self.gene_mean_std_weight
         return self
 
 # @dataclass
@@ -185,6 +203,13 @@ class TrainingConfig(BaseTrainerConfig):
     scheduler_cls: Optional[str] = None
     scheduler_params: Optional[Dict[str, Any]] = None
     warmup_epochs: int = 0
+    gene_stat_weight_schedule: Literal["linear"] = 'linear'
+    gene_stat_weight_schedule_steps: Optional[int] = None
+    gene_stat_weight_schedule_epochs: Optional[int] = None
+    gene_mean_weight_start: float = 1.0
+    gene_mean_weight_end: float = 0.0
+    gene_std_weight_start: float = 0.0
+    gene_std_weight_end: float = 1.0
 
 
 class ModelConfig(BaseModelConfig):

@@ -7,9 +7,9 @@ except ImportError:
     raise ImportError("importlib.metadata is not available. Please use Python 3.8 or higher.")
 
 try:
-    __version__ = version("deside")
+    __version__ = version("VAEDecon")
 except PackageNotFoundError:
-    __version__ = "0.1-dev"
+    __version__ = "0.3.3-dev"
 
 from vaedecon.workflow import train_vaedecon, predict_vaedecon
 from vaedecon.workflow import VAEDeconPredictor, VAEDeconTrainer

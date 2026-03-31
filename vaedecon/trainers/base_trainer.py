@@ -240,6 +240,10 @@ class PLTrainer(L.LightningModule):
         output = self(batch)
         self.log_learning_rate()
 
+        lo = self.model.model_config.loss_coefficient
+        self.log("w_gene_mean", float(lo.gene_mean_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        self.log("w_gene_std", float(lo.gene_std_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
+
         self.loss_monitor(
             step="train",
             output=output,
@@ -257,6 +261,43 @@ class PLTrainer(L.LightningModule):
         )
 
         return output.loss
+
+    def on_train_batch_start(self, batch: Dict[str, Any], batch_idx: int) -> None:
+        cfg = self.training_config
+        schedule = getattr(cfg, "gene_stat_weight_schedule", None)
+        if schedule != "linear":
+            return
+
+        steps = getattr(cfg, "gene_stat_weight_schedule_steps", None)
+        if steps is None or steps <= 0:
+            epochs = getattr(cfg, "gene_stat_weight_schedule_epochs", None)
+            if epochs is None or epochs <= 0:
+                epochs = getattr(cfg, "warmup_epochs", 0)
+            num_batches = getattr(self.trainer, "num_training_batches", 0) or 0
+            if epochs <= 0 or num_batches <= 0:
+                return
+            steps = int(epochs * num_batches)
+            if steps <= 0:
+                return
+
+        progress = float(self.global_step) / float(max(1, steps))
+        if progress < 0.0:
+            progress = 0.0
+        if progress > 1.0:
+            progress = 1.0
+
+        lo = self.model.model_config.loss_coefficient
+        mean_start = cfg.gene_mean_weight_start if hasattr(cfg, "gene_mean_weight_start") else 0.0
+        std_start = cfg.gene_std_weight_start if hasattr(cfg, "gene_std_weight_start") else 0.0
+
+        mean_end = cfg.gene_mean_weight_end if hasattr(cfg, "gene_mean_weight_end") else 0.0
+        std_end = cfg.gene_std_weight_end if hasattr(cfg, "gene_std_weight_end") else 1.0
+
+        lo.gene_mean_weight = max(0.0, mean_start + (mean_end - mean_start) * progress)
+        lo.gene_std_weight = max(0.0, std_start + (std_end - std_start) * progress)
+
+        self.log("w_gene_mean", float(lo.gene_mean_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        self.log("w_gene_std", float(lo.gene_std_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Performs a single validation step."""
