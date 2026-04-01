@@ -253,7 +253,8 @@ class ModelConfig(BaseModelConfig):
                 - kld_type: Type of KLD computation ('ave' or 'sum')
                 - weighting_gene_by_exp: Weight genes by expression level
                 - weight_clamp_range: Range to clamp gene weights
-                - gene_mean_std_weight: Weight for gene mean/std loss
+                - gene_mean_weight: Weight for gene mean loss, same as gene_mean_weight_start at the beginning of training, and will be updated according to gene_stat_weight_schedule and gene_stat_weight_schedule_epochs
+                - gene_std_weight: Weight for gene std loss, same as gene_std_weight_start at the beginning of training, and will be updated according to gene_stat_weight_schedule and gene_stat_weight_schedule_epochs
 
         File Paths:
             input_gene_list_fp: Path to input gene list.
@@ -575,18 +576,6 @@ class ModelConfig(BaseModelConfig):
 
         return self
 
-    # @model_validator(mode='after')
-    # def validate_gene_mean_std_requirement(self):
-    #     """Ensure gene_mean_std_fp is provided when needed."""
-    #     if self.loss_coefficient.get("gene_mean_std_weight", 0) > 0:
-    #         if self.gene_mean_std_fp is None:
-    #             raise ValueError(
-    #                 "gene_mean_std_fp must be provided when "
-    #                 "loss_coefficient['gene_mean_std_weight'] > 0"
-    #             )
-    #
-    #     return self
-
     @model_validator(mode='after')
     def validate_gnn_consistency(self):
         """Ensure GNN settings are consistent with input dimensions."""
@@ -633,6 +622,8 @@ class ModelConfig(BaseModelConfig):
                 "beta": self.loss_coefficient["beta"],
                 "gamma": self.loss_coefficient["gamma"],
                 "cell_prop_weight": self.loss_coefficient["cell_prop"],
+                "gene_mean_weight": self.loss_coefficient["gene_mean_weight"],
+                "gene_std_weight": self.loss_coefficient["gene_std_weight"],
             }
         }
 

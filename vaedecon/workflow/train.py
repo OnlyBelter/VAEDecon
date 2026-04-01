@@ -241,6 +241,8 @@ class VAEDeconTrainer:
             gene_stat_weight_schedule_epochs=self.config.training.gene_stat_weight_schedule_epochs,
             gene_mean_weight_end=self.config.training.gene_mean_weight_end,
             gene_std_weight_end=self.config.training.gene_std_weight_end,
+            gene_std_weight_start=self.config.training.gene_std_weight_start,
+            gene_mean_weight_start=self.config.training.gene_mean_weight_start,
         )
 
     def _build_gepdataset_config(self) -> GEPDatasetConfig:
