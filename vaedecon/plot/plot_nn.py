@@ -28,6 +28,7 @@ def plot_loss(
     aggregate_same_x=True,
     agg_func="last",
     figsize=(8, 6),
+    log_y: bool = True,
 ):
     """
     Plot loss curves from a metrics DataFrame.
@@ -51,6 +52,8 @@ def plot_loss(
             Aggregation for duplicated x values: 'last', 'mean', 'min', 'max'.
         figsize (tuple):
             Figure size.
+        log_y (bool):
+            Whether to use a log scale on the y-axis.
 
     Returns:
         (fig, ax) if output_dir is None, otherwise None.
@@ -86,13 +89,15 @@ def plot_loss(
     df[x_col] = pd.to_numeric(df[x_col], errors="coerce")
 
     fig, ax = plt.subplots(figsize=figsize)
+    if log_y:
+        ax.set_yscale("log", nonpositive="clip")
 
     for metric_col, metric_label in metrics_to_plot:
         plot_df = df[[x_col, metric_col]].copy()
         plot_df[metric_col] = pd.to_numeric(plot_df[metric_col], errors="coerce")
 
         # Drop rows with missing x or y
-        plot_df = plot_df.dropna(subset=[metric_col])
+        plot_df = plot_df.dropna(subset=[x_col, metric_col])
 
         if len(plot_df) == 0:
             continue
@@ -111,6 +116,13 @@ def plot_loss(
                 raise ValueError(f"Unsupported agg_func: {agg_func}")
 
         plot_df = plot_df.sort_values(by=x_col)
+        if log_y:
+            y = plot_df[metric_col].to_numpy(dtype=float)
+            if np.any(y <= 0):
+                plot_df[metric_col] = np.where(y > 0, y, np.nan)
+                plot_df = plot_df.dropna(subset=[metric_col])
+                if len(plot_df) == 0:
+                    continue
         ax.plot(plot_df[x_col], plot_df[metric_col], marker="o", linewidth=2, label=metric_label)
 
     ax.legend()
