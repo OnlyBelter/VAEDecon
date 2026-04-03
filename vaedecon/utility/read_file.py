@@ -23,12 +23,10 @@ class ReadH5AD(object):
     :param show_info: Whether to print dataset information upon loading.
     """
 
-    def __init__(self, file_path: Union[str, Path], show_info: bool = False):
+    def __init__(self, file_path: Union[str, Path], show_info: bool = False, backed: Optional[str] = None):
         self.file_path = Path(file_path)
         try:
-            # Consider using backed mode for very large files if you only ever access slices
-            # self.dataset = an.read_h5ad(self.file_path, backed='r')
-            self.dataset = an.read_h5ad(self.file_path)
+            self.dataset = an.read_h5ad(self.file_path, backed=backed) if backed else an.read_h5ad(self.file_path)
             logger.info(f"Successfully loaded: {self.file_path}")
         except FileNotFoundError:
             logger.error(f"H5AD file not found: {self.file_path}")
@@ -88,12 +86,21 @@ class ReadH5AD(object):
                 return pd.DataFrame(columns=self.dataset.var_names.to_list())
 
             logger.info(f"Subsetting AnnData for {len(actual_obs_to_slice)} requested observations.")
-            # Slicing AnnData usually returns a view. .copy() makes it an independent object in memory.
-            # This is crucial if you are only working with this subset for transformations.
-            adata_slice = self.dataset[actual_obs_to_slice, :].copy()
+            adata_view = self.dataset[actual_obs_to_slice, :]
+            # In backed mode, AnnData.copy() requires a filename. Use to_memory() for in-RAM processing.
+            if getattr(self.dataset, "isbacked", False):
+                adata_slice = adata_view.to_memory()
+            else:
+                # Slicing AnnData usually returns a view. .copy() makes it an independent object in memory.
+                adata_slice = adata_view.copy()
         else:
             # Process the entire dataset.
             # Making a copy ensures that self.dataset remains unchanged by downstream processing.
+            if getattr(self.dataset, "isbacked", False):
+                raise ValueError(
+                    "Reading the full dataset in backed mode would load everything into memory. "
+                    "Please pass obs_names to subset the AnnData object."
+                )
             adata_slice = self.dataset.copy()
             logger.info(f"Processing all {self.dataset.n_obs} observations from {self.file_path}.")
 

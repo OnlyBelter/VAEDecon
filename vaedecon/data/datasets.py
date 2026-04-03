@@ -759,6 +759,8 @@ def find_sct_gep_of_bulk_sample(
     random_seed: Optional[int] = 42,
     n_samples: int = 3,
     selected_sample2cell_id_file_path: Optional[Union[str, Path]] = None,
+    cache_sct_query_results: bool = True,
+    sct_query_cache_file_path: Optional[Union[str, Path]] = None,
 ) -> Optional[Dict[str, pd.DataFrame]]:
     """
     Select random bulk samples and retrieve aligned SCT GEPs by cell type.
@@ -847,10 +849,52 @@ def find_sct_gep_of_bulk_sample(
     # --- 4) Load + process SCT GEPs ---
     logger.info(f"Loading GEPs for {len(unique_sct_cell_ids)} unique SCT cell IDs...")
     try:
-        # Efficiency point:
-        # ReadH5AD.get_df(obs_names=...) should load only requested cells.
-        sct_loader = ReadH5AD(sct_gep_fp)
-        sct_geps_df_raw = sct_loader.get_df(obs_names=unique_sct_cell_ids)
+        cache_fp = Path(sct_query_cache_file_path) if sct_query_cache_file_path else Path(
+            str(sct_gep_fp) + ".query_cache.pkl"
+        )
+
+        cached_df = pd.DataFrame()
+        if cache_sct_query_results and cache_fp.exists():
+            try:
+                cache_obj = pd.read_pickle(cache_fp)
+                if (
+                    isinstance(cache_obj, dict)
+                    and cache_obj.get("source_path") == str(sct_gep_fp)
+                    and cache_obj.get("source_mtime_ns") == sct_gep_fp.stat().st_mtime_ns
+                    and isinstance(cache_obj.get("df"), pd.DataFrame)
+                ):
+                    cached_df = cache_obj["df"]
+            except Exception as e:
+                logger.warning(f"Failed to read SCT query cache {cache_fp}: {e}")
+
+        missing_ids = [cid for cid in unique_sct_cell_ids if cid not in set(cached_df.index)]
+        if missing_ids:
+            sct_loader = ReadH5AD(sct_gep_fp, backed="r")
+            fetched_df = sct_loader.get_df(obs_names=missing_ids)
+            if not fetched_df.empty:
+                cached_df = pd.concat([cached_df, fetched_df], axis=0)
+                cached_df = cached_df[~cached_df.index.duplicated(keep="last")]
+
+                if cache_sct_query_results:
+                    try:
+                        cache_fp.parent.mkdir(parents=True, exist_ok=True)
+                        pd.to_pickle(
+                            {
+                                "source_path": str(sct_gep_fp),
+                                "source_mtime_ns": sct_gep_fp.stat().st_mtime_ns,
+                                "df": cached_df,
+                            },
+                            cache_fp,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to write SCT query cache {cache_fp}: {e}")
+
+        if cache_sct_query_results:
+            present_ids = [cid for cid in unique_sct_cell_ids if cid in set(cached_df.index)]
+            sct_geps_df_raw = cached_df.loc[present_ids, :]
+        else:
+            sct_loader = ReadH5AD(sct_gep_fp, backed="r")
+            sct_geps_df_raw = sct_loader.get_df(obs_names=unique_sct_cell_ids)
     except Exception as e:
         logger.error(f"Error loading SCT GEPs: {e}")
         raise

@@ -41,6 +41,7 @@ class LossTerms:
     repulsion: torch.Tensor
     cell_prop: torch.Tensor
     z_score_reciprocal: torch.Tensor = torch.tensor(0.0)  # Optional term for std regularization
+    z_score_kl_loss: torch.Tensor = torch.tensor(0.0)  # New KL term for empirical z-score to N(0,1)
 
 
 class VAE(BaseAE):
@@ -327,6 +328,7 @@ class VAE(BaseAE):
             logvar_mean=logvar_mean,
             mu_mean=mu_mean,
             device=device,
+            recon_x_all_types_cpm=recon_x_all_types_cpm,
         )
 
         return ModelOutput(
@@ -338,6 +340,7 @@ class VAE(BaseAE):
             gene_std_loss=loss_terms.gs,
             repulsion_loss=loss_terms.repulsion,
             cell_prop_loss=loss_terms.cell_prop,
+            z_score_kl_loss=loss_terms.z_score_kl_loss,
             mu=mu_mean,
             mu_deconv=mu_types,
             log_var=log_var_types,
@@ -364,7 +367,8 @@ class VAE(BaseAE):
         logvar_mean: torch.Tensor,
         mu_mean: torch.Tensor,
         device: torch.device,
-        eps: float = 1e-6,
+        recon_x_all_types_cpm: Optional[torch.Tensor] = None,
+        # eps: float = EPS,
     ) -> LossTerms:
         """
         Compute all objective terms and aggregate total loss.
@@ -375,7 +379,7 @@ class VAE(BaseAE):
             mu_mean/logvar_mean:  (B, L)
             recon_gene_mean/std:  (G, C)
         """
-        batch_size = mu_types.shape[0]
+        batch_size, n_gene = x.shape
         lo = self.model_config.loss_coefficient
         beta = lo.beta
         gamma = lo.gamma
@@ -389,19 +393,41 @@ class VAE(BaseAE):
             mean_z_scores = torch.ones((batch_size,), device=device)
             z_score_reg_weight = 0.0  # No regularization if not learning residuals.
 
-        # Convert back to log space for consistency with input features.
-        recon_gene_mean = to_log_space(recon_gene_mean, self.scaling_factor)
-        recon_gene_std = to_log_space(recon_gene_std, self.scaling_factor)
-
         # --- 1. Reconstruction Loss ---
         recon_loss = self._reconstruction_loss(x=x, recon_x_conv=recon_x_conv)              # (B,)
 
         # --- 2. Gene Statistics Loss ---
-        gm_loss, gs_loss = self._gene_statistics_loss(
-            recon_gene_mean=recon_gene_mean,
-            recon_gene_std=recon_gene_std,
-            device=device,
-        )                                                                                   # scalar, scalar
+        # If z-score KL regularization is enabled, ignore the original gene mean/std losses.
+        if lo.z_score_kl_weight > 0:
+            gm_loss = torch.tensor(0.0, device=device)
+            gs_loss = torch.tensor(0.0, device=device)
+        else:
+            # Convert back to log space for consistency with input features.
+            recon_gene_mean = to_log_space(recon_gene_mean, self.scaling_factor)
+            recon_gene_std = to_log_space(recon_gene_std, self.scaling_factor)
+            gm_loss, gs_loss = self._gene_statistics_loss(
+                recon_gene_mean=recon_gene_mean,
+                recon_gene_std=recon_gene_std,
+                device=device,
+            )                                                                               # scalar, scalar
+
+        # --- 2.5 Z-score KL Loss ---
+        if lo.z_score_kl_weight > 0:
+            if recon_x_all_types_cpm is None:
+                raise ValueError("recon_x_all_types_cpm is required when z_score_kl_weight > 0")
+            z_score_kl_loss = self._z_score_kl_loss(recon_x_all_types_cpm)
+        else:
+            z_score_kl_loss = torch.tensor(0.0, device=device)
+
+        # Identify genes with low mean (< 2) or low std (< 1),
+        # whose z-scores are unreliable for KL regularization.
+        # Replace their predicted values with the reference mean plus small Gaussian noise.
+        mask = (self.g_mean_non_log < 2) | (self.g_std_non_log < 1)  # (G, C)
+        mask = mask.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
+
+        g_mean_expanded = self.g_mean_non_log.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
+        # g_std_expanded = self.g_std_non_log.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
+        low_mean_std_gene_loss = F.mse_loss(recon_x_all_types_cpm[mask], g_mean_expanded[mask], reduction="none").sum(dim=-1)
 
         # --- 3. KL Divergence (Cell Proportions - Dirichlet) ---
         kld_p, cell_prop_loss = self._cell_prop_dirichlet_loss(
@@ -430,11 +456,13 @@ class VAE(BaseAE):
         # --- Total Loss ---
         total_loss = (
             recon_loss
+            + low_mean_std_gene_loss * 1e-9  # small weight to prevent collapse of low-mean/std genes
             + beta * (kld_z_types + kld_p)
             + lo.cell_prop * cell_prop_loss
             + gamma * repulsion_loss
-            + lo.gene_mean_weight * gm_loss
-            + lo.gene_std_weight * gs_loss
+            # + lo.gene_mean_weight * gm_loss
+            # + lo.gene_std_weight * gs_loss
+            + lo.z_score_kl_weight * z_score_kl_loss
             + z_score_reg_weight * (1 / mean_z_scores)
         ).mean()
 
@@ -448,6 +476,7 @@ class VAE(BaseAE):
             repulsion=repulsion_loss.mean(),
             cell_prop=cell_prop_loss.mean(),
             z_score_reciprocal=(1 / mean_z_scores).mean(),
+            z_score_kl_loss=z_score_kl_loss.mean(),
         )
 
     # -------------------------------------------------------------------------
@@ -483,6 +512,43 @@ class VAE(BaseAE):
         gm_loss = (gm_loss * self.w).sum(dim=0).mean()  # Weighted sum over genes, mean over types
         gs_loss = F.mse_loss(recon_gene_std, self.g_std, reduction="none").sum(dim=0).mean()
         return gm_loss, gs_loss
+
+    def _z_score_kl_loss(self, recon_x_all_types_cpm: torch.Tensor) -> torch.Tensor:
+        """
+        Regularize predicted per-cell-type GEPs by matching their empirical z-score distribution
+        (computed across samples in the current batch) to a standard normal N(0, 1).
+
+        recon_x_all_types_cpm: (B, G, C) in non-log CPM/TPM-like space.
+        Z[b, g, c] = (X[b, g, c] - mean[g, c]) / std[g, c]
+
+        Per-celltype overall normality:
+        For each cell type c, we aggregate z-scores over all samples and genes in the batch
+        and approximate the empirical distribution as N(mu_c, var_c). We then compute
+        KL(N(mu_c, var_c) || N(0, 1)) and average over cell types.
+        """
+        if recon_x_all_types_cpm.ndim != 3:
+            raise ValueError(
+                f"Expected recon_x_all_types_cpm with shape (B, G, C), got {recon_x_all_types_cpm.shape}"
+            )
+
+        B, G, C = recon_x_all_types_cpm.shape
+        assert self.g_mean_non_log.shape == (G, C), (
+            f"g_mean_non_log shape mismatch: expected ({G}, {C}), "
+            f"got {self.g_mean_non_log.shape}"
+        )
+
+        denom = torch.clamp(self.g_std_non_log, min=0.1).unsqueeze(0)  # (1, G, C)
+        mu = self.g_mean_non_log.unsqueeze(0)                          # (1, G, C)
+        z = (recon_x_all_types_cpm - mu) / denom                       # (B, G, C)
+        z = torch.clamp(z, max=10, min=-10)  # Prevent extreme z-scores from destabilizing KL calculation.
+
+        mu_z = z.mean(dim=(1, 2))                                       # (B,)
+        var_z = z.var(dim=(1, 2), unbiased=False).clamp_min(EPS)        # (B,)
+
+        kl = 0.5 * (var_z + mu_z.pow(2) - 1.0 - torch.log(var_z))       # (B,)
+        kl = kl.clamp_min(0.0).mean()                                   # a scalar
+
+        return kl
 
     def _cell_prop_dirichlet_loss(
         self,

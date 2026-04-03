@@ -120,15 +120,15 @@ class DataAdapter:
 
     def process_array_like(
         self,
-        data: Union[np.ndarray, torch.Tensor, "anndata.AnnData"],
+        data: Union[np.ndarray, torch.Tensor, anndata.AnnData],
         dtype: torch.dtype = torch.float32,
     ) -> torch.Tensor:
         x = self._to_tensor(data, dtype=dtype)
         self._validate_tensor(x)
         return x
 
+    @staticmethod
     def to_dataset(
-        self,
         data: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
     ):
@@ -138,7 +138,7 @@ class DataAdapter:
 
     def prepare_for_training(
         self,
-        data: Optional[Union[np.ndarray, torch.Tensor, Dataset, DataLoader, "anndata.AnnData", BaseDataset]],
+        data: Optional[Union[np.ndarray, torch.Tensor, Dataset, DataLoader, anndata.AnnData, BaseDataset]],
         data_type: str = "train",
     ) -> Optional[Union[Dataset, DataLoader]]:
         if data is None:
@@ -176,7 +176,7 @@ class DataAdapter:
 
     @staticmethod
     def _to_tensor(
-        data: Union[np.ndarray, torch.Tensor, "anndata.AnnData"],
+        data: Union[np.ndarray, torch.Tensor, anndata.AnnData],
         dtype: torch.dtype,
     ) -> torch.Tensor:
         if HAS_ANNDATA and isinstance(data, anndata.AnnData):
@@ -240,24 +240,14 @@ class PLTrainer(L.LightningModule):
         output = self(batch)
         self.log_learning_rate()
 
-        lo = self.model.model_config.loss_coefficient
-        self.log("w_gene_mean", float(lo.gene_mean_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
-        self.log("w_gene_std", float(lo.gene_std_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        # lo = self.model.model_config.loss_coefficient
+        # self.log("w_gene_mean", float(lo.gene_mean_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        # self.log("w_gene_std", float(lo.gene_std_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
 
         self.loss_monitor(
             step="train",
             output=output,
-            loss_types=(
-                "loss",
-                "kld",
-                "kld_p",
-                "recon_loss_conv",
-                "gene_mean_loss",
-                "gene_std_loss",
-                "repulsion_loss",
-                "cell_prop_loss",
-                "z_score_reciprocal",
-            ),
+            loss_types=tuple(self.prog_bar_metrics),
         )
 
         return output.loss
@@ -296,8 +286,8 @@ class PLTrainer(L.LightningModule):
         lo.gene_mean_weight = max(0.0, mean_start + (mean_end - mean_start) * progress)
         lo.gene_std_weight = max(0.0, std_start + (std_end - std_start) * progress)
 
-        self.log("w_gene_mean", float(lo.gene_mean_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
-        self.log("w_gene_std", float(lo.gene_std_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        # self.log("w_gene_mean", float(lo.gene_mean_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        # self.log("w_gene_std", float(lo.gene_std_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Performs a single validation step."""
@@ -306,16 +296,7 @@ class PLTrainer(L.LightningModule):
         self.loss_monitor(
             step="val",
             output=output,
-            loss_types=(
-                "loss",
-                "kld",
-                "kld_p",
-                "recon_loss_conv",
-                "cell_prop_loss",
-                "gene_mean_loss",
-                "gene_std_loss",
-                "repulsion_loss",
-            ),
+            loss_types=tuple(self.prog_bar_metrics),
         )
 
         return output.loss

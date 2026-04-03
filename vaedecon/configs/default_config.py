@@ -19,6 +19,7 @@ class LossCoefficient(BaseModel):
     gene_std_weight: float = 0.0
     gene_mean_std_weight: Optional[float] = None
     z_score_reg_weight: float = 0.0
+    z_score_kl_weight: float = 0.0  # Weight for KL divergence between empirical Z-score distribution and N(0,1)
 
     @field_validator(
         "beta",
@@ -28,6 +29,8 @@ class LossCoefficient(BaseModel):
         "gene_std_weight",
         "gene_mean_std_weight",
         "z_score_reg_weight",
+        "z_score_kl_weight",
+        mode="before"
     )
     @classmethod
     def non_negative(cls, v: Optional[float]) -> Optional[float]:
@@ -619,11 +622,12 @@ class ModelConfig(BaseModelConfig):
             "encoder_types": self.encoders,
             "predict_cell_prop": self.predict_cell_prop,
             "loss_settings": {
-                "beta": self.loss_coefficient["beta"],
-                "gamma": self.loss_coefficient["gamma"],
-                "cell_prop_weight": self.loss_coefficient["cell_prop"],
-                "gene_mean_weight": self.loss_coefficient["gene_mean_weight"],
-                "gene_std_weight": self.loss_coefficient["gene_std_weight"],
+                "beta": self.loss_coefficient.beta,
+                "gamma": self.loss_coefficient.gamma,
+                "cell_prop_weight": self.loss_coefficient.cell_prop,
+                "gene_mean_weight": self.loss_coefficient.gene_mean_weight,
+                "gene_std_weight": self.loss_coefficient.gene_std_weight,
+                "z_score_kl_weight": self.loss_coefficient.z_score_kl_weight,
             }
         }
 

@@ -32,10 +32,10 @@ training:
   warmup_epochs: 50              # epochs to ramp up from ~0 → peak lr
   gene_stat_weight_schedule: "linear"
   gene_stat_weight_schedule_epochs: 50
-  gene_mean_weight_start: 1.0
+  gene_mean_weight_start: 0.0
   gene_mean_weight_end: 0.0
   gene_std_weight_start: 0.0
-  gene_std_weight_end: 1.0
+  gene_std_weight_end: 0.0
 
   # Option A: Warmup + Cosine
   #Epoch:   0 ──── warmup_epochs ──────────────── num_epochs
@@ -79,8 +79,9 @@ model:
     kld_type: 'ave'
     weighting_gene_by_exp: true  # whether to weight the gene loss by the expression value across cell types (default true)
     weight_clamp_range: [0.2, 5]  # the range of the weights for the genes across cell types, only work if weighting_gene_by_exp is true
-    gene_mean_weight: 1  # the weight for the gene mean loss, same as gene_mean_weight_start at the beginning of training, and will be updated according to gene_stat_weight_schedule and gene_stat_weight_schedule_epochs
-    gene_std_weight: 1  # the weight for the gene std loss, same as gene_std_weight_start at the beginning of training, and will be updated according to gene_stat_weight_schedule and gene_stat_weight_schedule_epochs
+    gene_mean_weight: 0  # the weight for the gene mean loss, same as gene_mean_weight_start at the beginning of training, and will be updated according to gene_stat_weight_schedule and gene_stat_weight_schedule_epochs
+    gene_std_weight: 0  # the weight for the gene std loss, same as gene_std_weight_start at the beginning of training, and will be updated according to gene_stat_weight_schedule and gene_stat_weight_schedule_epochs
+    z_score_kl_weight: 1.0 # constrain the z-scores of all genes across all cell types by a standared normal distribution N(0, 1)
   gnn_n_genes: 12596
   gnn_inter_col_dim: 500
   gnn_embd_col_dim: 30
