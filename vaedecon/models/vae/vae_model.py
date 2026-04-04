@@ -42,6 +42,7 @@ class LossTerms:
     cell_prop: torch.Tensor
     z_score_reciprocal: torch.Tensor = torch.tensor(0.0)  # Optional term for std regularization
     z_score_kl_loss: torch.Tensor = torch.tensor(0.0)  # New KL term for empirical z-score to N(0,1)
+    low_mean_std_gene_loss: torch.Tensor = torch.tensor(0.0)  # Optional term to prevent collapse of low-mean/std genes
 
 
 class VAE(BaseAE):
@@ -341,6 +342,7 @@ class VAE(BaseAE):
             repulsion_loss=loss_terms.repulsion,
             cell_prop_loss=loss_terms.cell_prop,
             z_score_kl_loss=loss_terms.z_score_kl_loss,
+            low_mean_std_gene_loss=loss_terms.low_mean_std_gene_loss,
             mu=mu_mean,
             mu_deconv=mu_types,
             log_var=log_var_types,
@@ -368,10 +370,23 @@ class VAE(BaseAE):
         mu_mean: torch.Tensor,
         device: torch.device,
         recon_x_all_types_cpm: Optional[torch.Tensor] = None,
-        # eps: float = EPS,
     ) -> LossTerms:
         """
         Compute all objective terms and aggregate total loss.
+        Parameters:
+            x: Input features (B, G, C), in log space after scaling by constant
+            y: Optional target labels (B, C)
+            recon_x_conv: Reconstructed bulk GEPs (B, G), in log space after scaling by constant
+            mu_types: Latent space mean (B, L, C)
+            logvar_types: Latent space log-variance (B, L, C)
+            mu_mean: Prior mean (B, L)
+            logvar_mean: Prior log-variance (B, L)
+            recon_gene_mean: Reconstructed gene mean per cell type across samples in a batch (G, C), in tpm space
+            recon_gene_std: Reconstructed gene std per cell type across samples in a batch (G, C), in tpm space
+            recon_x_all_types_cpm: GEPs of all cell types after deconvolution (B, G, C), in tpm space
+            dd_alpha: Dirichlet distribution parameter (C,) for cell type proportions, if applicable.
+            mu_prior: Prior mean (C, L) for latent space, if applicable.
+            device: Device for tensor operations
 
         Shapes:
             x, recon_x_conv:      (B, G)
@@ -391,7 +406,7 @@ class VAE(BaseAE):
             mean_z_scores = self.z_scores.abs().mean(dim=(1, 2))  # (B,)
         else:
             mean_z_scores = torch.ones((batch_size,), device=device)
-            z_score_reg_weight = 0.0  # No regularization if not learning residuals.
+            # z_score_reg_weight = 0.0  # No regularization if not learning residuals.
 
         # --- 1. Reconstruction Loss ---
         recon_loss = self._reconstruction_loss(x=x, recon_x_conv=recon_x_conv)              # (B,)
@@ -427,7 +442,10 @@ class VAE(BaseAE):
 
         g_mean_expanded = self.g_mean_non_log.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
         # g_std_expanded = self.g_std_non_log.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
-        low_mean_std_gene_loss = F.mse_loss(recon_x_all_types_cpm[mask], g_mean_expanded[mask], reduction="none").sum(dim=-1)
+        g_mean_expanded_log = to_log_space(g_mean_expanded, self.scaling_factor)  # (B, G, C)
+        recon_x_all_types_log = to_log_space(recon_x_all_types_cpm, self.scaling_factor)  # (B, G, C)
+        # Compute MSE loss for low-mean/std genes, get a scalar here
+        low_mean_std_gene_loss = F.mse_loss(recon_x_all_types_log[mask], g_mean_expanded_log[mask], reduction="none").mean(dim=-1)
 
         # --- 3. KL Divergence (Cell Proportions - Dirichlet) ---
         kld_p, cell_prop_loss = self._cell_prop_dirichlet_loss(
@@ -456,14 +474,14 @@ class VAE(BaseAE):
         # --- Total Loss ---
         total_loss = (
             recon_loss
-            + low_mean_std_gene_loss * 1e-9  # small weight to prevent collapse of low-mean/std genes
-            + beta * (kld_z_types + kld_p)
-            + lo.cell_prop * cell_prop_loss
-            + gamma * repulsion_loss
+            + lo.low_mean_std_weight * low_mean_std_gene_loss
+            + beta * kld_z_types
+            # + lo.cell_prop * cell_prop_loss
+            # + gamma * repulsion_loss
             # + lo.gene_mean_weight * gm_loss
             # + lo.gene_std_weight * gs_loss
             + lo.z_score_kl_weight * z_score_kl_loss
-            + z_score_reg_weight * (1 / mean_z_scores)
+            # + z_score_reg_weight * (1 / mean_z_scores)
         ).mean()
 
         return LossTerms(
@@ -477,6 +495,7 @@ class VAE(BaseAE):
             cell_prop=cell_prop_loss.mean(),
             z_score_reciprocal=(1 / mean_z_scores).mean(),
             z_score_kl_loss=z_score_kl_loss.mean(),
+            low_mean_std_gene_loss=low_mean_std_gene_loss,  # Optional term to prevent collapse of low-mean/std genes
         )
 
     # -------------------------------------------------------------------------
@@ -546,7 +565,7 @@ class VAE(BaseAE):
         var_z = z.var(dim=(1, 2), unbiased=False).clamp_min(EPS)        # (B,)
 
         kl = 0.5 * (var_z + mu_z.pow(2) - 1.0 - torch.log(var_z))       # (B,)
-        kl = kl.clamp_min(0.0).mean()                                   # a scalar
+        kl = kl.clamp_min(0.0)
 
         return kl
 
