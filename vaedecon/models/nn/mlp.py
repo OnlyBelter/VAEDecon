@@ -215,7 +215,7 @@ class DecoderMLP(BaseDecoder):
         # Output constrained to (0, 1)
         self.final_layer = nn.Sequential(
             nn.Linear(self.hidden_dims[-1], output_dim),
-            nn.Sigmoid(),
+            nn.Softplus(),
             # nn.Dropout(p=self.dropout_rate[-1]) if self.dropout_rate[-1] > 0 else nn.Identity(),
         )
 

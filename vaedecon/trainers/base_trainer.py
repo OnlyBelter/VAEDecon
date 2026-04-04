@@ -229,7 +229,7 @@ class PLTrainer(L.LightningModule):
         self.monitor_metric = monitor_metric
 
         # self.prog_bar_metrics = {"loss", "kld", "recon_loss_conv", "cell_prop_loss"}
-        self.prog_bar_metrics = {"loss", "kld", "recon_loss_conv", "z_score_reciprocal"}
+        self.prog_bar_metrics = {"loss", "kld", "recon_loss_conv", "low_mean_std_gene_loss", "z_score_kl_loss"}
 
     def forward(self, inputs: Dict[str, Any], **kwargs) -> Any:
         """Forward pass of the model."""
