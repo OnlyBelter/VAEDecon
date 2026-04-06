@@ -166,8 +166,8 @@ class DecoderResMLP(BaseDecoder):
             # 1. Projection
             projector = nn.Sequential(
                 nn.Linear(input_size, hidden_dim_size),
-                nn.LayerNorm(hidden_dim_size, eps=1e-6),
-                nn.ReLU(),
+                nn.LayerNorm(hidden_dim_size, eps=EPS),
+                nn.GELU(),
                 nn.Dropout(p=self.dropout_rate[i]) if self.dropout_rate[i] > 0 else nn.Identity(),
             )
             # 2. Residual Block
