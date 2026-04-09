@@ -561,13 +561,18 @@ class VAE(BaseAE):
         z = (recon_x_all_types_cpm - mu) / denom                       # (B, G, C)
         z = torch.clamp(z, max=10, min=-10)  # Prevent extreme z-scores from destabilizing KL calculation.
 
-        mu_z = z.mean(dim=(1, 2))                                       # (B,)
-        var_z = z.var(dim=(1, 2), unbiased=False).clamp_min(EPS)        # (B,)
+        # Per-celltype: compute mu_z[C] and var_z[C] across (B, G)
+        # (B, G, C) -> (C) after mean over B and G
+        mu_z = z.mean(dim=(0, 1))                                       # (C,)
+        var_z = z.var(dim=(0, 1), unbiased=False).clamp_min(EPS)        # (C,)
 
-        kl = 0.5 * (var_z + mu_z.pow(2) - 1.0 - torch.log(var_z))       # (B,)
-        kl = kl.clamp_min(0.0)
+        # KL(N(mu, var) || N(0, 1)) = 0.5 * (var + mu^2 - 1 - log(var))
+        kl_per_celltype = 0.5 * (var_z + mu_z.pow(2) - 1.0 - torch.log(var_z))  # (C,)
+        kl_per_celltype = kl_per_celltype.clamp_min(0.0)
+        kl = kl_per_celltype.mean()                                    # scalar
 
-        return kl
+        # Expand back to batch dimension (B,) for consistency with existing code
+        return kl.expand(B)
 
     def _cell_prop_dirichlet_loss(
         self,

@@ -33,17 +33,8 @@ class ResidualBlock(nn.Module):
             nn.Dropout(dropout_rate),
         )
 
-        self._init_weights()
-
-    def _init_weights(self):
-        """Kaiming (He) initialization for linear layers. Preserves activation variance."""
-        for m in self.block.modules():
-            if isinstance(m, nn.Linear):
-                # PyTorch kaiming_normal_ only supports 'relu' and 'leaky_relu'
-                # For GELU, we use 'relu' since GELU is approximately ReLU-like
-                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+        # No initialization here - done by outer class
+        pass
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.training and self.dropout_stochastic_depth > 0:
