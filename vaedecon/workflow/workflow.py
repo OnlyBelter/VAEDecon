@@ -89,6 +89,23 @@ def create_model(
         decoder=decoder,
     )
 
+    if model_config.torch_compile:
+        if hasattr(torch, 'compile'):
+            try:
+                model = torch.compile(model)
+            except RuntimeError as e:
+                import warnings
+                warnings.warn(
+                    f"torch.compile() requested but failed: {e}. "
+                    "Skipping compilation. This commonly happens with Python 3.12+ or older PyTorch versions."
+                )
+        else:
+            import warnings
+            warnings.warn(
+                "torch.compile() requested but torch version < 2.0. "
+                "Skipping compilation. Upgrade PyTorch for faster training."
+            )
+
     return model
 
 

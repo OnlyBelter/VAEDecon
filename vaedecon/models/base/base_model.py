@@ -509,6 +509,16 @@ class Decoder_AE_MLP(BaseDecoder):
         self.layers = layers
         self.depth = len(layers)
 
+        self._init_weights()
+
+    def _init_weights(self):
+        """Kaiming (He) initialization for all linear layers."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
     def forward(self, z: torch.Tensor, output_layer_levels: List[int] = None):
         output = ModelOutput()
 

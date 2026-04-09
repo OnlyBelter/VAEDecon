@@ -564,6 +564,7 @@ class BaseTrainerL:
             callbacks=[ckpt, lr_monitor, early],
             logger=csv_logger,
             precision="16-mixed" if self.training_config.amp else 32,
+            gradient_clip_val=getattr(self.training_config, 'gradient_clip_val', 1.0),
         )
 
         trainer.fit(

@@ -14,6 +14,7 @@ VAEDecon is a deep learning-based tool for deconvolving bulk gene expression pro
 
 ```bash
 # conda is recommended
+# TODO, update to Python 3.13 and PyTorch 2.6+ to use torch.compile for faster training and inference
 conda create -n vaedecon python=3.12
 conda activate vaedecon
 

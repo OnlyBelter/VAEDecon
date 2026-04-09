@@ -218,6 +218,7 @@ class VAEDeconTrainer:
             learn_gep_residual=self.config.model.learn_gep_residual,
             # SCALING_FACTOR=self.config.model.SCALING_FACTOR,
             model_dir=self.config.model.model_dir,
+            torch_compile=self.config.model.torch_compile,
         )
 
     def _build_trainer_config(self) -> TrainingConfig:
@@ -237,6 +238,7 @@ class VAEDeconTrainer:
             scheduler_cls=self.config.training.scheduler_cls,
             scheduler_params=self.config.training.scheduler_params,
             warmup_epochs=self.config.training.warmup_epochs,
+            gradient_clip_val=self.config.training.gradient_clip_val,
             gene_stat_weight_schedule=self.config.training.gene_stat_weight_schedule,
             gene_stat_weight_schedule_epochs=self.config.training.gene_stat_weight_schedule_epochs,
             gene_mean_weight_end=self.config.training.gene_mean_weight_end,

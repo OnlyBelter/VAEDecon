@@ -393,7 +393,7 @@ class BaseTrainerConfig(BaseConfig):
     num_epochs: int = 100
     train_dataloader_num_workers: Optional[int] = None  # None means it will be set depending on the system and cpus
     eval_dataloader_num_workers: Optional[int] = None
-    optimizer_cls: str = "Adam"
+    optimizer_cls: str = "AdamW"
     optimizer_params: Union[dict, None] = None
     scheduler_cls: Union[str, None] = None
     scheduler_params: Union[dict, None] = None
@@ -407,6 +407,10 @@ class BaseTrainerConfig(BaseConfig):
     n_early_stopping_patience: int = 5
     devices: Union[int, str] = 1  # the number of gpus to use for training
     debug_model: bool = False  # if True, the model will be trained on a small subset of the data for debugging purposes
+    gradient_clip_val: Optional[float] = Field(
+        default=1.0,
+        description="Gradient clipping maximum norm. None to disable. Helps prevent divergence at higher learning rates."
+    )
 
     def __post_init__(self):
         """Check compatibility and sets up distributed training"""

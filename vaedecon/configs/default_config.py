@@ -192,7 +192,7 @@ class TrainingConfig(BaseTrainerConfig):
     device: str = 'auto'  # 'auto', 'cuda', 'cpu'
 
     # Optimizer
-    optimizer_cls: str = 'Adam'
+    optimizer_cls: str = 'AdamW'
 
     # Saving
     steps_saving: int = 0
@@ -208,6 +208,7 @@ class TrainingConfig(BaseTrainerConfig):
     scheduler_cls: Optional[str] = None
     scheduler_params: Optional[Dict[str, Any]] = None
     warmup_epochs: int = 0
+    gradient_clip_val: Optional[float] = 1.0
     gene_stat_weight_schedule: Literal["linear"] = 'linear'
     gene_stat_weight_schedule_steps: Optional[int] = None
     gene_stat_weight_schedule_epochs: Optional[int] = None
@@ -404,7 +405,7 @@ class ModelConfig(BaseModelConfig):
         default=None,
         description="Path to gene mean/std statistics file"
     )
-    model_dir: Optional[Path] = Field(
+    model_dir: Path | str = Field(
         default=None,
         description="Directory to save model checkpoints and outputs"
     )
@@ -413,6 +414,11 @@ class ModelConfig(BaseModelConfig):
     using_positional_encoding: bool = Field(
         default=False,
         description="Use positional encoding in latent space to distinguish cell types if True."
+    )
+    torch_compile: bool = Field(
+        default=False,
+        description="Use torch.compile() to compile the model for faster training. PyTorch >= 2.0 required. "
+                    "Typically gives 30-50%% speedup with zero code changes."
     )
 
     # ==================== Cell Proportion Prediction ====================

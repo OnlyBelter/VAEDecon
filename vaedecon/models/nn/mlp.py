@@ -46,6 +46,7 @@ class EncoderMLP(BaseEncoder):
         # Build layers and heads using the (possibly overridden) parameters
         self._build_layers()
         self._build_heads()
+        self._init_weights()
 
     def _build_layers(self) -> None:
         """Build MLP body layers from self.input_dim, self.hidden_dims, self.dropout_rate."""
@@ -74,6 +75,16 @@ class EncoderMLP(BaseEncoder):
         # 2. Cell Proportion Head (Dirichlet parameters)
         if self.predict_cell_prop:
             self.fc_dd_alpha = nn.Linear(self.hidden_dims[-1], self.n_cell_types)
+
+    def _init_weights(self):
+        """Kaiming (He) initialization for all linear layers. Preserves activation variance."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # PyTorch kaiming_normal_ only supports 'relu' and 'leaky_relu'
+                # For GELU, we use 'relu' since GELU is approximately ReLU-like
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(
         self,
@@ -220,6 +231,17 @@ class DecoderMLP(BaseDecoder):
         )
 
         self.depth = len(self.layers) + 1
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """Kaiming (He) initialization for all linear layers. Preserves activation variance."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # Hidden layers use ReLU, final uses Softplus - kaiming works for both
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(self, z: torch.Tensor, output_layer_levels: Optional[List[int]] = None) -> ModelOutput:
         """

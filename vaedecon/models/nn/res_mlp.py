@@ -4,12 +4,11 @@ import torch.nn.functional as F
 import numpy as np
 from typing import List, Optional
 
-# ... (Keep your existing imports) ...
 from ...configs import ModelConfig
 from ...models.base import (ModelOutput, reparameterize_dirichlet,
                             LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
                             BaseEncoder, BaseDecoder)
-from vaedecon.models.base.positional_encoding import PositionalEncoding
+from ...models.base.positional_encoding import PositionalEncoding
 
 
 class ResidualBlock(nn.Module):
@@ -18,8 +17,11 @@ class ResidualBlock(nn.Module):
     Structure: Input -> [Linear->LN->GELU->Dropout] x 2 -> Add Input
     """
 
-    def __init__(self, dim, dropout_rate=0.1):
+    def __init__(self, dim: int, dropout_rate: float = 0.1, dropout_stochastic_depth: float = 0.0):
         super().__init__()
+        self.dim = dim
+        self.dropout_rate = dropout_rate
+        self.dropout_stochastic_depth = dropout_stochastic_depth
         self.block = nn.Sequential(
             nn.Linear(dim, dim),
             nn.LayerNorm(dim, eps=EPS),
@@ -28,10 +30,25 @@ class ResidualBlock(nn.Module):
             nn.Linear(dim, dim),
             nn.LayerNorm(dim, eps=EPS),
             nn.GELU(),
-            nn.Dropout(dropout_rate)
+            nn.Dropout(dropout_rate),
         )
 
-    def forward(self, x):
+        self._init_weights()
+
+    def _init_weights(self):
+        """Kaiming (He) initialization for linear layers. Preserves activation variance."""
+        for m in self.block.modules():
+            if isinstance(m, nn.Linear):
+                # PyTorch kaiming_normal_ only supports 'relu' and 'leaky_relu'
+                # For GELU, we use 'relu' since GELU is approximately ReLU-like
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.training and self.dropout_stochastic_depth > 0:
+            if torch.rand(1, device=x.device).item() < self.dropout_stochastic_depth:
+                return x
         return x + self.block(x)
 
 
@@ -76,16 +93,29 @@ class EncoderResMLP(BaseEncoder):
 
         self.depth = len(self.layers)
 
+        self._init_weights()
+
         # --- Heads (Same as before) ---
         self.fc_mu_logvar = nn.Linear(self.hidden_dims[-1], self.n_cell_types * self.latent_dim * 2)
         if self.predict_cell_prop:
             self.fc_dd_alpha = nn.Linear(self.hidden_dims[-1], self.n_cell_types)
 
         # Positional Encoding setup (Same as before)
+
         if self.using_positional_encoding:
             if position_encoding is None:
                 raise ValueError("position_encoding parameter must be provided.")
             self.position_encoding = position_encoding
+
+    def _init_weights(self):
+        """Kaiming (He) initialization for all linear layers."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # PyTorch kaiming_normal_ only supports 'relu' and 'leaky_relu'
+                # For GELU, we use 'relu' since GELU is approximately ReLU-like
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None,
                 output_layer_levels: Optional[List[int]] = None, eps: float = EPS) -> ModelOutput:
@@ -121,7 +151,8 @@ class EncoderResMLP(BaseEncoder):
 
         # Positional Encoding Logic (Same as before)
         if self.using_positional_encoding and self.position_encoding is not None and cell_prop is not None:
-            if cell_prop.ndim == 3: cell_prop = cell_prop.squeeze(-1)
+            if cell_prop.ndim == 3:
+                cell_prop = cell_prop.squeeze(-1)
             exists = (cell_prop >= 0.01).float()
             exists_mask = exists.unsqueeze(1)
             pe_matrix = self.position_encoding.to(x.device)
@@ -184,6 +215,18 @@ class DecoderResMLP(BaseDecoder):
         )
 
         self.depth = len(self.layers) + 1
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """Kaiming (He) initialization for all linear layers."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # PyTorch kaiming_normal_ only supports 'relu' and 'leaky_relu'
+                # For GELU, we use 'relu' since GELU is approximately ReLU-like
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(self, z: torch.Tensor, output_layer_levels: Optional[List[int]] = None) -> ModelOutput:
         original_shape = z.shape

@@ -169,6 +169,19 @@ class EncoderSGNN(BaseEncoder):
         if self.predict_cell_prop:
             self.gnn_dd_alpha = nn.Linear(self.embd_col_dim, self.n_cell_types)
 
+        self._init_weights()
+
+    def _init_weights(self):
+        """Kaiming (He) initialization for all linear layers.
+        Preserves activation variance through layers for better training stability.
+        """
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # Use nonlinearity='relu' for LeakyReLU/GELU which covers all cases
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
     def forward(
         self, x: torch.Tensor,
         y: Optional[torch.Tensor] = None,
@@ -515,6 +528,19 @@ class PPIEncoder(nn.Module):
         # Output normalization applied after flattening the pooled slots
         self.output_norm      = nn.LayerNorm(gene_hidden_dim * latent_dim)
         self.final_activation = nn.GELU()
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """Kaiming (He) initialization for all linear layers.
+        Preserves activation variance through layers for better training stability.
+        """
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # nonlinearity='relu' works for both ReLU and GELU in Kaiming
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     # ──────────────────────────────────────────────────────────────────────────
     def forward(self, x: torch.Tensor):
