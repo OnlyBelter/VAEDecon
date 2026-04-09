@@ -83,24 +83,6 @@ class GeneTransformerEncoder(BaseEncoder):
                 raise ValueError("position_encoding parameter must be provided.")
             self.position_encoding = position_encoding
 
-        self._init_weights()
-
-    def _init_weights(self):
-        """Kaiming (He) initialization for linear layers.
-        For parameters initialized from randn, we use Xavier-style initialization.
-        """
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                # PyTorch kaiming_normal_ only supports 'relu' and 'leaky_relu'
-                # For GELU, we use 'relu' since GELU is approximately ReLU-like
-                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-        # Xavier initialization for embeddings (standard for learned embeddings)
-        nn.init.xavier_normal_(self.gene_id_embedding)
-        nn.init.xavier_normal_(self.latents)
-
     def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None,
                 output_layer_levels: Optional[List[int]] = None, eps: float = EPS) -> ModelOutput:
 

@@ -13,16 +13,12 @@ All notable changes to this project will be documented in this file.
 - **Gradient clipping**: Add configurable `gradient_clip_val` (default 1.0) to prevent gradient explosion with higher learning rates
 - **Kaiming (He) weight initialization**:
   - `EncoderResMLP`, `DecoderResMLP` in `models/nn/res_mlp.py`
-  - `GeneTransformerEncoder` in `models/nn/transformer.py`
-  - `EncoderHybrid` in `models/nn/fused_mlp_gnn.py`
-  - `Decoder_AE_MLP` in `models/base/base_model.py`
 
 ### Changed
 - **Default optimizer**: Changed default from `Adam` → `AdamW` (modern best practice with proper weight decay)
 - **Activation**: Changed ReLU → GELU in `DecoderResMLP` projector for consistency with residual blocks
 - **LayerNorm epsilon**: Changed hardcoded `1e-6` → `EPS` constant for consistency across codebase
 - **Import style**: Fixed mixed import in `res_mlp.py` to use relative imports consistently
-- **Kaiming initialization scope**: Only keep He initialization for residual networks (EncoderResMLP/DecoderResMLP) as requested, removed from other architectures to match user preference
 
 ### Fixed
 - **AnnData backed mode error**: Fixed `.copy()` error by using `.to_memory()` instead when slicing in backed mode
@@ -30,7 +26,7 @@ All notable changes to this project will be documented in this file.
 - **Progress bar logging**: Added `low_mean_std_gene_loss` and `z_score_kl_loss` to progress bar metrics
 - **PyTorch kaiming_normal_ issue**: Fixed `ValueError: Unsupported nonlinearity gelu` by using `nonlinearity='relu'` which works for both ReLU and GELU
 - **torch.compile error handling**: Added try-catch around `torch.compile()` to handle Dynamo unsupported Python versions gracefully
-- **Per-celltype KL divergence**: Fixed bug - was computing mean/var over all cell types together instead of per-celltype across batch+genes. Now correctly computes one KL per cell type and averages. Fixes NaN divergence on large datasets.
+- **Per-celltype KL divergence**: Fixed bug - was computing mean/var over all cell types together instead of per-celltype across batch+genes. Now correctly computes one KL per cell type and averages.
 
 ### Configuration
 - Added `z_score_kl_weight: float = 0.0` to `LossCoefficient` (weight for z-score KL regularization)

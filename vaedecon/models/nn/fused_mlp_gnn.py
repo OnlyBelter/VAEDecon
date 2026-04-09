@@ -111,20 +111,6 @@ class EncoderHybrid(BaseEncoder):
             # e.g. positional_encoding_class(num_embeddings=self.n_cell_types, embedding_dim=self.latent_dim)
             self.position_encoding_module = position_encoding
 
-        self._init_weights()
-
-    def _init_weights(self):
-        """Kaiming (He) initialization for all linear layers added in this class."""
-        # MLP and GNN encoders already initialize themselves
-        # Only initialize the layers we add here
-        for m in self.modules():
-            if m not in [self.mlp_encoder, self.gnn_encoder] and isinstance(m, nn.Linear):
-                # PyTorch kaiming_normal_ only supports 'relu' and 'leaky_relu'
-                # For GELU, we use 'relu' since GELU is approximately ReLU-like
-                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
     def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None, eps: float = EPS) -> ModelOutput:
         current_device = self.device_param.device
         x = x.to(current_device)
