@@ -10,7 +10,7 @@ version = "0.3.3"
 description = "Gene expression deconvolution by single cell generative model"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 authors = [
     { name = "OnlyBelter", email = "onlybelter@outlook.com" },
 ]
@@ -30,10 +30,9 @@ classifiers = [
     "Intended Audience :: Science/Research",
 #    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Typing :: Typed",
 ]
 dependencies = [
@@ -63,6 +62,7 @@ dependencies = [
 #    "sphinx_book_theme",
     "jinja2==3.0.3",
     "pydantic",
+    "pyyaml",
     "cloudpickle",
 #    "pythae",
     "torchmetrics",
@@ -73,6 +73,11 @@ dependencies = [
 
 #    'tensorrt',
 #    "sphinx_rtd_theme"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
 ]
 #dynamic = ["version"]
 
@@ -90,6 +95,9 @@ vaedecon = "vaedecon.cli.main:main"
 where = ["."]
 include = ["vaedecon*"]
 exclude = ["tests*", "docs*", "examples*", "configs*"]  # Exclude configs and examples from the package
+
+[tool.setuptools.package-data]
+"vaedecon.configs" = ["*.yaml"]
 
 # https://realpython.com/pypi-publish-python-package/#version-your-package
 [tool.bumpver]

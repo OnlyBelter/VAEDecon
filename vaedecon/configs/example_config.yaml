@@ -28,8 +28,7 @@ training:
   train_split: 0.8
   val_split: 0.2
   
-  # ── Warmup settings (NEW) ──────────────────────────────────────
-  warmup_epochs: 50              # epochs to ramp up from ~0 → peak lr
+  warmup_epochs: 50
   gene_stat_weight_schedule: "linear"
   gene_stat_weight_schedule_epochs: 50
   gene_mean_weight_start: 0.0
@@ -37,18 +36,6 @@ training:
   gene_std_weight_start: 0.0
   gene_std_weight_end: 0.0
 
-  # Option A: Warmup + Cosine
-  #Epoch:   0 ──── warmup_epochs ──────────────── num_epochs
-  #                    │
-  #         LinearLR   │   CosineAnnealingLR
-  #         (warmup)   │   (T_max)
-  #         ◄─────────►│◄──────────────────────────►
-  # scheduler_cls: "WarmupCosine"
-  # scheduler_params:
-  #   T_max: 950  # Total number of epochs for cosine annealing (including warmup)
-  #   eta_min: 1.0e-7
-
-  #  Option B: Warmup + ReduceLROnPlateau  (comment out A, use this)
   scheduler_cls: "WarmupReduceOnPlateau"
   scheduler_params:
     patience: 10
@@ -68,20 +55,19 @@ model:
   decoder_dropout_rate: [0, 0.1, 0.1, 0]
   fusion_hidden_dims: [512, 256]
   fusion_dropout_rate: [0.1, 0]
-  encoders: ['EncoderResMLP']  # EncoderMLP, EncoderResMLP, EncoderHybrid, EncoderSGNN, GeneTransformerEncoder
-  decoders: ['DecoderResMLP']  # DecoderMLP, DecoderResMLP
+  encoders: ['EncoderResMLP']
+  decoders: ['DecoderResMLP']
   predict_cell_prop: false
   loss_coefficient:
     cell_prop: 0
-    beta: 2  # beta parameter for KLD loss, beta-VAE
-    gamma: 0.005  # gamma parameter for the repulsion loss (default 0.005)
-    # 'ave' means using the average mu and logvar across cell types, 'sep' means calculate kld for each cell type separately
+    beta: 2
+    gamma: 0.005
     kld_type: 'ave'
-    weighting_gene_by_exp: true  # whether to weight the gene loss by the expression value across cell types (default true)
-    weight_clamp_range: [0.2, 5]  # the range of the weights for the genes across cell types, only work if weighting_gene_by_exp is true
-    gene_mean_weight: 0  # the weight for the gene mean loss, same as gene_mean_weight_start at the beginning of training, and will be updated according to gene_stat_weight_schedule and gene_stat_weight_schedule_epochs
-    gene_std_weight: 0  # the weight for the gene std loss, same as gene_std_weight_start at the beginning of training, and will be updated according to gene_stat_weight_schedule and gene_stat_weight_schedule_epochs
-    z_score_kl_weight: 1.0 # constrain the z-scores of all genes across all cell types by a standared normal distribution N(0, 1)
+    weighting_gene_by_exp: true
+    weight_clamp_range: [0.2, 5]
+    gene_mean_weight: 0
+    gene_std_weight: 0
+    z_score_kl_weight: 1.0
   gnn_n_genes: 12596
   gnn_inter_col_dim: 500
   gnn_embd_col_dim: 30
@@ -106,7 +92,7 @@ evaluation:
   rasterized: true
   show_metrics: true
   val_batch_size: 128
-  figure_format: 'png'  # 'png', 'svg', or 'pdf'
+  figure_format: 'png'
   save_reconstructed_gep: false
   save_cell_type_specific_gep_metrics: false
   save_bulk_gep_input: true

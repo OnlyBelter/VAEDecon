@@ -44,8 +44,14 @@ You can train a model using the `train_vaedecon` function. It supports configura
 ```python
 from vaedecon.workflow import train_vaedecon
 
-# Train using a specific config file
-model_dir = train_vaedecon(config_file='configs/example_config.yaml')
+# Train using the packaged example config
+import importlib.resources as resources
+import yaml
+from vaedecon.configs import VAEDeconConfig
+
+example_cfg = resources.files("vaedecon.configs").joinpath("example_config.yaml").read_text()
+config = VAEDeconConfig.from_dict(yaml.safe_load(example_cfg))
+model_dir = train_vaedecon(config=config)
 print(f"Model saved to: {model_dir}")
 ```
 

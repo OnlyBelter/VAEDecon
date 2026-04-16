@@ -724,8 +724,28 @@ class VAEDeconConfig:
     def from_yaml(cls, yaml_path: str | Path):
         """Loads configuration from a YAML file"""
         import yaml
+        from pathlib import Path as _Path
+        yaml_path = _Path(yaml_path)
+
+        class _NoDuplicateSafeLoader(yaml.SafeLoader):
+            pass
+
+        def _construct_mapping(loader, node, deep=False):
+            mapping = {}
+            for key_node, value_node in node.value:
+                key = loader.construct_object(key_node, deep=deep)
+                if key in mapping:
+                    raise ValueError(f"Duplicate key '{key}' in YAML: {yaml_path}")
+                mapping[key] = loader.construct_object(value_node, deep=deep)
+            return mapping
+
+        _NoDuplicateSafeLoader.add_constructor(
+            yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+            _construct_mapping,
+        )
+
         with open(yaml_path, 'r') as f:
-            config_dict = yaml.safe_load(f)
+            config_dict = yaml.load(f, Loader=_NoDuplicateSafeLoader)
         return cls.from_dict(config_dict)
 
     def to_yaml(self, yaml_path: str | Path):

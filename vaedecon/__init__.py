@@ -11,8 +11,6 @@ try:
 except PackageNotFoundError:
     __version__ = "0.3.3-dev"
 
-from vaedecon.workflow import train_vaedecon, predict_vaedecon
-from vaedecon.workflow import VAEDeconPredictor, VAEDeconTrainer
 from .configs.default_config import (
     VAEDeconConfig,
     DataConfig,
@@ -22,13 +20,25 @@ from .configs.default_config import (
 )
 
 __all__ = [
-    'train_vaedecon',
-    'predict_vaedecon',
-    'VAEDeconTrainer',
-    'VAEDeconPredictor',
     'VAEDeconConfig',
     'DataConfig',
     'TrainingConfig',
     'ModelConfig',
     'EvaluationConfig',
+    'train_vaedecon',
+    'predict_vaedecon',
+    'VAEDeconTrainer',
+    'VAEDeconPredictor',
 ]
+
+
+def __getattr__(name: str):
+    if name in {"train_vaedecon", "predict_vaedecon", "VAEDeconPredictor", "VAEDeconTrainer"}:
+        from vaedecon.workflow import train_vaedecon, predict_vaedecon, VAEDeconPredictor, VAEDeconTrainer
+        return {
+            "train_vaedecon": train_vaedecon,
+            "predict_vaedecon": predict_vaedecon,
+            "VAEDeconPredictor": VAEDeconPredictor,
+            "VAEDeconTrainer": VAEDeconTrainer,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
