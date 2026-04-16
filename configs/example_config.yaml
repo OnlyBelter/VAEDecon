@@ -110,6 +110,7 @@ evaluation:
   val_batch_size: 128
   figure_format: 'png'  # 'png', 'svg', or 'pdf'
   save_reconstructed_gep: false
+  save_cell_type_specific_gep_metrics: false
   save_bulk_gep_input: true
   save_recon_bulk_gep_conv: true
   remove_low_var_genes: false

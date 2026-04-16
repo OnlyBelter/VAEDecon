@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+import pandas as pd
 import torch
 
 from ..data import GEPDataset, find_sct_gep_of_bulk_sample
@@ -260,15 +261,20 @@ class VAEDeconPredictor:
                     selected_sample2cell_id_file_path=selected_sample2cell_id_fp
                 )
 
-            plot_single_cell_gep(
+            metrics_all = plot_single_cell_gep(
                 test_set=test_set,
                 cell_types=cell_types,
                 pred_a=pred_a,
                 figure_format=self.figure_format,
                 sc_gep_result_dir=sc_gep_result_dir,
                 n_samples=self.config.evaluation.n_samples,
-                selected_sample2cell_id_file_path=selected_sample2cell_id_fp
+                selected_sample2cell_id_file_path=selected_sample2cell_id_fp,
+                return_metrics=getattr(self.config.evaluation, 'save_cell_type_specific_gep_metrics', False),
             )
+            if metrics_all is not None:
+                pd.DataFrame.from_dict(metrics_all, orient='index').to_csv(
+                    os.path.join(sc_gep_result_dir, "cell_type_specific_gep_metrics.csv")
+                )
 
         # 3. Plot latent space
         if self.config.evaluation.plot_latent_space:

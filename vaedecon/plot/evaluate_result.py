@@ -323,6 +323,7 @@ def compare_y_y_pred_subplot(y_true,
                              dataset_name='average',
                              figure_format: str='svg',
                              show_metrics: bool = False,
+                             return_metrics: bool = False,
                              figsize: tuple = (8, 8),
                              ax=None,
                              show_legend=False
@@ -355,6 +356,8 @@ def compare_y_y_pred_subplot(y_true,
         File format for saving: 'svg' or 'png'.
     show_metrics : bool
         If True, annotate Pearson r, p-value, RMSE, and CCC inside the axes.
+    return_metrics : bool
+        If True, return a dict of calculated metrics: corr, p_value, rmse, ccc.
     figsize : tuple of (float, float)
         Figure size in inches. Used only when ``ax`` is None.
     ax : matplotlib.axes.Axes, optional
@@ -366,6 +369,8 @@ def compare_y_y_pred_subplot(y_true,
     -------
     fig : matplotlib.figure.Figure
     ax  : matplotlib.axes.Axes
+    metrics : dict, optional
+        Only returned when ``return_metrics=True``. Keys: corr, p_value, rmse, ccc.
     """
 
     # ── Input Validation ──────────────────────────────────────────────────────
@@ -412,11 +417,14 @@ def compare_y_y_pred_subplot(y_true,
     )
 
     # ── Metric Annotation ─────────────────────────────────────────────────────
-    if show_metrics:
+    metrics = None
+    if show_metrics or return_metrics:
         corr, p_value = get_corr(all_x_cat, all_y_cat, return_p_value=True)
         rmse = calculate_rmse(y_true=all_y_cat, y_pred=all_x_cat)
         ccc = get_ccc(x=all_x_cat, y=all_y_cat)
+        metrics = {"corr": float(corr), "p_value": float(p_value), "rmse": float(rmse), "ccc": float(ccc)}
 
+    if show_metrics:
         # Use ax.transAxes for text positioning so that annotations
         # sit at a fixed fraction of the axes area, independent of data scale.
         # Previously positions were fractions of x_max/y_max, which broke
@@ -456,6 +464,8 @@ def compare_y_y_pred_subplot(y_true,
         )
         fig.savefig(out_path, dpi=300, bbox_inches='tight')
 
+    if return_metrics:
+        return fig, ax, metrics
     return fig, ax
 
 
@@ -906,7 +916,8 @@ def plot_single_cell_gep(
     n_samples: int = 3,
     figure_format: str = 'svg',
     selected_sample2cell_id_file_path: str = None,
-) -> None:
+    return_metrics: bool = False,
+) -> Dict[str, Dict[str, float]] | None:
     """Plots the reconstructed single-cell GEPs."""
     check_dir(Path(sc_gep_result_dir))
     recon_sc_gep = pred_a["recon_x_all_types"].detach().cpu().numpy()
@@ -927,6 +938,8 @@ def plot_single_cell_gep(
     # cell ids may have duplicate records
     selected_sample2cell_id = pd.read_csv(selected_sample2cell_id_file_path, index_col=0)
     # selected_sample2cell_id = selected_sample2cell_id.rename(columns={selected_sample2cell_id.columns[0]: 'sample_id'})
+
+    metrics_all_cell_types: Dict[str, Dict[str, float]] = {}
 
     for i, cell_type in enumerate(cell_types):
         selected_sample2cell_id_mapping = selected_sample2cell_id.loc[ selected_sample2cell_id['cell_type'] == cell_type,'selected_cell_id'].to_dict()
@@ -967,18 +980,35 @@ def plot_single_cell_gep(
             )
         row_index = i // nrows
         col_index = i % ncols
-        fig, ax = compare_y_y_pred_subplot(
-            y_pred=result_file_path,
-            y_true=y,
-            show_columns=query_ids,
-            x_label=cell_type,
-            show_metrics=True,
-            figsize=(2, 2),
-            dataset_name='',
-            ax=axes[row_index, col_index],
-            show_legend=True,
-            figure_format=figure_format,
-        )
+        if return_metrics:
+            fig, ax, metrics = compare_y_y_pred_subplot(
+                y_pred=result_file_path,
+                y_true=y,
+                show_columns=query_ids,
+                x_label=cell_type,
+                show_metrics=True,
+                return_metrics=True,
+                figsize=(2, 2),
+                dataset_name='',
+                ax=axes[row_index, col_index],
+                show_legend=True,
+                figure_format=figure_format,
+            )
+            metrics_all_cell_types[cell_type] = metrics
+        else:
+            fig, ax = compare_y_y_pred_subplot(
+                y_pred=result_file_path,
+                y_true=y,
+                show_columns=query_ids,
+                x_label=cell_type,
+                show_metrics=True,
+                return_metrics=False,
+                figsize=(2, 2),
+                dataset_name='',
+                ax=axes[row_index, col_index],
+                show_legend=True,
+                figure_format=figure_format,
+            )
     # fig.add_subplot(111, frameon=False)
     ax_shared = fig.add_axes((0.0, 0.0, 1.0, 1.0), frameon=False)
     ax_shared.set_xlim(0, 1)
@@ -998,6 +1028,9 @@ def plot_single_cell_gep(
         bbox_inches="tight",
     )
     plt.close(fig)
+    if return_metrics:
+        return metrics_all_cell_types
+    return None
 
 
 def plot_bulk_gep(
