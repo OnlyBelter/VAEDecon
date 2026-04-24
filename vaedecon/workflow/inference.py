@@ -48,7 +48,12 @@ class VAEDeconPredictor:
 
         # Device setup
         if device == 'auto':
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            if torch.cuda.is_available():
+                self.device = 'cuda'
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                self.device = 'mps'
+            else:
+                self.device = 'cpu'
         else:
             self.device = device
 
@@ -61,6 +66,7 @@ class VAEDeconPredictor:
         """Load the trained model"""
         logger.info(f"Loading model from: {self.model_dir}")
         self.model = load_trained_model(model_dir=self.model_dir)
+        self.model = self.model.to(self.device)
         self.model.eval()
 
         # Read gene list and cell type list

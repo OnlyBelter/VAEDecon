@@ -55,7 +55,12 @@ class VAEDeconTrainer:
     def _setup_device(self):
         """Resolve and store the computing device"""
         if self.config.training.device == 'auto':
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            if torch.cuda.is_available():
+                self.device = 'cuda'
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                self.device = 'mps'
+            else:
+                self.device = 'cpu'
         else:
             self.device = self.config.training.device
         logger.info(f"Using device: {self.device}")
