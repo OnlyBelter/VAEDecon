@@ -160,7 +160,8 @@ class VAEDeconTrainer:
             model_config=model_config,
             data_config=self.config.data,
             encoder_cls_name_list=model_config.encoders,
-            decoder_cls=model_config.decoders
+            decoder_cls=model_config.decoders,
+            device=self.device,
         )
 
         return model

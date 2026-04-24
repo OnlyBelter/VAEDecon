@@ -27,6 +27,7 @@ def create_model(
     data_config: DataConfig,
     encoder_cls_name_list: List[str],
     decoder_cls: List[str],
+    device: str = "auto",
 ) -> VAE:
     """Creates the VAE model."""
     position_encoding = PositionalEncoding(
@@ -90,17 +91,25 @@ def create_model(
     )
 
     if model_config.torch_compile:
-        if hasattr(torch, 'compile'):
+        requested_device = (device or "auto").lower()
+        effective_device = requested_device
+        if effective_device == "auto":
+            effective_device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        if effective_device != "cuda":
+            warnings.warn(
+                f"torch.compile() requested but skipped on device '{effective_device}'. "
+                "Compilation is only enabled for CUDA to avoid backend issues (e.g., MPS/Inductor)."
+            )
+        elif hasattr(torch, "compile"):
             try:
                 model = torch.compile(model)
             except RuntimeError as e:
-                import warnings
                 warnings.warn(
                     f"torch.compile() requested but failed: {e}. "
-                    "Skipping compilation. This commonly happens with Python 3.12+ or older PyTorch versions."
+                    "Skipping compilation."
                 )
         else:
-            import warnings
             warnings.warn(
                 "torch.compile() requested but torch version < 2.0. "
                 "Skipping compilation. Upgrade PyTorch for faster training."
@@ -153,7 +162,8 @@ def load_trained_model(model_dir: str) -> Union[AutoModel, BaseAE]:
         model = create_model(model_config=model_config,
                              data_config=data_config,
                              encoder_cls_name_list=model_config.encoders,
-                             decoder_cls=model_config.decoders)
+                             decoder_cls=model_config.decoders,
+                             device="cpu")
         trained_model = PLTrainer.load_from_checkpoint(
             checkpoint_path=model_file_path,
             model=model,
