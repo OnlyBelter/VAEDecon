@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import inspect
 from ..configs import TrainingConfig
 from torch.optim.lr_scheduler import (
     LRScheduler,
@@ -93,16 +94,19 @@ class WarmupThenReduceOnPlateau(LRScheduler):
             end_factor=1.0,
             total_iters=warmup_epochs,
         )
-        self.plateau_scheduler = ReduceLROnPlateau(
-            optimizer,
-            mode="min",
-            patience=patience,
-            factor=factor,
-            min_lr=min_lr,
-            verbose=verbose,
-        )
+        plateau_kwargs = {
+            "mode": "min",
+            "patience": patience,
+            "factor": factor,
+            "min_lr": min_lr,
+        }
+        if "verbose" in inspect.signature(ReduceLROnPlateau.__init__).parameters:
+            plateau_kwargs["verbose"] = verbose
+        self.plateau_scheduler = ReduceLROnPlateau(optimizer, **plateau_kwargs)
 
-    def step(self, metrics: float = None):
+    def step(self, metrics: float = None, **kwargs):
+        if metrics is None and "val_loss" in kwargs:
+            metrics = kwargs["val_loss"]
         if self.current_epoch < self.warmup_epochs:
             self.warmup_scheduler.step()
         else:
