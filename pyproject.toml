@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "VAEDecon"
-version = "0.3.3"
+version = "0.4.0"
 description = "Gene expression deconvolution by single cell generative model"
 readme = "README.md"
 license = "MIT"
@@ -30,7 +30,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
 #    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Typing :: Typed",
@@ -38,29 +37,29 @@ classifiers = [
 dependencies = [
 #    "tensorflow>=2.8.0",
 #    "torch==2.6.0",
-    "torch==2.2.2",
-    "torchvision==0.17.2",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
     "scikit-learn==1.7.2",
     "anndata==0.8.0",
     "scanpy==1.11.5",
-    "pandas==2.2.2",
-    "numpy==1.26.4",
-    "numexpr==2.10.0",
+    "pandas==3.0.2",
+    "numpy==2.4.3",
+    "numexpr==2.14.1",
     "scipy==1.16.3",
     "umap-learn==0.5.6",
     "matplotlib==3.10.7",
     "seaborn==0.13.2",
     "bbknn==1.5.1",
     "SciencePlots",
-    "tables==3.9.2",
+    "tables==3.10.2",
     "build==1.3.0",
     "sphinx==7.3.7",
     "myst-parser==4.0.1",
     "fsspec",
-    "h5py==3.11.0",
+    "h5py==3.16.0",
     "huggingface_hub",
 #    "sphinx_book_theme",
-    "jinja2==3.0.3",
+    "jinja2==3.1.6",
     "pydantic",
     "pyyaml",
     "cloudpickle",
@@ -68,7 +67,7 @@ dependencies = [
     "torchmetrics",
     "lightning==2.5.1",
     "torch-geometric==2.6.1",
-    "networkx==3.5",
+    "networkx==3.6.1",
     "igraph==0.11.8",
 
 #    'tensorrt',

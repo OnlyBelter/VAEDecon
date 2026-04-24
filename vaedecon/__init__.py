@@ -9,7 +9,7 @@ except ImportError:
 try:
     __version__ = version("VAEDecon")
 except PackageNotFoundError:
-    __version__ = "0.3.3-dev"
+    __version__ = "0.4.0-dev"
 
 from .configs.default_config import (
     VAEDeconConfig,

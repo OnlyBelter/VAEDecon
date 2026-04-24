@@ -14,21 +14,18 @@ VAEDecon is a deep learning-based tool for deconvolving bulk gene expression pro
 
 ```bash
 # conda is recommended
-# TODO, update to Python 3.13 and PyTorch 2.6+ to use torch.compile for faster training and inference
 conda create -n vaedecon python=3.12
 conda activate vaedecon
 
-# optional: setting HDF5 library path for M1/M2 Mac
-# refer to: https://stackoverflow.com/a/73030329/2803344
-export HDF5_DIR=/opt/homebrew/opt/hdf5 
-export BLOSC_DIR=/opt/homebrew/opt/c-blosc
+# Install PyTables
+conda install -c conda-forge hdf5 pytables=3.10.2
 
-# if you have a GPU, install pytorch with CUDA support first (optional)
+# Install PyTorch
+# if you have a GPU, install pytorch with CUDA support first
 # For linux or Windows, please refer to https://pytorch.org/get-started/previous-versions/
-pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
-
+pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu121
 # For Mac OS
-pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2
+pip install torch==2.11.0 torchvision==0.26.0
 
 # Install VAEDecon
 pip install vaedecon
