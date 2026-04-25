@@ -22,6 +22,17 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
 
+def _cuda_usable() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        x = torch.tensor([0.0], device="cuda")
+        (x + 1).sum().item()
+        return True
+    except Exception:
+        return False
+
+
 def create_model(
     model_config: ModelConfig,
     data_config: DataConfig,
@@ -94,7 +105,7 @@ def create_model(
         requested_device = (device or "auto").lower()
         effective_device = requested_device
         if effective_device == "auto":
-            effective_device = "cuda" if torch.cuda.is_available() else "cpu"
+            effective_device = "cuda" if _cuda_usable() else "cpu"
 
         if effective_device != "cuda":
             warnings.warn(
@@ -129,6 +140,12 @@ def train_model(
         result_dir: str,
 ) -> None:
     """Trains the model using the training pipeline."""
+    if device == "cuda" and not _cuda_usable():
+        raise RuntimeError(
+            "Requested device 'cuda' but CUDA kernels cannot run on this machine. "
+            "This commonly indicates an outdated NVIDIA driver or a GPU compute capability mismatch with the installed "
+            "PyTorch CUDA build. Update your NVIDIA driver or install a compatible PyTorch build, or use device='cpu'."
+        )
     training_pipeline = TrainingPipeline(
         training_config=training_config,
         model=model.to(device),
@@ -191,6 +208,11 @@ def evaluate_model(
         dataset_type: str = 'training',  # or test, tcga
 ) -> Dict[str, Any]:
     """Evaluates the trained model on the test set."""
+    if device == "cuda" and not _cuda_usable():
+        raise RuntimeError(
+            "Requested device 'cuda' but CUDA kernels cannot run on this machine. "
+            "Update your NVIDIA driver or install a compatible PyTorch build, or use device='cpu'."
+        )
     test_set_result_dir = os.path.join(result_dir, "test_set")
     check_dir(Path(test_set_result_dir))
     cell_prop_result_dir = os.path.join(test_set_result_dir, "cell_prop")
