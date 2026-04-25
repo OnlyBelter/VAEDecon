@@ -69,6 +69,7 @@ dependencies = [
     "torch-geometric==2.6.1",
     "networkx==3.6.1",
     "igraph==0.11.8",
+    "statsmodels==0.14.6",
 
 #    'tensorrt',
 #    "sphinx_rtd_theme"
