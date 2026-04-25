@@ -13,12 +13,6 @@ import torch
 from ..data import GEPDataset, find_sct_gep_of_bulk_sample
 from ..utility import log_message, check_dir
 from ..workflow import load_trained_model, evaluate_model
-from ..plot import (
-    compare_y_y_pred_plot,
-    plot_single_cell_gep,
-    plot_bulk_gep,
-    plot_latent_space
-)
 from ..configs.default_config import VAEDeconConfig, GEPDatasetConfig
 
 logger = logging.getLogger(__name__)
@@ -218,6 +212,17 @@ class VAEDeconPredictor:
         """Generate visualizations based on prediction results"""
         logger.info("Generating visualizations...")
 
+        try:
+            from ..plot import (
+                compare_y_y_pred_plot,
+                plot_single_cell_gep,
+                plot_bulk_gep,
+                plot_latent_space,
+            )
+        except Exception as e:
+            logger.warning(f"Could not import plotting utilities (skipping visualizations): {e}")
+            return
+
         true_cell_prop = results.get('true_cell_prop')
         pred_cell_prop_fp = results.get('pred_cell_prop_file_path')
         cell_types = results.get('cell_types')
@@ -344,7 +349,7 @@ def predict_vaedecon(
         config (Optional[VAEDeconConfig]):
             Configuration object override. Usually loaded automatically from `model_dir`.
         device (str):
-            Device to run inference on ('auto', 'cuda', 'cpu'). Defaults to 'auto'.
+            Device to run inference on ('auto', 'cuda', 'mps', 'cpu'). Defaults to 'auto'.
         visualize (bool):
             If True, generates plots for cell proportions, latent space, etc.
             Defaults to True.

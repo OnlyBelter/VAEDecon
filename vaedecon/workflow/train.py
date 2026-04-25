@@ -14,7 +14,6 @@ from torch.utils.data import random_split
 from ..data import GEPDataset
 from ..models.nn import EncoderMLP, DecoderMLP
 # from ..models.vae import VAEConfig
-from ..plot import plot_loss
 from ..trainers import BaseTrainerL
 from ..utility import set_output_dir, log_message, set_fig_style
 from ..utility import load_or_compute_gene_mean_std, load_lightning_metrics
@@ -434,8 +433,13 @@ def train_vaedecon(
                 str(log_file),
                 metric_cols=["train_loss_epoch", "val_loss", "lr-Adam"]
             )
-            plot_loss(history_df=history_df, output_dir=model_dir)
-            logger.info(f"Saved loss curve to {model_dir}")
+            try:
+                from ..plot.plot_nn import plot_loss
+            except Exception as e:
+                logger.warning(f"Could not import plotting utilities (skipping loss curve): {e}")
+            else:
+                plot_loss(history_df=history_df, output_dir=model_dir)
+                logger.info(f"Saved loss curve to {model_dir}")
         except Exception as e:
             logger.warning(f"Could not plot loss curve: {e}")
 

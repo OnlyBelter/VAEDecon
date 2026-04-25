@@ -16,7 +16,6 @@ from ..utility import (create_h5ad_dataset, check_dir, cal_corr_gene_exp_with_ce
                        sorted_cell_types, do_pca_analysis, non_log2cpm)
 from ..utility.read_file import ReadH5AD, read_single_cell_type_dataset, ReadExp
 from ..single_cell import get_sample_id
-from ..plot import plot_pca
 
 
 def segment_generation_fraction(n_samples: int = None, max_value: int = 10000,
@@ -1517,9 +1516,14 @@ def filtering_by_gene_list_and_pca_plot(bulk_exp, tcga_exp, gene_list, result_di
     color_code = np.array([simu_dataset_name] * bulk_exp.shape[0] + ['TCGA'] * tcga_exp.shape[0])
     # cumsum = np.cumsum(pca_model.explained_variance_ratio_)
     # pca_df['class'] = color_code
-    plot_pca(data=pca_df, figsize=figsize,
-             result_fp=os.path.join(result_dir, title + '.png'),
-             color_code=color_code, explained_variance_ratio=pca_model.explained_variance_ratio_)
+    try:
+        from ..plot import plot_pca
+    except Exception as e:
+        print(f"Could not import plotting utilities (skipping PCA plot): {e}")
+    else:
+        plot_pca(data=pca_df, figsize=figsize,
+                 result_fp=os.path.join(result_dir, title + '.png'),
+                 color_code=color_code, explained_variance_ratio=pca_model.explained_variance_ratio_)
     if h5ad_file_path is not None:
         assert cell_frac_file is not None, 'cell_frac_file should be provided if h5ad_file_path is not None'
         print(f'Saving filtered bulk exp to file: {h5ad_file_path}')
