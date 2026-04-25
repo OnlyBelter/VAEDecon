@@ -17,6 +17,16 @@ from ..configs.default_config import VAEDeconConfig, GEPDatasetConfig
 
 logger = logging.getLogger(__name__)
 
+def _cuda_usable() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        x = torch.tensor([0.0], device="cuda")
+        (x + 1).sum().item()
+        return True
+    except Exception:
+        return False
+
 
 class VAEDeconPredictor:
     """Predictor for VAEDecon model"""
@@ -42,7 +52,7 @@ class VAEDeconPredictor:
 
         # Device setup
         if device == 'auto':
-            if torch.cuda.is_available():
+            if _cuda_usable():
                 self.device = 'cuda'
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 self.device = 'mps'
@@ -50,6 +60,12 @@ class VAEDeconPredictor:
                 self.device = 'cpu'
         else:
             self.device = device
+            if self.device == "cuda" and not _cuda_usable():
+                raise RuntimeError(
+                    "Requested device 'cuda' but CUDA kernels cannot run on this machine. "
+                    "This commonly indicates a GPU compute capability mismatch with the installed PyTorch CUDA build. "
+                    "Use device='cpu' or install a compatible PyTorch CUDA build for your GPU."
+                )
 
         logger.info(f"Using device: {self.device}")
 
