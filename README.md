@@ -23,7 +23,7 @@ conda install -c conda-forge hdf5 pytables=3.10.2
 # Install PyTorch
 # if you have a GPU, install pytorch with CUDA support first
 # For linux or Windows, please refer to https://pytorch.org/get-started/previous-versions/
-pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu121
+pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu126
 # For Mac OS
 pip install torch==2.11.0 torchvision==0.26.0
 
