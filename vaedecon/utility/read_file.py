@@ -423,10 +423,14 @@ def read_gene_set(gene_set_file_path: list[str | Path], max_n_genes: int = 300) 
                         genes = genes[:max_n_genes]
                     gs2genes[gs] = genes
                     all_genes.update(genes)
-    gene_set_df = pd.DataFrame(index=list(all_genes), columns=list(gs2genes.keys()))
+    gene_set_df = pd.DataFrame(
+        0.0,
+        index=list(all_genes),
+        columns=list(gs2genes.keys()),
+        dtype=np.float32,
+    )
     for gs, genes in gs2genes.items():
-        gene_set_df.loc[genes, gs] = 1
-    gene_set_df.fillna(0, inplace=True)
+        gene_set_df.loc[genes, gs] = 1.0
     return gene_set_df
 
 

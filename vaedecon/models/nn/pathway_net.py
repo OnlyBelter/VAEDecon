@@ -46,7 +46,7 @@ class EncoderPathNet(EncoderMLP):
 
         super().__init__(args, data_config=data_config, position_encoding=position_encoding)
 
-        self.register_buffer('pathway_mask', torch.tensor(pathway_mask, dtype=torch.float32))
+        self.register_buffer('pathway_mask', torch.as_tensor(pathway_mask, dtype=torch.float32))
 
     def _build_layers(self) -> None:
         # Swap in pathway-specific params for the build step only
@@ -174,4 +174,4 @@ def get_pathway_mask(pathway_file_path: list[str | Path], gene_list_file_path: s
     gene_list_file_path = pd.read_csv(gene_list_file_path, header=None)[0].tolist()  # list of genes in the same order as input x
     # align pathway_mask to gene_list, filling missing genes with all-zero rows
     pathway_mask = pathway_mask.reindex(gene_list_file_path, fill_value=0.0)
-    return pathway_mask.values
+    return pathway_mask.to_numpy(dtype=np.float32, copy=True)
