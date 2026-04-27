@@ -181,14 +181,24 @@ def load_trained_model(model_dir: str) -> Union[AutoModel, BaseAE]:
                              encoder_cls_name_list=model_config.encoders,
                              decoder_cls=model_config.decoders,
                              device="cpu")
-        trained_model = PLTrainer.load_from_checkpoint(
-            checkpoint_path=model_file_path,
-            model=model,
-            training_config=training_config)
+        checkpoint = torch.load(model_file_path, map_location="cpu")
+        state_dict = checkpoint.get("state_dict", checkpoint)
+
+        if any(k.startswith("model._orig_mod.") for k in state_dict.keys()):
+            fixed = {}
+            for k, v in state_dict.items():
+                while k.startswith("model._orig_mod."):
+                    k = "model." + k[len("model._orig_mod."):]
+                fixed[k] = v
+            state_dict = fixed
+
+        pl = PLTrainer(model=model, training_config=training_config)
+        pl.load_state_dict(state_dict, strict=True)
+
         print('Model loaded from checkpoint:', model_file_path)
-        trained_model.eval()
-        trained_model.freeze()
-        return trained_model.model
+        pl.eval()
+        pl.freeze()
+        return pl.model
     except FileNotFoundError:
         # if no .ckpt file found, load the model from the folder
         trained_model = AutoModel.load_from_folder(model_dir)
