@@ -176,6 +176,34 @@ def load_trained_model(model_dir: str) -> Union[AutoModel, BaseAE]:
         training_config = TrainingConfig.from_json_file(training_config_path)
         data_config = DataConfig.from_json_file(data_config_path)
 
+        base_dir = Path(model_dir)
+        if getattr(model_config, "input_gene_list_fp", None) is None or not Path(model_config.input_gene_list_fp).exists():
+            candidate = base_dir / "input_gene_list.txt"
+            if candidate.exists():
+                model_config.input_gene_list_fp = candidate
+        if getattr(model_config, "cell_type_fp", None) is None or not Path(model_config.cell_type_fp).exists():
+            candidate = base_dir / "cell_type_list.txt"
+            if candidate.exists():
+                model_config.cell_type_fp = candidate
+        if getattr(model_config, "gene_mean_std_fp", None) is not None and not Path(model_config.gene_mean_std_fp).exists():
+            candidate = base_dir / Path(model_config.gene_mean_std_fp).name
+            if candidate.exists():
+                model_config.gene_mean_std_fp = candidate
+        if getattr(data_config, "ppi_file_path", None) is not None and not Path(data_config.ppi_file_path).exists():
+            candidate = base_dir / Path(data_config.ppi_file_path).name
+            if candidate.exists():
+                data_config.ppi_file_path = candidate
+        if getattr(data_config, "pathway_file_path", None):
+            fixed_paths = []
+            for p in data_config.pathway_file_path:
+                pth = Path(p)
+                if pth.exists():
+                    fixed_paths.append(pth)
+                    continue
+                candidate = base_dir / pth.name
+                fixed_paths.append(candidate if candidate.exists() else pth)
+            data_config.pathway_file_path = fixed_paths
+
         model = create_model(model_config=model_config,
                              data_config=data_config,
                              encoder_cls_name_list=model_config.encoders,
