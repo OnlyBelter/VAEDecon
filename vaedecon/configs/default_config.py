@@ -697,7 +697,7 @@ class EvaluationConfig:
 
     # Results
     save_reconstructed_gep: bool = True  # Whether to save reconstructed GEPs for all test samples
-    save_cell_type_specific_gep_metrics: bool = False
+    save_cell_type_specific_gep_metrics: bool = True
     save_bulk_gep_input: bool = True  # Whether to save the input bulk GEPs
     save_recon_bulk_gep_conv: bool = True  # Whether to save the reconstructed bulk GEPs
 
