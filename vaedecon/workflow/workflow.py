@@ -322,6 +322,18 @@ def evaluate_model(
     for key, value in pred_all_dict.items():
         if value[0] is not None and len(value[0].shape) > 0:
             pred_all_dict[key] = torch.cat(value, dim=0)
+
+    sc_gep_result_dir = os.path.join(gep_result_dir, "sc_gep")
+    check_dir(Path(sc_gep_result_dir))
+    if "mu" in pred_all_dict and pred_all_dict["mu"] is not None:
+        mu = pred_all_dict["mu"]
+        if isinstance(mu, torch.Tensor):
+            mu = mu.detach().cpu().numpy()
+        if mu.ndim == 1:
+            mu = mu.reshape(-1, 1)
+        mu_columns = [f"mu_{i}" for i in range(mu.shape[1])]
+        mu_df = pd.DataFrame(mu, index=test_set.get_sample_ids(), columns=mu_columns)
+        mu_df.to_csv(os.path.join(sc_gep_result_dir, "mu_embeddings.csv"))
     if pred_cell_prop_all is not None:
         pred_cell_prop_df = pd.DataFrame(
             pred_cell_prop_all,
