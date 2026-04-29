@@ -1125,7 +1125,7 @@ def plot_latent_space(
     # plot latent space
 
     sc_mu_umap = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist,
-                           metric='correlation').fit_transform(sc_mu_df.iloc[:, 0:-1])
+                           metric='correlation', n_jobs=1).fit_transform(sc_mu_df.iloc[:, 0:-1])
     sc_mu_df['UMAP1'] = sc_mu_umap[:, 0]
     sc_mu_df['UMAP2'] = sc_mu_umap[:, 1]
     f, ax = plt.subplots(figsize=(6, 6))
