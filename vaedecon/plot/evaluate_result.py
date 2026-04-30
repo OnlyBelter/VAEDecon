@@ -408,11 +408,12 @@ def compare_y_y_pred_subplot(y_true,
         ax.scatter(all_x_cat, all_y_cat, s=1, alpha=0.65, rasterized=True, color="tab:blue")
         ax.text(
             0.02,
-            0.02,
+            0.98,
             f"{len(show_columns)} samples in total",
             transform=ax.transAxes,
             fontsize=5,
-            verticalalignment="bottom",
+            verticalalignment="top",
+            horizontalalignment="left",
         )
         show_legend = False
     else:
