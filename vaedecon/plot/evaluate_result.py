@@ -326,7 +326,8 @@ def compare_y_y_pred_subplot(y_true,
                              return_metrics: bool = False,
                              figsize: tuple = (8, 8),
                              ax=None,
-                             show_legend=False
+                             show_legend=False,
+                             collapse_columns: bool = False
 ) -> tuple:
     """
     Scatter plot of predicted vs. true cell-type fractions (or GEPs).
@@ -396,13 +397,27 @@ def compare_y_y_pred_subplot(y_true,
         _y = y_true.loc[:, col]  # Ground-truth (y-axis)
         all_x.append(_x)
         all_y.append(_y)
-        ax.scatter(_x, _y, label=col, s=1, alpha=0.65, rasterized=True)
     # ── Identity Diagonal ─────────────────────────────────────────────────────
     # Compute axis limits from the actual data range rather than
     # reading plt.xlim()/plt.ylim() mid-render, which can be unreliable.
     # A small margin (2 %) is added so edge points are not clipped.
     all_x_cat = np.concatenate(all_x)
     all_y_cat = np.concatenate(all_y)
+
+    if collapse_columns:
+        ax.scatter(all_x_cat, all_y_cat, s=1, alpha=0.65, rasterized=True, color="tab:blue")
+        ax.text(
+            0.02,
+            0.02,
+            f"{len(show_columns)} samples in total",
+            transform=ax.transAxes,
+            fontsize=5,
+            verticalalignment="bottom",
+        )
+        show_legend = False
+    else:
+        for i, col in enumerate(show_columns):
+            ax.scatter(all_x[i], all_y[i], label=col, s=1, alpha=0.65, rasterized=True)
     data_min = min(all_x_cat.min(), all_y_cat.min())
     data_max = max(all_x_cat.max(), all_y_cat.max())
     margin = (data_max - data_min) * 0.02
@@ -991,7 +1006,8 @@ def plot_single_cell_gep(
                 figsize=(2, 2),
                 dataset_name='',
                 ax=axes[row_index, col_index],
-                show_legend=True,
+                show_legend=(n_samples <= 3),
+                collapse_columns=(n_samples > 3),
                 figure_format=figure_format,
             )
             metrics_all_cell_types[cell_type] = metrics
@@ -1006,7 +1022,8 @@ def plot_single_cell_gep(
                 figsize=(2, 2),
                 dataset_name='',
                 ax=axes[row_index, col_index],
-                show_legend=True,
+                show_legend=(n_samples <= 3),
+                collapse_columns=(n_samples > 3),
                 figure_format=figure_format,
             )
     # fig.add_subplot(111, frameon=False)
