@@ -477,7 +477,7 @@ class VAE(BaseAE):
             + lo.low_mean_std_weight * low_mean_std_gene_loss
             + beta * kld_z_types
             # + lo.cell_prop * cell_prop_loss
-            # + gamma * repulsion_loss
+            + gamma * repulsion_loss
             # + lo.gene_mean_weight * gm_loss
             # + lo.gene_std_weight * gs_loss
             + lo.z_score_kl_weight * z_score_kl_loss
