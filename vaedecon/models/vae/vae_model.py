@@ -444,8 +444,10 @@ class VAE(BaseAE):
         # g_std_expanded = self.g_std_non_log.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
         g_mean_expanded_log = to_log_space(g_mean_expanded, self.scaling_factor)  # (B, G, C)
         recon_x_all_types_log = to_log_space(recon_x_all_types_cpm, self.scaling_factor)  # (B, G, C)
-        # Compute MSE loss for low-mean/std genes, get a scalar here
-        low_mean_std_gene_loss = F.mse_loss(recon_x_all_types_log[mask], g_mean_expanded_log[mask], reduction="none").mean(dim=-1)
+        mask_f = mask.to(dtype=recon_x_all_types_log.dtype)
+        diff2 = (recon_x_all_types_log - g_mean_expanded_log).pow(2) * mask_f
+        denom = mask_f.sum(dim=(1, 2)).clamp_min(1.0)
+        low_mean_std_gene_loss_per_sample = diff2.sum(dim=(1, 2)) / denom  # (B,)
 
         # --- 3. KL Divergence (Cell Proportions - Dirichlet) ---
         kld_p, cell_prop_loss = self._cell_prop_dirichlet_loss(
@@ -474,7 +476,7 @@ class VAE(BaseAE):
         # --- Total Loss ---
         total_loss = (
             recon_loss
-            + lo.low_mean_std_weight * low_mean_std_gene_loss
+            + lo.low_mean_std_weight * low_mean_std_gene_loss_per_sample
             + beta * kld_z_types
             # + lo.cell_prop * cell_prop_loss
             + gamma * repulsion_loss
@@ -495,7 +497,7 @@ class VAE(BaseAE):
             cell_prop=cell_prop_loss.mean(),
             z_score_reciprocal=(1 / mean_z_scores).mean(),
             z_score_kl_loss=z_score_kl_loss.mean(),
-            low_mean_std_gene_loss=low_mean_std_gene_loss,  # Optional term to prevent collapse of low-mean/std genes
+            low_mean_std_gene_loss=low_mean_std_gene_loss_per_sample.mean(),
         )
 
     # -------------------------------------------------------------------------
@@ -676,7 +678,11 @@ class VAE(BaseAE):
             return torch.zeros(batch_size, device=device)
 
         mu_types_perm = mu_types.permute(0, 2, 1)  # (B, C, L)
-        dist_matrix = torch.cdist(mu_types_perm, mu_types_perm, p=2)  # (B, C, C)
+        x = mu_types_perm  # (B, C, L)
+        x2 = (x * x).sum(dim=-1, keepdim=True)  # (B, C, 1)
+        dist2 = x2 + x2.transpose(1, 2) - 2.0 * (x @ x.transpose(1, 2))  # (B, C, C)
+        dist2 = dist2.clamp_min(0.0)
+        dist_matrix = torch.sqrt(dist2 + EPS)  # (B, C, C)
 
         # Upper triangle mask — count each pair (i, j) only once
         triu_mask = torch.triu(
