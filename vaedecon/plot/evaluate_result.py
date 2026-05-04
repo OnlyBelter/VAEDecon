@@ -930,6 +930,7 @@ def plot_single_cell_gep(
     cell_types: List[str],
     sc_gep_result_dir: str,
     n_samples: int = 3,
+    max_visualize_samples: int = 3,
     figure_format: str = 'svg',
     selected_sample2cell_id_file_path: str = None,
     return_metrics: bool = False,
@@ -958,8 +959,9 @@ def plot_single_cell_gep(
     metrics_all_cell_types: Dict[str, Dict[str, float]] = {}
 
     for i, cell_type in enumerate(cell_types):
-        selected_sample2cell_id_mapping = selected_sample2cell_id.loc[ selected_sample2cell_id['cell_type'] == cell_type,'selected_cell_id'].to_dict()
-        query_ids = list(set(selected_sample2cell_id_mapping.keys()))
+        selected_sample2cell_id_mapping = selected_sample2cell_id.loc[selected_sample2cell_id['cell_type'] == cell_type,'selected_cell_id'].to_dict()
+        query_ids = list(selected_sample2cell_id_mapping.keys())
+        query_ids_visual = query_ids[:max_visualize_samples] if len(query_ids) > max_visualize_samples else query_ids
         query_inx = np.array([sample_ids.index(i) for i in query_ids])
 
         result_file_path = os.path.join(
@@ -985,7 +987,7 @@ def plot_single_cell_gep(
             compare_y_y_pred_plot(
                 y_true=y,
                 y_pred=result_file_path,
-                show_columns=query_ids,
+                show_columns=query_ids_visual,
                 result_file_dir=sc_gep_result_dir,
                 model_name=f"DeSide_{cell_type}",
                 show_metrics=True,
@@ -1000,15 +1002,15 @@ def plot_single_cell_gep(
             fig, ax, metrics = compare_y_y_pred_subplot(
                 y_pred=result_file_path,
                 y_true=y,
-                show_columns=query_ids,
+                show_columns=query_ids_visual,
                 x_label=cell_type,
                 show_metrics=True,
                 return_metrics=True,
                 figsize=(2, 2),
                 dataset_name='',
                 ax=axes[row_index, col_index],
-                show_legend=(n_samples <= 3),
-                collapse_columns=(n_samples > 3),
+                show_legend=True,
+                collapse_columns=False,
                 figure_format=figure_format,
             )
             metrics_all_cell_types[cell_type] = metrics
@@ -1016,15 +1018,15 @@ def plot_single_cell_gep(
             fig, ax = compare_y_y_pred_subplot(
                 y_pred=result_file_path,
                 y_true=y,
-                show_columns=query_ids,
+                show_columns=query_ids_visual,
                 x_label=cell_type,
                 show_metrics=True,
                 return_metrics=False,
                 figsize=(2, 2),
                 dataset_name='',
                 ax=axes[row_index, col_index],
-                show_legend=(n_samples <= 3),
-                collapse_columns=(n_samples > 3),
+                show_legend=True,
+                collapse_columns=False,
                 figure_format=figure_format,
             )
     # fig.add_subplot(111, frameon=False)

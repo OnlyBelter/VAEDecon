@@ -79,12 +79,6 @@ class VAEDeconPredictor:
         self.model = self.model.to(self.device)
         self.model.eval()
 
-        # Read gene list and cell type list
-        # self.input_gene_list_fp = os.path.join(self.model_dir, 'input_gene_list.txt')
-        # self.input_gene_list_fp = self.config.model.input_gene_list_fp
-        # self.cell_type_fp = os.path.join(self.model_dir, 'cell_type_list.txt')
-        # self.cell_type_fp = self.config.model.cell_type_fp
-
         logger.info("Model loaded successfully!")
 
     def predict(
@@ -197,15 +191,6 @@ class VAEDeconPredictor:
             dataset_type='test'
         )
 
-        # # Extract results
-        # true_cell_prop = results.get('true_cell_prop')
-        # pred_cell_prop_fp = results.get('pred_cell_prop_file_path')
-        # cell_types = results.get('cell_types')
-        # pred_a = results.get('pred_a')
-        # cell_prop_result_dir = results.get('cell_prop_result_dir')
-        # gep_result_dir = results.get('gep_result_dir')
-        # test_set_result_dir = results.get('test_set_result_dir')
-
         # Visualizations
         if sample2cell_id_file_path is None or sample2cell_id_file_path == '':
             sample2cell_id_file_path = self.config.data.test_set_sample2cell_id_file_path
@@ -235,6 +220,7 @@ class VAEDeconPredictor:
                 plot_bulk_gep,
                 plot_latent_space,
             )
+            from ..utility.evaluation import calculate_single_cell_gep_metrics_per_sample
         except Exception as e:
             logger.warning(f"Could not import plotting utilities (skipping visualizations): {e}")
             return
@@ -287,20 +273,27 @@ class VAEDeconPredictor:
                     random_seed=42,
                     selected_sample2cell_id_file_path=selected_sample2cell_id_fp
                 )
-
-            metrics_all = plot_single_cell_gep(
+            plot_single_cell_gep(
                 test_set=test_set,
                 cell_types=cell_types,
                 pred_a=pred_a,
                 figure_format=self.figure_format,
                 sc_gep_result_dir=sc_gep_result_dir,
                 n_samples=self.config.evaluation.n_samples,
+                max_visualize_samples=3,
                 selected_sample2cell_id_file_path=selected_sample2cell_id_fp,
-                return_metrics=getattr(self.config.evaluation, 'save_cell_type_specific_gep_metrics', False),
+                return_metrics=False,
             )
-            if metrics_all is not None:
-                pd.DataFrame.from_dict(metrics_all, orient='index').to_csv(
-                    os.path.join(sc_gep_result_dir, "cell_type_specific_gep_metrics.csv")
+            if getattr(self.config.evaluation, 'save_cell_type_specific_gep_metrics', False):
+                metrics_df = calculate_single_cell_gep_metrics_per_sample(
+                    sc_gep_result_dir=sc_gep_result_dir,
+                    cell_types=cell_types,
+                    n_samples=self.config.evaluation.n_samples,
+                    selected_sample2cell_id_file_path=selected_sample2cell_id_fp,
+                )
+                metrics_df.to_csv(
+                    os.path.join(sc_gep_result_dir, "cell_type_specific_gep_metrics.csv"),
+                    index=False,
                 )
 
         # 3. Plot latent space
