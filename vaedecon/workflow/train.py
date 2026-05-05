@@ -266,6 +266,7 @@ class VAEDeconTrainer:
             gene_std_weight_end=self.config.training.gene_std_weight_end,
             gene_std_weight_start=self.config.training.gene_std_weight_start,
             gene_mean_weight_start=self.config.training.gene_mean_weight_start,
+            prog_bar_metrics=self.config.training.prog_bar_metrics,
         )
 
     def _build_gepdataset_config(self) -> GEPDatasetConfig:

@@ -36,6 +36,14 @@ training:
   gene_mean_weight_end: 0.0
   gene_std_weight_start: 0.0
   gene_std_weight_end: 0.0
+  prog_bar_metrics:
+    - loss
+    - kld
+    - recon_loss_conv
+    - low_mean_std_gene_loss
+    - z_score_kl_loss
+    - repulsion_loss
+    - attractor_loss
 
   # Option A: Warmup + Cosine
   #Epoch:   0 ──── warmup_epochs ──────────────── num_epochs
@@ -75,6 +83,7 @@ model:
     cell_prop: 0
     beta: 2  # beta parameter for KLD loss, beta-VAE
     gamma: 0.005  # gamma parameter for the repulsion loss (default 0.005)
+    attractor_weight: 0.0  # weight for the attractor loss (default 0.0)
     # 'ave' means using the average mu and logvar across cell types, 'sep' means calculate kld for each cell type separately
     kld_type: 'ave'
     weighting_gene_by_exp: true  # whether to weight the gene loss by the expression value across cell types (default true)
@@ -82,6 +91,7 @@ model:
     gene_mean_weight: 0  # the weight for the gene mean loss, same as gene_mean_weight_start at the beginning of training, and will be updated according to gene_stat_weight_schedule and gene_stat_weight_schedule_epochs
     gene_std_weight: 0  # the weight for the gene std loss, same as gene_std_weight_start at the beginning of training, and will be updated according to gene_stat_weight_schedule and gene_stat_weight_schedule_epochs
     z_score_kl_weight: 1.0 # constrain the z-scores of all genes across all cell types by a standared normal distribution N(0, 1)
+    low_mean_std_weight: 0  # weight for low mean/std genes to fit pre-calculated gene mean and std
   gnn_n_genes: 12596
   gnn_inter_col_dim: 500
   gnn_embd_col_dim: 30

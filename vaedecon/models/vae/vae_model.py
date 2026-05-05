@@ -40,6 +40,7 @@ class LossTerms:
     gs: torch.Tensor
     repulsion: torch.Tensor
     cell_prop: torch.Tensor
+    attractor: torch.Tensor = torch.tensor(0.0)
     z_score_reciprocal: torch.Tensor = torch.tensor(0.0)  # Optional term for std regularization
     z_score_kl_loss: torch.Tensor = torch.tensor(0.0)  # New KL term for empirical z-score to N(0,1)
     low_mean_std_gene_loss: torch.Tensor = torch.tensor(0.0)  # Optional term to prevent collapse of low-mean/std genes
@@ -130,8 +131,14 @@ class VAE(BaseAE):
 
         # log2(CPM + 1) / scaling_factor space, so we can directly compare with reconstructions without extra transformations.
         # Cell types are expected in the same order as "cell_type_list.txt".
-        g_mean_np = gf_df.loc[:, [c for c in gf_df.columns if c.endswith("avg")]].values
-        g_std_np = gf_df.loc[:, [c for c in gf_df.columns if c.endswith("std")]].values
+        avg_cols = [c for c in gf_df.columns if c.endswith("avg")]
+        std_cols = [c for c in gf_df.columns if c.endswith("std")]
+        self.cell_types = [
+            c[:-4] if c.endswith("_avg") else (c[:-4] if c.endswith(" avg") else c[:-3])
+            for c in avg_cols
+        ]
+        g_mean_np = gf_df.loc[:, avg_cols].values
+        g_std_np = gf_df.loc[:, std_cols].values
 
         g_mean = torch.tensor(g_mean_np, dtype=torch.float32)
         g_std = torch.tensor(g_std_np, dtype=torch.float32)
@@ -340,6 +347,7 @@ class VAE(BaseAE):
             gene_mean_loss=loss_terms.gm,
             gene_std_loss=loss_terms.gs,
             repulsion_loss=loss_terms.repulsion,
+            attractor_loss=loss_terms.attractor,
             cell_prop_loss=loss_terms.cell_prop,
             z_score_kl_loss=loss_terms.z_score_kl_loss,
             low_mean_std_gene_loss=loss_terms.low_mean_std_gene_loss,
@@ -398,6 +406,7 @@ class VAE(BaseAE):
         lo = self.model_config.loss_coefficient
         beta = lo.beta
         gamma = lo.gamma
+        attractor_weight = lo.attractor_weight
         z_score_reg_weight = lo.z_score_reg_weight
 
         # Optional regularization to prevent std from collapsing to zero.
@@ -473,6 +482,11 @@ class VAE(BaseAE):
             gamma=gamma,
         )                                                                                   # (B,)
 
+        attractor_loss = self._attractor_loss(
+            mu_types=mu_types,
+            attractor_weight=attractor_weight,
+        )                                                                                   # (B,)
+
         # --- Total Loss ---
         total_loss = (
             recon_loss
@@ -480,6 +494,7 @@ class VAE(BaseAE):
             + beta * kld_z_types
             # + lo.cell_prop * cell_prop_loss
             + gamma * repulsion_loss
+            + attractor_weight * attractor_loss
             # + lo.gene_mean_weight * gm_loss
             # + lo.gene_std_weight * gs_loss
             + lo.z_score_kl_weight * z_score_kl_loss
@@ -495,6 +510,7 @@ class VAE(BaseAE):
             gs=gs_loss,
             repulsion=repulsion_loss.mean(),
             cell_prop=cell_prop_loss.mean(),
+            attractor=attractor_loss.mean(),
             z_score_reciprocal=(1 / mean_z_scores).mean(),
             z_score_kl_loss=z_score_kl_loss.mean(),
             low_mean_std_gene_loss=low_mean_std_gene_loss_per_sample.mean(),
@@ -698,6 +714,46 @@ class VAE(BaseAE):
         repulsion_loss = hinge.sum(dim=(1, 2)) / n_pairs  # (B,)
 
         return repulsion_loss
+
+    def _attractor_loss(
+        self,
+        mu_types: torch.Tensor,
+        attractor_weight: float,
+    ) -> torch.Tensor:
+        """
+        Attractor loss: penalize distance between cancer cells and non-cancer cells.
+        → zero gradient when distance is already small.
+        → linear penalty when distance is too large.
+        Returns per-sample vector, shape (B,).
+        
+        Args:
+            mu_types : (B, L, C)  cell-type centroid means in latent space.
+            attractor_weight : float       loss weight; if 0, returns zeros immediately.
+        """
+        batch_size, latent_dim, n_cell_types = mu_types.shape
+        device = mu_types.device
+
+        if attractor_weight == 0 or n_cell_types < 2:
+            return torch.zeros((batch_size,), device=device)
+
+        cell_types = getattr(self, "cell_types", None)
+        if not cell_types or len(cell_types) != n_cell_types or "Cancer Cells" not in cell_types:
+            return torch.zeros((batch_size,), device=device)
+
+        cancer_index = cell_types.index("Cancer Cells")
+        non_cancer_indices = [i for i in range(n_cell_types) if i != cancer_index]
+        if not non_cancer_indices:
+            return torch.zeros((batch_size,), device=device)
+
+        mu_cancer = mu_types[:, :, cancer_index]  # (B, L)
+        mu_non_cancer = mu_types[:, :, non_cancer_indices]  # (B, L, K)
+
+        mu_cancer = F.normalize(mu_cancer, p=2, dim=1, eps=EPS)
+        mu_non_cancer = F.normalize(mu_non_cancer, p=2, dim=1, eps=EPS)
+
+        cos_sim = (mu_non_cancer * mu_cancer.unsqueeze(-1)).sum(dim=1)  # (B, K)
+        loss = (1.0 - cos_sim).mean(dim=1)  # (B,)
+        return loss
 
     # =========================================================================
     # Gene Weighting

@@ -11,6 +11,7 @@ from pydantic import Field, field_validator, model_validator, BaseModel
 class LossCoefficient(BaseModel):
     beta: float = 2.0
     gamma: float = 0.005
+    attractor_weight: float = 0.0
     kld_type: Literal["ave", "sep"] = "ave"   # your code uses 'sep', not 'sum'
     cell_prop: float = 0.0
     weighting_gene_by_exp: bool = True
@@ -25,6 +26,7 @@ class LossCoefficient(BaseModel):
     @field_validator(
         "beta",
         "gamma",
+        "attractor_weight",
         "cell_prop",
         "gene_mean_weight",
         "gene_std_weight",
@@ -36,7 +38,17 @@ class LossCoefficient(BaseModel):
     )
     @classmethod
     def non_negative(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and v < 0:
+        if v is None:
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if s == "" or s.lower() in ("none", "null"):
+                return None
+            try:
+                v = float(s)
+            except ValueError as e:
+                raise ValueError("must be a number") from e
+        if v < 0:
             raise ValueError("must be non-negative")
         return v
 
@@ -216,6 +228,18 @@ class TrainingConfig(BaseTrainerConfig):
     gene_mean_weight_end: float = 0.0
     gene_std_weight_start: float = 0.0
     gene_std_weight_end: float = 1.0
+    prog_bar_metrics: List[str] = Field(
+        default_factory=lambda: [
+            "loss",
+            "kld",
+            "recon_loss_conv",
+            "low_mean_std_gene_loss",
+            "z_score_kl_loss",
+            "repulsion_loss",
+            "attractor_loss",
+        ],
+        description="Metric keys from model output to show in the progress bar/logging loop.",
+    )
 
 
 class ModelConfig(BaseModelConfig):
