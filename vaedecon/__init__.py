@@ -19,6 +19,9 @@ from .configs.default_config import (
     EvaluationConfig
 )
 
+from .workflow import (train_vaedecon, predict_vaedecon,
+                       VAEDeconPredictor, VAEDeconTrainer)
+
 __all__ = [
     'VAEDeconConfig',
     'DataConfig',
