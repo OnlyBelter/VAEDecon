@@ -668,21 +668,22 @@ class VAE(BaseAE):
     def _repulsion_loss(
             mu_types: torch.Tensor,
             gamma: float,
-            margin: float = 1.0,
+            margin: float = 0.0,
     ) -> torch.Tensor:
         """
         Repulsion between cell-type centroids in latent space.
-        Uses a margin-based hinge penalty: only penalizes pairs of centroids
-        whose Euclidean distance is smaller than `margin`.
+        Uses a cosine-similarity hinge penalty to encourage orthogonality between
+        different cell-type embeddings.
 
-        Loss per pair:  max(0, margin - d(i, j))
-        → zero gradient when centroids are already far enough apart.
-        → linear penalty when centroids are too close.
+        Loss per pair:  max(0, cos(i, j) - margin)
+        → zero gradient when cosine similarity is <= margin (default 0).
+        → linear penalty when embeddings become more similar (cosine increases).
 
         Args:
             mu_types : (B, L, C)  cell-type centroid means in latent space.
             gamma    : float       loss weight; if 0, returns zeros immediately.
-            margin   : float       minimum desired distance between any two centroids.
+            margin   : float       maximum allowed cosine similarity between any
+                                  two centroids (default 0.0 for orthogonality).
 
         Returns:
             repulsion_loss : (B,)  per-sample repulsion scalar.
@@ -693,20 +694,17 @@ class VAE(BaseAE):
         if gamma == 0 or n_cell_types < 2:
             return torch.zeros(batch_size, device=device)
 
-        mu_types_perm = mu_types.permute(0, 2, 1)  # (B, C, L)
-        x = mu_types_perm  # (B, C, L)
-        x2 = (x * x).sum(dim=-1, keepdim=True)  # (B, C, 1)
-        dist2 = x2 + x2.transpose(1, 2) - 2.0 * (x @ x.transpose(1, 2))  # (B, C, C)
-        dist2 = dist2.clamp_min(0.0)
-        dist_matrix = torch.sqrt(dist2 + EPS)  # (B, C, C)
+        x = mu_types.permute(0, 2, 1)  # (B, C, L)
+        x = F.normalize(x, p=2, dim=2, eps=EPS)
+        cos_matrix = x @ x.transpose(1, 2)  # (B, C, C)
 
         # Upper triangle mask — count each pair (i, j) only once
         triu_mask = torch.triu(
             torch.ones(n_cell_types, n_cell_types, device=device), diagonal=1
         ).unsqueeze(0)  # (1, C, C)
 
-        # Hinge penalty: penalize only pairs closer than margin
-        hinge = torch.clamp(margin - dist_matrix, min=0.0)  # (B, C, C)
+        # Hinge penalty: penalize only pairs with cosine similarity above margin
+        hinge = torch.clamp(cos_matrix - margin, min=0.0)  # (B, C, C)
         hinge = hinge * triu_mask  # upper triangle only
 
         # Normalize by number of pairs so loss scale is independent of C
@@ -721,38 +719,26 @@ class VAE(BaseAE):
         attractor_weight: float,
     ) -> torch.Tensor:
         """
-        Attractor loss: penalize distance between cancer cells and non-cancer cells.
-        → zero gradient when distance is already small.
-        → linear penalty when distance is too large.
+        Attractor loss: L2-ball constraint around the origin for cell-type embeddings.
+        → zero gradient when embeddings are inside the ball.
+        → linear penalty when embeddings are outside the ball.
         Returns per-sample vector, shape (B,).
         
         Args:
             mu_types : (B, L, C)  cell-type centroid means in latent space.
             attractor_weight : float       loss weight; if 0, returns zeros immediately.
         """
-        batch_size, latent_dim, n_cell_types = mu_types.shape
+        batch_size, _, n_cell_types = mu_types.shape
         device = mu_types.device
 
         if attractor_weight == 0 or n_cell_types < 2:
             return torch.zeros((batch_size,), device=device)
 
-        cell_types = getattr(self, "cell_types", None)
-        if not cell_types or len(cell_types) != n_cell_types or "Cancer Cells" not in cell_types:
-            return torch.zeros((batch_size,), device=device)
-
-        cancer_index = cell_types.index("Cancer Cells")
-        non_cancer_indices = [i for i in range(n_cell_types) if i != cancer_index]
-        if not non_cancer_indices:
-            return torch.zeros((batch_size,), device=device)
-
-        mu_cancer = mu_types[:, :, cancer_index]  # (B, L)
-        mu_non_cancer = mu_types[:, :, non_cancer_indices]  # (B, L, K)
-
-        mu_cancer = F.normalize(mu_cancer, p=2, dim=1, eps=EPS)
-        mu_non_cancer = F.normalize(mu_non_cancer, p=2, dim=1, eps=EPS)
-
-        cos_sim = (mu_non_cancer * mu_cancer.unsqueeze(-1)).sum(dim=1)  # (B, K)
-        loss = (1.0 - cos_sim).mean(dim=1)  # (B,)
+        x = mu_types.permute(0, 2, 1)  # (B, C, L)
+        l2_norm = torch.linalg.vector_norm(x, ord=2, dim=2)  # (B, C)
+        radius = 1.0
+        violation = torch.clamp(l2_norm - radius, min=0.0)  # (B, C)
+        loss = violation.mean(dim=1)  # (B,)
         return loss
 
     # =========================================================================
