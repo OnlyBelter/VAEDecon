@@ -22,6 +22,8 @@ class LossCoefficient(BaseModel):
     z_score_reg_weight: float = 0.0
     z_score_kl_weight: float = 0.0  # Weight for KL divergence between empirical Z-score distribution and N(0,1)
     low_mean_std_weight: float = 1.0  # Weight for MSE regularization on low mean/std genes
+    low_mean_threshold: float = 2.0
+    low_std_threshold: float = 1.0
 
     @field_validator(
         "beta",
@@ -34,6 +36,8 @@ class LossCoefficient(BaseModel):
         "z_score_reg_weight",
         "z_score_kl_weight",
         "low_mean_std_weight",
+        "low_mean_threshold",
+        "low_std_threshold",
         mode="before"
     )
     @classmethod

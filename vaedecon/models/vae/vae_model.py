@@ -164,6 +164,52 @@ class VAE(BaseAE):
             )
         self.register_buffer("w", w)
 
+    def save(
+        self,
+        model_dir: str,
+        training_config: Optional["TrainingConfig"] = None,
+        data_config: Optional[DataConfig] = None,
+    ):
+        super().save(model_dir=model_dir, training_config=training_config, data_config=data_config)
+
+        try:
+            lo = self.model_config.loss_coefficient
+            low_mean_threshold = getattr(lo, "low_mean_threshold", 2.0)
+            low_std_threshold = getattr(lo, "low_std_threshold", 1.0)
+
+            low_mean_mask = self.g_mean_non_log < low_mean_threshold
+            low_std_mask = self.g_std_non_log < low_std_threshold
+            low_mean_or_std_mask = low_mean_mask | low_std_mask
+
+            low_mean_counts = low_mean_mask.sum(dim=0).to(torch.int64).cpu().tolist()
+            low_std_counts = low_std_mask.sum(dim=0).to(torch.int64).cpu().tolist()
+            low_mean_or_std_counts = low_mean_or_std_mask.sum(dim=0).to(torch.int64).cpu().tolist()
+
+            n_genes = int(self.g_mean_non_log.shape[0])
+            n_cell_types = int(self.g_mean_non_log.shape[1])
+            cell_type_labels = (
+                self.cell_types
+                if isinstance(getattr(self, "cell_types", None), list) and len(self.cell_types) == n_cell_types
+                else [f"cell_type_{i}" for i in range(n_cell_types)]
+            )
+
+            df = pd.DataFrame(
+                {
+                    "cell_type": cell_type_labels,
+                    "low_mean_count": low_mean_counts,
+                    "low_std_count": low_std_counts,
+                    "low_mean_or_std_count": low_mean_or_std_counts,
+                    "n_genes": n_genes,
+                    "low_mean_threshold": low_mean_threshold,
+                    "low_std_threshold": low_std_threshold,
+                }
+            )
+            out_fp = os.path.join(model_dir, "low_mean_std_gene_counts.csv")
+            df.to_csv(out_fp, index=False)
+            logger.info("Saved low-mean/low-std gene counts to %s", out_fp)
+        except Exception as e:
+            logger.warning("Failed to save low-mean/low-std gene counts: %s", e)
+
     # =========================================================================
     # Forward
     # =========================================================================
@@ -443,10 +489,12 @@ class VAE(BaseAE):
         else:
             z_score_kl_loss = torch.tensor(0.0, device=device)
 
-        # Identify genes with low mean (< 2) or low std (< 1),
+        # Identify genes with low mean or low std,
         # whose z-scores are unreliable for KL regularization.
         # Replace their predicted values with the reference mean plus small Gaussian noise.
-        mask = (self.g_mean_non_log < 2) | (self.g_std_non_log < 1)  # (G, C)
+        low_mean_threshold = getattr(lo, "low_mean_threshold", 2.0)
+        low_std_threshold = getattr(lo, "low_std_threshold", 1.0)
+        mask = (self.g_mean_non_log < low_mean_threshold) | (self.g_std_non_log < low_std_threshold)  # (G, C)
         mask = mask.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
 
         g_mean_expanded = self.g_mean_non_log.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
