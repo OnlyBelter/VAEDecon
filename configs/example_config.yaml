@@ -3,7 +3,9 @@
 data:
   data_dir: './datasets/'
   scaling_by_constant: true
-  remove_low_var_genes: false
+  remove_low_var_genes: true
+  scaling_factor: 20.0  #  Default scaling divisor when scaling_by_constant is True.
+  min_var: 1.0  # Minimum variance threshold for gene filtering (if remove_low_var_genes is True).
   force_reprocess: false
   # Training set, test set, and sct_gep_file (for finding true sampled GEPs).
   sct_file_path: [ './datasets/generated_sc_dataset_12ds_n_base100_all_subtypes/simu_bulk_exp_SCT_POS_N100_test_log2cpm1p.h5ad' ]
