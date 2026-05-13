@@ -272,6 +272,10 @@ class PLTrainer(L.LightningModule):
 
         steps = getattr(cfg, "gene_stat_weight_schedule_steps", None)
         if steps is None or steps <= 0:
+            # gene_stat_weight_schedule_epochs controls how many epochs the linear schedule spans.
+            # It is converted into a step budget via: steps = epochs * num_training_batches.
+            # If unset/non-positive, it falls back to warmup_epochs; if that is also non-positive,
+            # the schedule is disabled (no per-batch updates to gene_mean_weight/gene_std_weight).
             epochs = getattr(cfg, "gene_stat_weight_schedule_epochs", None)
             if epochs is None or epochs <= 0:
                 epochs = getattr(cfg, "warmup_epochs", 0)

@@ -33,6 +33,7 @@ training:
   # ── Warmup settings (NEW) ──────────────────────────────────────
   warmup_epochs: 50              # epochs to ramp up from ~0 → peak lr
   gene_stat_weight_schedule: "linear"
+  # schedule length in epochs and only applied to gene_mean_weight and gene_std_weight
   gene_stat_weight_schedule_epochs: 50
   gene_mean_weight_start: 0.0
   gene_mean_weight_end: 0.0
