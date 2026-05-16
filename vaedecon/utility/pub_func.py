@@ -31,6 +31,12 @@ console = logging.StreamHandler()
 logger.addHandler(console)
 logger.setLevel(logging.INFO)
 
+from .hierarchical_encoding import HIERARCHICAL_ENCODING, SORTED_CELL_TYPES
+
+sorted_cell_types = SORTED_CELL_TYPES
+
+hierarchical_encoding = HIERARCHICAL_ENCODING
+
 default_core_marker_genes = {'Cancer Cells': ['KRT19', 'KRT18', 'KRT8', 'EPCAM'],
                              'CD4 T': ['BATF', 'ICOS', 'CD4', 'IL7R', 'FOXP3', 'TIGIT'],
                              'CD8 T': ['CD8A', 'CD8B'],
@@ -43,10 +49,6 @@ default_core_marker_genes = {'Cancer Cells': ['KRT19', 'KRT18', 'KRT8', 'EPCAM']
                              'Mast Cells': ['CPA3', 'HPGDS', 'GATA2'],
                              'NK': ['GNLY', 'NKG7', 'KLRD1'],
                              'Neutrophils': ['CSF3R', 'CXCR2', 'FPR1', 'SLC25A37']}
-
-sorted_cell_types = ['B Cells', 'CD4 T', 'CD8 T', 'Cancer Cells', 'DC', 'Endothelial Cells',
-                     'Fibroblasts', 'Macrophages', 'Mast Cells', 'NK', 'Neutrophils']
-
 
 def get_inx2cell_type(cell_type_list: list = None) -> dict:
     if cell_type_list is None:

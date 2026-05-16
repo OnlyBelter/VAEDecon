@@ -19,6 +19,7 @@ from ...configs import DataConfig, ModelConfig
 from ...data.datasets import DatasetOutput
 from ...models.base import BaseAE, reparameterize_gaussian, ModelOutput, BaseDecoder, BaseEncoder, EPS
 from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor, non_log2cpm_tensor
+from ...utility.hierarchical_encoding import HIERARCHICAL_ENCODING
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ class LossTerms:
     z_score_reciprocal: torch.Tensor = torch.tensor(0.0)  # Optional term for std regularization
     z_score_kl_loss: torch.Tensor = torch.tensor(0.0)  # New KL term for empirical z-score to N(0,1)
     low_mean_std_gene_loss: torch.Tensor = torch.tensor(0.0)  # Optional term to prevent collapse of low-mean/std genes
+    hierarchical_code: torch.Tensor = torch.tensor(0.0)
 
 
 class VAE(BaseAE):
@@ -117,6 +119,7 @@ class VAE(BaseAE):
 
         # Logits to weight anchors (Learnable parameters to associate cell types with anchors)
         self.logits = nn.Parameter(torch.zeros(n_cell_types, latent_dim))
+        self.hierarchical_code_head = nn.Linear(latent_dim, 8)
 
         # ---------------------------------------------------------------------
         # --- Gene Statistics Setup ---
@@ -152,6 +155,21 @@ class VAE(BaseAE):
         self.register_buffer("g_std", g_std)
         self.register_buffer("g_mean_non_log", g_mean_non_log)
         self.register_buffer("g_std_non_log", g_std_non_log)
+
+        hierarchical_targets = []
+        missing = []
+        for ct in self.cell_types:
+            code = HIERARCHICAL_ENCODING.get(ct)
+            if code is None:
+                missing.append(ct)
+                code = [0] * 8
+            hierarchical_targets.append(code)
+        if missing:
+            raise ValueError(f"Missing hierarchical_encoding for cell types: {missing}")
+        self.register_buffer(
+            "hierarchical_code_targets",
+            torch.tensor(hierarchical_targets, dtype=torch.float32),
+        )
 
         # ---------------------------------------------------------------------
         # --- Gene Weights Calculation ---
@@ -394,6 +412,7 @@ class VAE(BaseAE):
             gene_std_loss=loss_terms.gs,
             repulsion_loss=loss_terms.repulsion,
             attractor_loss=loss_terms.attractor,
+            hierarchical_code_loss=loss_terms.hierarchical_code,
             cell_prop_loss=loss_terms.cell_prop,
             z_score_kl_loss=loss_terms.z_score_kl_loss,
             low_mean_std_gene_loss=loss_terms.low_mean_std_gene_loss,
@@ -535,6 +554,12 @@ class VAE(BaseAE):
             attractor_weight=attractor_weight,
         )                                                                                   # (B,)
 
+        hierarchical_code_weight = lo.hierarchical_code_weight
+        hierarchical_code_loss = self._hierarchical_code_loss(
+            mu_types=mu_types,
+            hierarchical_code_weight=hierarchical_code_weight,
+        )                                                                                   # (B,)
+
         # --- Total Loss ---
         total_loss = (
             recon_loss
@@ -543,6 +568,7 @@ class VAE(BaseAE):
             # + lo.cell_prop * cell_prop_loss
             + gamma * repulsion_loss
             + attractor_weight * attractor_loss
+            + hierarchical_code_weight * hierarchical_code_loss
             # + lo.gene_mean_weight * gm_loss
             # + lo.gene_std_weight * gs_loss
             + lo.z_score_kl_weight * z_score_kl_loss
@@ -559,6 +585,7 @@ class VAE(BaseAE):
             repulsion=repulsion_loss.mean(),
             cell_prop=cell_prop_loss.mean(),
             attractor=attractor_loss.mean(),
+            hierarchical_code=hierarchical_code_loss.mean(),
             z_score_reciprocal=(1 / mean_z_scores).mean(),
             z_score_kl_loss=z_score_kl_loss.mean(),
             low_mean_std_gene_loss=low_mean_std_gene_loss_per_sample.mean(),
@@ -788,6 +815,27 @@ class VAE(BaseAE):
         violation = torch.clamp(l2_norm - radius, min=0.0)  # (B, C)
         loss = violation.mean(dim=1)  # (B,)
         return loss
+
+    def _hierarchical_code_loss(
+        self,
+        mu_types: torch.Tensor,
+        hierarchical_code_weight: float,
+    ) -> torch.Tensor:
+        batch_size, _, n_cell_types = mu_types.shape
+        device = mu_types.device
+
+        if hierarchical_code_weight == 0 or n_cell_types < 1:
+            return torch.zeros((batch_size,), device=device)
+
+        targets = getattr(self, "hierarchical_code_targets", None)
+        if targets is None or targets.shape[0] != n_cell_types:
+            raise ValueError("hierarchical_code_targets is missing or has wrong shape")
+
+        x = mu_types.permute(0, 2, 1)  # (B, C, L)
+        logits = self.hierarchical_code_head(x)  # (B, C, 8)
+        y = targets.to(device=device).unsqueeze(0).expand(batch_size, -1, -1)  # (B, C, 8)
+        loss_mat = F.binary_cross_entropy_with_logits(logits, y, reduction="none")  # (B, C, 8)
+        return loss_mat.mean(dim=(1, 2))
 
     # =========================================================================
     # Gene Weighting

@@ -87,6 +87,7 @@ model:
     beta: 2  # beta parameter for KLD loss, beta-VAE
     gamma: 0.005  # gamma parameter for the repulsion loss (default 0.005)
     attractor_weight: 0.0  # weight for the attractor loss (default 0.0)
+    hierarchical_code_weight: 0.0
     # 'ave' means using the average mu and logvar across cell types, 'sep' means calculate kld for each cell type separately
     kld_type: 'ave'
     weighting_gene_by_exp: true  # whether to weight the gene loss by the expression value across cell types (default true)

@@ -24,6 +24,7 @@ class LossCoefficient(BaseModel):
     low_mean_std_weight: float = 1.0  # Weight for MSE regularization on low mean/std genes
     low_mean_threshold: float = 2.0
     low_std_threshold: float = 1.0
+    hierarchical_code_weight: float = 0.0
 
     @field_validator(
         "beta",
@@ -38,6 +39,7 @@ class LossCoefficient(BaseModel):
         "low_mean_std_weight",
         "low_mean_threshold",
         "low_std_threshold",
+        "hierarchical_code_weight",
         mode="before"
     )
     @classmethod
