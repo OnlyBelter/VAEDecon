@@ -45,9 +45,8 @@ training:
     - recon_loss_conv
     - low_mean_std_gene_loss
     - z_score_kl_loss
-    - hierarchical_code_loss
-    # - repulsion_loss
-    # - attractor_loss
+    - repulsion_loss
+    - attractor_loss
 
   # Option A: Warmup + Cosine
   #Epoch:   0 ──── warmup_epochs ──────────────── num_epochs
