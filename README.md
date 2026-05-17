@@ -100,3 +100,51 @@ See `configs/example_config.yaml` for a complete example.
 Check the `examples/` directory for complete scripts:
 - `examples/train_example.py`: Various ways to configure and run training.
 - `examples/inference_example.py`: Batch prediction, visualization, and TCGA analysis.
+
+## Hierarchical Structure of cell types
+
+```mermaid
+flowchart LR
+    %% Root node
+    TME["Tumor Microenvironment (TME)"] --> Lym["Lymphoid lineage"]
+    TME --> Mye["Myeloid lineage"]
+    TME --> Stro["Stromal lineage"]
+    TME --> Cancer["Tumor compartment"]
+
+    %% Lymphoid branch
+    Lym --> NK["NK"]
+    Lym --> B_cells["B cells"]
+    B_cells --> Non_plasma_B["Non-plasma B cells"]
+    B_cells --> Plasma_B["Plasma B cells"]
+
+    Lym --> T_cells["T cells"]
+    T_cells --> CD4_T["CD4 T cells"]
+    T_cells --> CD8_T_GZMK["GZMK+ CD8 T cells"]
+    T_cells --> CD8_T_eff["Effector CD8 T cells"]
+    T_cells --> DN_T["Double-negative-like T cells"]
+
+    %% Myeloid branch
+    Mye --> Mono["Mononuclear phagocytes"]
+    Mono --> Monocytes["Monocytes"]
+    Mono --> Macrophages["Macrophages"]
+
+    Mye --> DC["Dendritic cells (DC)"]
+    Mye --> Mast_cells["Mast cells"]
+    Mye --> Neutrophils["Neutrophils"]
+
+    %% Stromal branch
+    Stro --> Endo["Endothelial cells"]
+    Stro --> Fib["Fibroblasts"]
+    Fib --> CAFs["Cancer-associated fibroblasts (CAFs)"]
+    Fib --> Myofibroblasts["Myofibroblasts"]
+
+    %% Tumor branch
+    Cancer --> Cancer_cells["Cancer cells"]
+
+    %% Styling
+    style TME fill:#f9f,stroke:#333,stroke-width:2px
+    style Lym fill:#bbf,stroke:#333
+    style Mye fill:#bfb,stroke:#333
+    style Stro fill:#fbb,stroke:#333
+    style Cancer fill:#ffb,stroke:#333
+```
