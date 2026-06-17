@@ -2,7 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] - 2026-04-09
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project aims to follow [Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+## [0.4.1] - 2026-05-17
+
+### Changed
+- **Dependencies**: Updated `anndata` from `0.8.0` to `0.12.16`, and
+  corrected the `pandas` pin from `3.0.2` to `2.3.3`
+
+## [0.4.0] - 2026-04-09
 
 ### Added
 - **Per-celltype z-score KL regularization**: Add new regularization term that constrains empirical z-score distribution of each cell type to N(0, 1) after predicting GEPs in TPM/CPM space
