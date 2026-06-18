@@ -467,6 +467,104 @@ def get_gene_mean_std_across_cell_types(sct_dataset_fp: str, result_fp, gene_lis
         ct2ave.to_csv(result_fp, float_format='%.6f')
 
 
+def compute_gene_mean_std_from_pooled_sc_h5ad(
+    pooled_sc_h5ad_fp: str,
+    result_fp: str | Path,
+    gene_list_fp: str | Path,
+    cell_type_fp: str | Path,
+    cell_type_col: str = "cell_type",
+    cell_subtype_col: str = "cell_subtype",
+    sample_size: int = 1000,
+    seed: int = 123,
+    scaling_by_constant: bool = True,
+    log2p1: bool = True,
+    scaling_factor: float = 20.0,
+) -> None:
+    gene_list = pd.read_csv(gene_list_fp, index_col=0, header=None).index.tolist()
+    cell_type_list = pd.read_csv(cell_type_fp, index_col=0, header=None).index.tolist()
+
+    sct_obj = ReadH5AD(pooled_sc_h5ad_fp)
+    h5ad = sct_obj.get_h5ad()
+
+    obs = h5ad.obs.copy()
+    if cell_type_col in obs.columns:
+        obs[cell_type_col] = obs[cell_type_col].astype(str)
+    if cell_subtype_col in obs.columns:
+        obs[cell_subtype_col] = obs[cell_subtype_col].astype(str)
+
+    if cell_type_col not in obs.columns and cell_subtype_col not in obs.columns:
+        raise ValueError(
+            f"Neither '{cell_type_col}' nor '{cell_subtype_col}' found in adata.obs"
+        )
+
+    type_values = (
+        set(obs[cell_type_col].dropna().astype(str).unique().tolist())
+        if cell_type_col in obs.columns
+        else set()
+    )
+    subtype_values = (
+        set(obs[cell_subtype_col].dropna().astype(str).unique().tolist())
+        if cell_subtype_col in obs.columns
+        else set()
+    )
+
+    rng = np.random.default_rng(seed)
+    missing_cell_types = []
+    ct2ave = {}
+
+    for cell_type in cell_type_list:
+        if cell_type in type_values:
+            cell_mask = obs[cell_type_col] == cell_type
+        elif cell_type in subtype_values:
+            cell_mask = obs[cell_subtype_col] == cell_type
+        else:
+            missing_cell_types.append(cell_type)
+            continue
+        cell_ids = obs.index[cell_mask].astype(str).tolist()
+        n_cells_total = len(cell_ids)
+        if n_cells_total == 0:
+            missing_cell_types.append(cell_type)
+            continue
+
+        n_cells_used = min(sample_size, n_cells_total)
+        selected_ids = rng.choice(cell_ids, size=n_cells_used, replace=False).tolist()
+        x = h5ad[selected_ids, :]
+
+        x_values = x.X.toarray() if hasattr(x.X, "toarray") else np.asarray(x.X)
+        x_df = pd.DataFrame(x_values, index=x.obs.index, columns=x.var.index)
+
+        exp_obj = ReadExp(x_df, exp_type='log_space')
+        exp_obj.align_with_gene_list(gene_list=gene_list, fill_not_exist=True, pathway_list=True)
+        exp_obj.to_tpm()
+        exp = exp_obj.get_exp()
+
+        exp_avg = exp.mean(axis=0)
+        exp_std = exp.std(axis=0)
+        ct2ave[cell_type + '_avg'] = exp_avg
+        ct2ave[cell_type + '_std'] = exp_std
+
+    if missing_cell_types:
+        raise ValueError(
+            "Missing cell types in pooled scRNA-seq dataset (not found in either "
+            f"'{cell_type_col}' or '{cell_subtype_col}'): {missing_cell_types}"
+        )
+
+    ct2ave = pd.DataFrame(ct2ave)
+    if list(ct2ave.index) != gene_list:
+        ct2ave = ct2ave.reindex(gene_list)
+        if ct2ave.isna().any().any():
+            raise RuntimeError("Gene alignment failed: missing values after reindexing to training gene list.")
+
+    if log2p1 is True:
+        ct2ave = np.log2(ct2ave + 1)
+    if scaling_by_constant is True:
+        ct2ave = ct2ave / scaling_factor
+
+    result_fp = Path(result_fp)
+    result_fp.parent.mkdir(parents=True, exist_ok=True)
+    ct2ave.to_csv(result_fp, float_format='%.6f')
+
+
 def load_or_compute_gene_mean_std(
     sct_gep_fp: str,
     gene_list: list[str],

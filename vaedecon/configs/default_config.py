@@ -87,6 +87,31 @@ class DataConfig(BaseConfig):
     test_set_sample2cell_id_file_path: str | Path = ''
     sct_gep_file_path: str | Path = ''  # Used for query sampled sctGEPs in test set
 
+    gene_mean_std_source: Literal["sct_gep", "pooled_sc"] = Field(
+        default="sct_gep",
+        description="Source of the reference gene mean/std statistics used in training.",
+    )
+    pooled_sc_h5ad_path: str | Path = Field(
+        default="",
+        description="Path to the pooled scRNA-seq .h5ad used when gene_mean_std_source='pooled_sc'.",
+    )
+    pooled_sc_cell_type_col: str = Field(
+        default="cell_type",
+        description="Column name in pooled scRNA-seq .h5ad .obs that stores string cell type labels.",
+    )
+    pooled_sc_cell_subtype_col: str = Field(
+        default="cell_subtype",
+        description="Optional column name in pooled scRNA-seq .h5ad .obs that stores string cell subtype labels.",
+    )
+    pooled_sc_sample_size: int = Field(
+        default=1000,
+        description="Maximum number of single cells to sample per cell type when computing gene mean/std from pooled scRNA-seq.",
+    )
+    pooled_sc_seed: int = Field(
+        default=123,
+        description="Random seed for pooled scRNA-seq cell sampling when computing gene mean/std.",
+    )
+
     # Additional files
     pred_cell_prop_file_path: Optional[str] = None
     cell_type2ave_exp_file_path: Optional[str] = None
@@ -107,6 +132,15 @@ class DataConfig(BaseConfig):
         if v is not None and not v.exists():
             raise ValueError(f"PPI file not found: {v}")
         return v
+
+    @model_validator(mode="after")
+    def validate_gene_mean_std_source(self):
+        if self.gene_mean_std_source == "pooled_sc":
+            if not self.pooled_sc_h5ad_path or str(self.pooled_sc_h5ad_path).strip() == "":
+                raise ValueError("pooled_sc_h5ad_path must be set when gene_mean_std_source='pooled_sc'")
+            if self.pooled_sc_sample_size <= 0:
+                raise ValueError("pooled_sc_sample_size must be > 0")
+        return self
 
     # Processing options
     # Scale input GEP data by a constant factor after log transformation (range of the input data will be (0, 1)).

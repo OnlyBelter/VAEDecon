@@ -16,7 +16,7 @@ from ..models.nn import EncoderMLP, DecoderMLP
 # from ..models.vae import VAEConfig
 from ..trainers import BaseTrainerL
 from ..utility import set_output_dir, log_message, set_fig_style
-from ..utility import load_or_compute_gene_mean_std, load_lightning_metrics
+from ..utility import load_or_compute_gene_mean_std, load_lightning_metrics, compute_gene_mean_std_from_pooled_sc_h5ad
 from .workflow import create_model, train_model, save_metadata
 from ..configs.default_config import VAEDeconConfig, TrainingConfig, ModelConfig, GEPDatasetConfig
 
@@ -160,16 +160,30 @@ class VAEDeconTrainer:
         """
         logger.info("Computing gene statistics...")
 
-        load_or_compute_gene_mean_std(
-            sct_gep_fp=self.config.data.sct_gep_file_path,
-            gene_list=dataset.gene_list,
-            cell_type_fp=self.config.model.cell_type_fp,
-            input_gene_list_fp=self.config.model.input_gene_list_fp,
-            scaling_by_constant=self.config.data.scaling_by_constant,
-            scaling_factor=self.config.data.scaling_factor,
-            log_fn=log_message,
-            out_fp=gene_mean_std_fp,
-        )
+        if self.config.data.gene_mean_std_source == "pooled_sc":
+            compute_gene_mean_std_from_pooled_sc_h5ad(
+                pooled_sc_h5ad_fp=str(self.config.data.pooled_sc_h5ad_path),
+                result_fp=gene_mean_std_fp,
+                gene_list_fp=self.config.model.input_gene_list_fp,
+                cell_type_fp=self.config.model.cell_type_fp,
+                cell_type_col=self.config.data.pooled_sc_cell_type_col,
+                cell_subtype_col=self.config.data.pooled_sc_cell_subtype_col,
+                sample_size=self.config.data.pooled_sc_sample_size,
+                seed=self.config.data.pooled_sc_seed,
+                scaling_by_constant=self.config.data.scaling_by_constant,
+                scaling_factor=self.config.data.scaling_factor,
+            )
+        else:
+            load_or_compute_gene_mean_std(
+                sct_gep_fp=self.config.data.sct_gep_file_path,
+                gene_list=dataset.gene_list,
+                cell_type_fp=self.config.model.cell_type_fp,
+                input_gene_list_fp=self.config.model.input_gene_list_fp,
+                scaling_by_constant=self.config.data.scaling_by_constant,
+                scaling_factor=self.config.data.scaling_factor,
+                log_fn=log_message,
+                out_fp=gene_mean_std_fp,
+            )
 
     def _create_model(self, model_config: ModelConfig):
         """Instantiate the VAE model using the cached ModelConfig."""
@@ -194,12 +208,21 @@ class VAEDeconTrainer:
         input_dim = dataset.data.shape[1]  # same as n_genes in each GEP
         n_genes = input_dim
         scaling_factor = self.config.data.scaling_factor
-        suffix = (
-            f"gene_mean_std_log2p1_scaled_by_{scaling_factor}_{len(training_file_paths)}training_files_{n_genes}genes.csv"
-            if self.config.data.scaling_by_constant
-            else f"gene_mean_std_log2p1_{len(training_file_paths)}training_files_{n_genes}genes.csv"
-        )
-        gene_mean_std_fp = (
+        if self.config.data.gene_mean_std_source == "pooled_sc":
+            if self.config.data.scaling_by_constant:
+                gene_mean_std_fp = (
+                    Path(self.config.model.model_dir)
+                    / f"gene_mean_std_log2p1_scaled_by_{scaling_factor}.csv"
+                )
+            else:
+                gene_mean_std_fp = Path(self.config.model.model_dir) / "gene_mean_std_log2p1.csv"
+        else:
+            suffix = (
+                f"gene_mean_std_log2p1_scaled_by_{scaling_factor}_{len(training_file_paths)}training_files_{n_genes}genes.csv"
+                if self.config.data.scaling_by_constant
+                else f"gene_mean_std_log2p1_{len(training_file_paths)}training_files_{n_genes}genes.csv"
+            )
+            gene_mean_std_fp = (
                 Path(self.config.data.sct_gep_file_path).parent / suffix
             )
 

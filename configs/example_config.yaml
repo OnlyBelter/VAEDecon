@@ -7,6 +7,12 @@ data:
   scaling_factor: 20.0  #  Default scaling divisor when scaling_by_constant is True.
   min_var: 1.0  # Minimum variance threshold for gene filtering (if remove_low_var_genes is True).
   force_reprocess: false
+  gene_mean_std_source: "sct_gep"  # "sct_gep" or "pooled_sc"
+  pooled_sc_h5ad_path: ""  # Required when gene_mean_std_source is "pooled_sc"
+  pooled_sc_cell_type_col: "cell_type"
+  pooled_sc_cell_subtype_col: "cell_subtype"
+  pooled_sc_sample_size: 1000
+  pooled_sc_seed: 123
   # Training set, test set, and sct_gep_file (for finding true sampled GEPs).
   sct_file_path: [ './datasets/generated_sc_dataset_12ds_n_base100_all_subtypes/simu_bulk_exp_SCT_POS_N100_test_log2cpm1p.h5ad' ]
   simu_bulk_file_path: [ './datasets/simulated_bulk_cell_dataset_subtypes_all_range/segment_12ds_no_filtering_n_base100_median_gep/simu_bulk_exp_Mixed_N1K_segment_without_filtering_log2cpm1p.h5ad' ]

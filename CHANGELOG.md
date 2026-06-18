@@ -5,7 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+
+## [0.4.2] - 2026-06-18
+
+### Added
+- **Pooled scRNA-seq gene statistics workflow**: Add a configurable
+  `gene_mean_std_source` switch so training can compute reference gene mean and
+  standard deviation on-the-fly from a pooled scRNA-seq `.h5ad` instead of only
+  using the legacy sctGEP workflow
+- **Pooled-sc configuration options**: Add `pooled_sc_h5ad_path`,
+  `pooled_sc_cell_type_col`, `pooled_sc_cell_subtype_col`,
+  `pooled_sc_sample_size`, and `pooled_sc_seed`
+- **Model-directory gene-stat export**: Save pooled-sc-derived reference gene
+  statistics into the model directory as
+  `gene_mean_std_log2p1_scaled_by_<scaling_factor>.csv`
+
+### Changed
+- **Gene-stat alignment**: Align pooled scRNA-seq gene statistics to the
+  training gene list and training cell type order before loading them into the
+  VAE
+- **Cell type lookup**: Support both `cell_type` and `cell_subtype` columns
+  when resolving training labels from the pooled scRNA-seq reference dataset
+
+### Fixed
+- **Subtype-backed pooled-sc stats**: Fix failures when training labels such as
+  `Non-plasma B cells`, `CD8 T effector`, `CAFs`, and `Myofibroblasts` exist in
+  the pooled reference under `cell_subtype` rather than `cell_type`
+- **Deterministic pooled-sc sampling**: Restore seeded sampling after the new
+  pooled-sc workflow refactor
 
 ## [0.4.1] - 2026-05-17
 
