@@ -7,11 +7,10 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-import pandas as pd
 import torch
 
 from ..data import GEPDataset, find_sct_gep_of_bulk_sample
-from ..utility import log_message, check_dir
+from ..utility import check_dir
 from ..workflow import load_trained_model, evaluate_model
 from ..configs.default_config import VAEDeconConfig, GEPDatasetConfig
 
@@ -26,6 +25,12 @@ def _cuda_usable() -> bool:
         return True
     except Exception:
         return False
+
+
+def _infer_result_set_name(data_file_path: str | Path) -> str:
+    """Use the input file stem as the inference result subfolder name."""
+    stem = Path(str(data_file_path)).stem.strip()
+    return stem or "test_set"
 
 
 class VAEDeconPredictor:
@@ -109,8 +114,13 @@ class VAEDeconPredictor:
         check_dir(Path(output_dir))
 
         logger.info(f"Processing data from: {data_file_path}")
+        result_set_name = _infer_result_set_name(data_file_path)
+        logger.info(f"Inference result subfolder: {result_set_name}")
 
-        gep_dataset_config = self._build_gepdataset_config(data_file_path=data_file_path)
+        gep_dataset_config = self._build_gepdataset_config(
+            data_file_path=data_file_path,
+            dataset_type=dataset_type,
+        )
         dataset = GEPDataset(config=gep_dataset_config)
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
@@ -128,6 +138,7 @@ class VAEDeconPredictor:
             val_batch_size=val_batch_size,
             save_reconstructed_geps=self.save_reconstructed_gep,
             dataset_type=dataset_type,
+            result_set_name=result_set_name,
         )
 
         logger.info("Inference completed!")

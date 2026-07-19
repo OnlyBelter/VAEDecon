@@ -244,6 +244,7 @@ def evaluate_model(
         val_batch_size: int = None,
         save_reconstructed_geps: bool = False,
         dataset_type: str = 'training',  # or test, tcga
+        result_set_name: str = "test_set",
 ) -> Dict[str, Any]:
     """Evaluates the trained model on the test set."""
     if device == "cuda" and not _cuda_usable():
@@ -251,7 +252,7 @@ def evaluate_model(
             "Requested device 'cuda' but CUDA kernels cannot run on this machine. "
             "Update your NVIDIA driver or install a compatible PyTorch build, or use device='cpu'."
         )
-    test_set_result_dir = os.path.join(result_dir, "test_set")
+    test_set_result_dir = os.path.join(result_dir, result_set_name)
     check_dir(Path(test_set_result_dir))
     cell_prop_result_dir = os.path.join(test_set_result_dir, "cell_prop")
     gep_result_dir = os.path.join(test_set_result_dir, "gep")
