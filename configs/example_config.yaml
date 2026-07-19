@@ -30,6 +30,8 @@ training:
   n_early_stopping_patience: 15
   devices: 1
   device: 'auto'
+  train_dataloader_num_workers: 0
+  eval_dataloader_num_workers: 0
   optimizer_cls: 'Adam'
   steps_saving: 0
   debug_model: false
