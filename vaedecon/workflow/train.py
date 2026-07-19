@@ -273,6 +273,8 @@ class VAEDeconTrainer:
             learning_rate=self.config.training.learning_rate,
             per_device_train_batch_size=self.config.training.batch_size,
             per_device_eval_batch_size=self.config.training.batch_size,
+            train_dataloader_num_workers=self.config.training.train_dataloader_num_workers,
+            eval_dataloader_num_workers=self.config.training.eval_dataloader_num_workers,
             steps_saving=self.config.training.steps_saving,
             num_epochs=self.config.training.num_epochs,
             optimizer_cls=self.config.training.optimizer_cls,
