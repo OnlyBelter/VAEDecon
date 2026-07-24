@@ -12,7 +12,7 @@ import torch
 from ..data import GEPDataset, find_sct_gep_of_bulk_sample
 from ..utility import check_dir
 from ..workflow import load_trained_model, evaluate_model
-from ..configs.default_config import VAEDeconConfig, GEPDatasetConfig
+from ..configs.default_config import VAEDeconConfig, GEPDatasetConfig, TestSetConfig
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,11 @@ def _infer_result_set_name(data_file_path: str | Path) -> str:
     """Use the input file stem as the inference result subfolder name."""
     stem = Path(str(data_file_path)).stem.strip()
     return stem or "test_set"
+
+
+def _configured_test_sets(config: VAEDeconConfig) -> Dict[str, TestSetConfig]:
+    """Return configured test sets from the loaded config."""
+    return dict(getattr(config.data, "test_sets", {}) or {})
 
 
 class VAEDeconPredictor:
@@ -215,6 +220,45 @@ class VAEDeconPredictor:
 
         return results
 
+    def predict_configured_test_sets(
+            self,
+            output_dir: Optional[str] = None,
+            dataset_type: str = 'test',
+            visualize: bool = True,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Run inference for all configured test sets in the config."""
+        configured_sets = _configured_test_sets(self.config)
+        if not configured_sets:
+            raise ValueError(
+                "No configured test sets were found in config.data.test_sets, "
+                "and no legacy test_set_file_path was available."
+            )
+
+        all_results: Dict[str, Dict[str, Any]] = {}
+        for test_name, test_cfg in configured_sets.items():
+            logger.info("Running inference for configured test set: %s", test_name)
+            if visualize:
+                result = self.predict_and_visualize(
+                    data_file_path=str(test_cfg.test_set_file_path),
+                    output_dir=output_dir,
+                    sample2cell_id_file_path=(
+                        str(test_cfg.test_set_sample2cell_id_file_path)
+                        if test_cfg.test_set_sample2cell_id_file_path else None
+                    ),
+                    sct_gep_file_path=(
+                        str(test_cfg.sct_gep_file_path)
+                        if test_cfg.sct_gep_file_path else None
+                    ),
+                )
+            else:
+                result = self.predict(
+                    data_file_path=str(test_cfg.test_set_file_path),
+                    output_dir=output_dir,
+                    dataset_type=dataset_type,
+                )
+            all_results[test_name] = result
+        return all_results
+
     def _generate_visualizations(
             self,
             results: Dict[str, Any],
@@ -345,13 +389,13 @@ class VAEDeconPredictor:
 
 def predict_vaedecon(
         model_dir: str | Path,
-        data_file_path: str | Path,
+        data_file_path: Optional[str | Path] = None,
         output_dir: Optional[str] = None,
         config: Optional[VAEDeconConfig] = None,
         device: str = 'auto',
         visualize: bool = True,
         **kwargs
-) -> Dict[str, Any]:
+) -> Dict[str, Any] | Dict[str, Dict[str, Any]]:
     """
     Run inference (prediction) using a trained VAEDecon model.
 
@@ -361,8 +405,10 @@ def predict_vaedecon(
     Parameters:
         model_dir (str | Path):
             Directory containing the trained model (checkpoint and config).
-        data_file_path (str | Path):
-            Path to the input bulk expression file (.h5ad or .csv).
+        data_file_path (Optional[str | Path]):
+            Path to one input bulk expression file (.h5ad or .csv). If omitted,
+            VAEDecon runs inference for all configured entries under
+            `config.data.test_sets`.
         output_dir (Optional[str]):
             Directory to save prediction results. Defaults to a 'test_results' folder
             relative to the model directory.
@@ -409,13 +455,19 @@ def predict_vaedecon(
     """
     gc.collect()
     torch.cuda.empty_cache()
-    data_file_path = str(data_file_path)
     predictor = VAEDeconPredictor(
         model_dir=model_dir,
         config=config,
         device=device
     )
 
+    if data_file_path is None or str(data_file_path).strip() == '':
+        return predictor.predict_configured_test_sets(
+            output_dir=output_dir,
+            visualize=visualize,
+        )
+
+    data_file_path = str(data_file_path)
     if visualize:
         return predictor.predict_and_visualize(
             data_file_path=data_file_path,
@@ -428,3 +480,24 @@ def predict_vaedecon(
             output_dir=output_dir,
             **kwargs
         )
+
+
+def predict_configured_test_sets(
+        model_dir: str | Path,
+        config: VAEDeconConfig,
+        output_dir: Optional[str] = None,
+        device: str = 'auto',
+        visualize: bool = True,
+) -> Dict[str, Dict[str, Any]]:
+    """Run inference for all configured test sets in `config.data.test_sets`."""
+    gc.collect()
+    torch.cuda.empty_cache()
+    predictor = VAEDeconPredictor(
+        model_dir=model_dir,
+        config=config,
+        device=device,
+    )
+    return predictor.predict_configured_test_sets(
+        output_dir=output_dir,
+        visualize=visualize,
+    )

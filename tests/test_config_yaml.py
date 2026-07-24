@@ -16,6 +16,55 @@ def test_example_config_resource_loads(tmp_path: Path):
     p.write_text(text)
     loaded = VAEDeconConfig.from_yaml(p)
     assert loaded is not None
+    assert "Test_set1" in loaded.data.test_sets
+
+
+def test_legacy_single_test_set_populates_test_sets():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "test_set_file_path": "./datasets/test_set1.h5ad",
+                "sct_gep_file_path": "./datasets/sct_gep.h5ad",
+                "test_set_sample2cell_id_file_path": "./datasets/test_set1_sample2cell.csv",
+            }
+        }
+    )
+    assert len(loaded.data.test_sets) == 1
+    only = next(iter(loaded.data.test_sets.values()))
+    assert str(only.test_set_file_path) == "./datasets/test_set1.h5ad"
+    assert str(only.sct_gep_file_path) == "./datasets/sct_gep.h5ad"
+    assert (
+        str(only.test_set_sample2cell_id_file_path)
+        == "./datasets/test_set1_sample2cell.csv"
+    )
+
+
+def test_named_test_sets_backfill_legacy_fields():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "test_sets": {
+                    "Test_set1": {
+                        "test_set_file_path": "./datasets/test_set1.h5ad",
+                        "sct_gep_file_path": "./datasets/sct_gep_1.h5ad",
+                        "test_set_sample2cell_id_file_path": "./datasets/test_set1_sample2cell.csv",
+                    },
+                    "Test_set2": {
+                        "test_set_file_path": "./datasets/test_set2.h5ad",
+                        "sct_gep_file_path": "./datasets/sct_gep_2.h5ad",
+                        "test_set_sample2cell_id_file_path": "./datasets/test_set2_sample2cell.csv",
+                    },
+                }
+            }
+        }
+    )
+    assert list(loaded.data.test_sets.keys()) == ["Test_set1", "Test_set2"]
+    assert str(loaded.data.test_set_file_path) == "./datasets/test_set1.h5ad"
+    assert str(loaded.data.sct_gep_file_path) == "./datasets/sct_gep_1.h5ad"
+    assert (
+        str(loaded.data.test_set_sample2cell_id_file_path)
+        == "./datasets/test_set1_sample2cell.csv"
+    )
 
 
 def test_duplicate_yaml_keys_raise(tmp_path: Path):

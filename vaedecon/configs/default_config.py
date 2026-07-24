@@ -73,6 +73,20 @@ class LossCoefficient(BaseModel):
                 self.gene_std_weight = self.gene_mean_std_weight
         return self
 
+
+class TestSetConfig(BaseModel):
+    """Per-test-set file bundle used during inference and visualization."""
+
+    test_set_file_path: str | Path = ''
+    test_set_sample2cell_id_file_path: str | Path = ''
+    sct_gep_file_path: str | Path = ''
+
+    @model_validator(mode="after")
+    def validate_required_test_file(self):
+        if not self.test_set_file_path or str(self.test_set_file_path).strip() == "":
+            raise ValueError("test_set_file_path must be set for each configured test set")
+        return self
+
 # @dataclass
 class DataConfig(BaseConfig):
     """dataset configuration"""
@@ -86,6 +100,7 @@ class DataConfig(BaseConfig):
     test_set_file_path: str | Path = ''
     test_set_sample2cell_id_file_path: str | Path = ''
     sct_gep_file_path: str | Path = ''  # Used for query sampled sctGEPs in test set
+    test_sets: Dict[str, TestSetConfig] = Field(default_factory=dict)
 
     gene_mean_std_source: Literal["sct_gep", "pooled_sc"] = Field(
         default="sct_gep",
@@ -140,6 +155,37 @@ class DataConfig(BaseConfig):
                 raise ValueError("pooled_sc_h5ad_path must be set when gene_mean_std_source='pooled_sc'")
             if self.pooled_sc_sample_size <= 0:
                 raise ValueError("pooled_sc_sample_size must be > 0")
+        return self
+
+    @model_validator(mode="after")
+    def reconcile_test_sets(self):
+        normalized_test_sets: Dict[str, TestSetConfig] = {}
+        for name, cfg in self.test_sets.items():
+            clean_name = str(name).strip()
+            if not clean_name:
+                raise ValueError("Configured test set names must be non-empty")
+            normalized_test_sets[clean_name] = cfg
+
+        if normalized_test_sets:
+            self.test_sets = normalized_test_sets
+            first = next(iter(self.test_sets.values()))
+            if not self.test_set_file_path or str(self.test_set_file_path).strip() == "":
+                self.test_set_file_path = first.test_set_file_path
+            if not self.test_set_sample2cell_id_file_path or str(self.test_set_sample2cell_id_file_path).strip() == "":
+                self.test_set_sample2cell_id_file_path = first.test_set_sample2cell_id_file_path
+            if not self.sct_gep_file_path or str(self.sct_gep_file_path).strip() == "":
+                self.sct_gep_file_path = first.sct_gep_file_path
+            return self
+
+        if self.test_set_file_path and str(self.test_set_file_path).strip() != "":
+            legacy_name = Path(str(self.test_set_file_path)).stem.strip() or "test_set"
+            self.test_sets = {
+                legacy_name: TestSetConfig(
+                    test_set_file_path=self.test_set_file_path,
+                    test_set_sample2cell_id_file_path=self.test_set_sample2cell_id_file_path,
+                    sct_gep_file_path=self.sct_gep_file_path,
+                )
+            }
         return self
 
     # Processing options
