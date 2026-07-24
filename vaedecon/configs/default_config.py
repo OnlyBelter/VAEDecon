@@ -167,25 +167,33 @@ class DataConfig(BaseConfig):
             normalized_test_sets[clean_name] = cfg
 
         if normalized_test_sets:
-            self.test_sets = normalized_test_sets
-            first = next(iter(self.test_sets.values()))
+            first = next(iter(normalized_test_sets.values()))
+            object.__setattr__(self, "test_sets", normalized_test_sets)
             if not self.test_set_file_path or str(self.test_set_file_path).strip() == "":
-                self.test_set_file_path = first.test_set_file_path
+                object.__setattr__(self, "test_set_file_path", first.test_set_file_path)
             if not self.test_set_sample2cell_id_file_path or str(self.test_set_sample2cell_id_file_path).strip() == "":
-                self.test_set_sample2cell_id_file_path = first.test_set_sample2cell_id_file_path
+                object.__setattr__(
+                    self,
+                    "test_set_sample2cell_id_file_path",
+                    first.test_set_sample2cell_id_file_path,
+                )
             if not self.sct_gep_file_path or str(self.sct_gep_file_path).strip() == "":
-                self.sct_gep_file_path = first.sct_gep_file_path
+                object.__setattr__(self, "sct_gep_file_path", first.sct_gep_file_path)
             return self
 
         if self.test_set_file_path and str(self.test_set_file_path).strip() != "":
             legacy_name = Path(str(self.test_set_file_path)).stem.strip() or "test_set"
-            self.test_sets = {
-                legacy_name: TestSetConfig(
-                    test_set_file_path=self.test_set_file_path,
-                    test_set_sample2cell_id_file_path=self.test_set_sample2cell_id_file_path,
-                    sct_gep_file_path=self.sct_gep_file_path,
-                )
-            }
+            object.__setattr__(
+                self,
+                "test_sets",
+                {
+                    legacy_name: TestSetConfig(
+                        test_set_file_path=self.test_set_file_path,
+                        test_set_sample2cell_id_file_path=self.test_set_sample2cell_id_file_path,
+                        sct_gep_file_path=self.sct_gep_file_path,
+                    )
+                },
+            )
         return self
 
     # Processing options

@@ -30,7 +30,7 @@ class BaseConfig(BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
-        self.name = self.__class__.__name__
+        object.__setattr__(self, "name", self.__class__.__name__)
 
     # ── Deserialisation ───────────────────────────────────────────────────
     @classmethod
