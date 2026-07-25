@@ -11,6 +11,7 @@ from ..utility import check_dir, non_log2log_cpm
 from ..data import GEPDataset
 from ..models import AutoModel, BaseAE
 from ..models.base import BaseEncoder
+from ..models.base import has_usable_labels
 from ..models.gnn import EncoderSGNN
 from ..models.nn import (EncoderMLP, DecoderMLP, EncoderHybrid, EncoderResMLP, DecoderResMLP,
                          PositionalEncoding, GeneTransformerEncoder, EncoderPathNet)
@@ -31,6 +32,17 @@ def _cuda_usable() -> bool:
         return True
     except Exception:
         return False
+
+
+def _cell_prop_batch_to_numpy(cell_prop: Union[torch.Tensor, np.ndarray, list]) -> np.ndarray:
+    """Normalize one batch of cell proportions to a 2D numpy array."""
+    if isinstance(cell_prop, torch.Tensor):
+        array = cell_prop.detach().cpu().numpy()
+    else:
+        array = np.asarray(cell_prop)
+    if array.ndim == 1:
+        array = array.reshape(1, -1)
+    return array
 
 
 def create_model(
@@ -286,34 +298,19 @@ def evaluate_model(
                 batch = [v.to(device) if isinstance(v, torch.Tensor) else v for v in batch]
 
             pred_a = trained_model(batch)  # A ModelOutput including 11 elements
-            pred_cell_prop = []
+            pred_cell_prop = None
             if model_config.predict_cell_prop:
-                # pred_a = trained_model(batch)
-                # pred_a = trained_model(test_set_loader)
-                pred_cell_prop = pred_a["pred_cell_prop"]
-                pred_cell_prop = pred_cell_prop.squeeze().detach().cpu().numpy()
+                pred_cell_prop = _cell_prop_batch_to_numpy(pred_a["pred_cell_prop"])
             else:
-                # if 'labels' in batch.keys() and batch['labels']:
-                if 'labels' in batch and batch['labels'] is not None:
-                    labels = batch['labels']
-                    if isinstance(labels, list) or isinstance(labels, torch.Tensor):
-                        if len(labels) > 0:
-                            labels = torch.tensor(labels)
-                            pred_cell_prop = labels.squeeze().detach().cpu().numpy()
+                labels = batch.get('labels') if isinstance(batch, dict) else None
+                if has_usable_labels(labels):
+                    pred_cell_prop = _cell_prop_batch_to_numpy(labels)
 
             pred_cell_prop_list.append(pred_cell_prop)
             pred_results.append(pred_a)
-    if pred_cell_prop_all is None and pred_cell_prop_list[0] is not None:
-        first_item = pred_cell_prop_list[0]
-        is_valid = False
-        if isinstance(first_item, np.ndarray):
-            is_valid = pred_cell_prop_list[0].size > 0
-        elif isinstance(first_item, torch.Tensor):
-            is_valid = first_item.numel() > 0
-        elif isinstance(first_item, list):
-            is_valid = len(first_item) > 0
-        if is_valid:
-            pred_cell_prop_all = np.concatenate(pred_cell_prop_list, axis=0)
+    valid_pred_cell_props = [arr for arr in pred_cell_prop_list if arr is not None and arr.size > 0]
+    if pred_cell_prop_all is None and valid_pred_cell_props:
+        pred_cell_prop_all = np.concatenate(valid_pred_cell_props, axis=0)
     pred_all_dict = {}
     for a_result in pred_results:
         for key, value in a_result.items():

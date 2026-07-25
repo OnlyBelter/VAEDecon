@@ -17,7 +17,15 @@ from torch.distributions import Dirichlet, kl_divergence
 
 from ...configs import DataConfig, ModelConfig
 from ...data.datasets import DatasetOutput
-from ...models.base import BaseAE, reparameterize_gaussian, ModelOutput, BaseDecoder, BaseEncoder, EPS
+from ...models.base import (
+    BaseAE,
+    reparameterize_gaussian,
+    ModelOutput,
+    BaseDecoder,
+    BaseEncoder,
+    EPS,
+    has_usable_labels,
+)
 from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor, non_log2cpm_tensor
 from ...utility.hierarchical_encoding import HIERARCHICAL_ENCODING
 
@@ -246,8 +254,10 @@ class VAE(BaseAE):
         batch_size = x.shape[0]
 
         y = inputs.get("labels")
-        if y is not None:
+        if has_usable_labels(y):
             y = y.to(device)
+        else:
+            y = None
 
         # ================== Random Gene Masking ==================
         # Only apply masking during training, not validation/testing.
@@ -473,6 +483,18 @@ class VAE(BaseAE):
         gamma = lo.gamma
         attractor_weight = lo.attractor_weight
         z_score_reg_weight = lo.z_score_reg_weight
+        labels_available = has_usable_labels(y)
+
+        if (
+            self.training
+            and self.model_config.predict_cell_prop
+            and lo.cell_prop > 0
+            and not labels_available
+        ):
+            raise ValueError(
+                "predict_cell_prop=True with loss_coefficient.cell_prop > 0 "
+                "requires cell-fraction labels during training."
+            )
 
         # Optional regularization to prevent std from collapsing to zero.
         # Add 1 / mean_z_scores to the loss to encourage the model to keep larger z-scores (and thus std) from collapsing.
@@ -565,7 +587,7 @@ class VAE(BaseAE):
             recon_loss
             + lo.low_mean_std_weight * low_mean_std_gene_loss_per_sample
             + beta * kld_z_types
-            # + lo.cell_prop * cell_prop_loss
+            + lo.cell_prop * cell_prop_loss
             + gamma * repulsion_loss
             + attractor_weight * attractor_loss
             + hierarchical_code_weight * hierarchical_code_loss
@@ -681,7 +703,7 @@ class VAE(BaseAE):
         kld_p = torch.zeros(batch_size, device=device)
         cell_prop_loss = torch.zeros(batch_size, device=device)
 
-        if y is not None and self.model_config.predict_cell_prop and dd_alpha is not None:
+        if has_usable_labels(y) and self.model_config.predict_cell_prop and dd_alpha is not None:
             # KL(Posterior || Prior), prior is Uniform Dirichlet(alpha=1)
             prior_alpha = torch.ones_like(dd_alpha)
             prior_dist = Dirichlet(prior_alpha)

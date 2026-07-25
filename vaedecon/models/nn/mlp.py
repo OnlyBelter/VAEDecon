@@ -9,7 +9,8 @@ import torch.nn.functional as F
 
 from ...models.base import (ModelOutput, reparameterize_dirichlet,
                             LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
-                            BaseEncoder, BaseDecoder, PositionalEncoding)
+                            BaseEncoder, BaseDecoder, PositionalEncoding,
+                            has_usable_labels)
 from ...configs import ModelConfig, DataConfig
 
 
@@ -124,7 +125,7 @@ class EncoderMLP(BaseEncoder):
             output['dd_alpha'] = dd_alpha
             # Pass device explicitly to random generator if needed, or rely on tensor ops
             cell_prop = reparameterize_dirichlet(dd_alpha, device=x.device)
-        elif y is not None:
+        elif has_usable_labels(y):
             cell_prop = y
         else:
             cell_prop = None

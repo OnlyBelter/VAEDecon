@@ -95,6 +95,19 @@ def reparameterize_dirichlet(alpha, device: torch.device):
     return p
 
 
+def has_usable_labels(labels: Any) -> bool:
+    """Return True when labels are present and contain at least one value."""
+    if labels is None:
+        return False
+    if isinstance(labels, torch.Tensor):
+        return labels.numel() > 0
+    if isinstance(labels, np.ndarray):
+        return labels.size > 0
+    if isinstance(labels, (list, tuple)):
+        return len(labels) > 0
+    return False
+
+
 def set_seed(seed: int):
     """
     Functions setting the seed for reproducibility on ``random``, ``numpy``,

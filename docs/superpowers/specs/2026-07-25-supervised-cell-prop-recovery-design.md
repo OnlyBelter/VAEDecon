@@ -29,8 +29,7 @@ What is already present:
 
 What is incomplete or inconsistent:
 
-- the supervised cell proportion loss is computed but not added into the final
-  total loss
+- the supervised cell proportion loss is computed but not added into the final total loss
 - missing-label handling is inconsistent across encoders
 - config validation does not clearly define the requirements for
   `predict_cell_prop=True`
@@ -155,6 +154,7 @@ When `predict_cell_prop=True`:
 When labels are also available:
 
 - save comparison outputs and metrics against the true cell proportions
+- plot the predicted cell proportions against the true cell proportions and report the correlation coefficient, RMSE, and CCC as metrics
 
 The workflow should avoid writing ground-truth labels into
 `predicted_cell_prop.csv` under the prediction-enabled path.
@@ -181,7 +181,7 @@ Files:
 - `vaedecon/models/nn/mlp.py`
 - `vaedecon/models/nn/res_mlp.py`
 - `vaedecon/models/nn/transformer.py`
-- `vaedecon/models/nn/fused_mlp_gnn.py`
+- `vaedecon/models/nn/fused_mlp_gnn.py` (deprecated, no need to update this file)
 
 Needed changes:
 

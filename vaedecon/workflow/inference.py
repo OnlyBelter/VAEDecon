@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+import pandas as pd
 import torch
 
 from ..data import GEPDataset, find_sct_gep_of_bulk_sample
@@ -270,7 +271,7 @@ class VAEDeconPredictor:
 
         try:
             from ..plot import (
-                compare_y_y_pred_plot,
+                compare_y_y_pred_subplot,
                 plot_single_cell_gep,
                 plot_bulk_gep,
                 plot_latent_space,
@@ -290,20 +291,33 @@ class VAEDeconPredictor:
         test_set = results.get('test_set')
 
         # 1. Plot cell proportions comparison
-        if self.config.evaluation.plot_cell_proportions and pred_cell_prop_fp:
+        if (
+            self.config.evaluation.plot_cell_proportions
+            and pred_cell_prop_fp
+            and isinstance(true_cell_prop, pd.DataFrame)
+            and not true_cell_prop.empty
+        ):
             logger.info("Plotting cell proportions...")
-            compare_y_y_pred_plot(
+            _, _, metrics = compare_y_y_pred_subplot(
                 y_true=true_cell_prop,
                 y_pred=pred_cell_prop_fp,
                 show_columns=cell_types,
                 result_file_dir=cell_prop_result_dir,
-                model_name='VAEDecon',
+                dataset_name='VAEDecon',
                 show_metrics=self.config.evaluation.show_metrics,
-                y_label='y_pred',
-                rasterized=self.config.evaluation.rasterized,
+                x_label='Predicted cell proportion',
+                y_label='True cell proportion',
                 figsize=self.config.evaluation.figsize,
                 figure_format=self.figure_format,
+                return_metrics=True,
+                collapse_columns=False,
             )
+            pd.DataFrame([metrics]).to_csv(
+                os.path.join(cell_prop_result_dir, "prediction_metrics.csv"),
+                index=False,
+            )
+        elif self.config.evaluation.plot_cell_proportions and pred_cell_prop_fp:
+            logger.info("Skipping cell proportion comparison plot because no true cell fractions are available.")
 
         # 2. Plot single-cell gene expression profiles, comparing purified cell-type-specific GEPs with original sctGEPs
         if (self.config.evaluation.plot_single_cell_gep and

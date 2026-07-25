@@ -689,6 +689,11 @@ class ModelConfig(BaseModelConfig):
         """Ensure cell proportion prediction settings are consistent."""
         cell_prop_weight = self.loss_coefficient.cell_prop
 
+        if cell_prop_weight < 0:
+            raise ValueError(
+                f"loss_coefficient['cell_prop'] must be >= 0, got {cell_prop_weight}."
+            )
+
         if cell_prop_weight > 0 and not self.predict_cell_prop:
             raise ValueError(
                 f"loss_coefficient['cell_prop'] = {cell_prop_weight} > 0 "
@@ -700,7 +705,7 @@ class ModelConfig(BaseModelConfig):
             import warnings
             warnings.warn(
                 "predict_cell_prop=True but loss_coefficient['cell_prop']=0. "
-                "Cell proportion predictions will not affect training."
+                "The prediction head will not receive direct supervision during training."
             )
 
         return self
