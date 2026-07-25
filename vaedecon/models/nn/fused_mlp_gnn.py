@@ -6,7 +6,7 @@ import logging
 import warnings
 
 from ...configs import ModelConfig
-from ...models.base import (ModelOutput, reparameterize_dirichlet,
+from ...models.base import (ModelOutput, dirichlet_mean,
                             LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS, BaseEncoder)
 from vaedecon.models.base.positional_encoding import PositionalEncoding
 from .mlp import EncoderMLP
@@ -155,7 +155,7 @@ class EncoderHybrid(BaseEncoder):
         dd_alpha_final = None  # Initialize
         if self.predict_cell_prop:
             dd_alpha_final = F.softplus(self.fc_dd_alpha(final_embedding)) + eps
-            cell_prop_final = reparameterize_dirichlet(dd_alpha_final, device=current_device)
+            cell_prop_final = dirichlet_mean(dd_alpha_final)
         elif y is not None and len(y) > 0:
             cell_prop_final = y  # Use ground truth y directly
         else:

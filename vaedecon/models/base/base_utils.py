@@ -95,6 +95,11 @@ def reparameterize_dirichlet(alpha, device: torch.device):
     return p
 
 
+def dirichlet_mean(alpha: torch.Tensor) -> torch.Tensor:
+    """Return the deterministic mean of a Dirichlet distribution."""
+    return alpha / alpha.sum(dim=-1, keepdim=True).clamp_min(EPS)
+
+
 def has_usable_labels(labels: Any) -> bool:
     """Return True when labels are present and contain at least one value."""
     if labels is None:

@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ...configs import ModelConfig, DataConfig
-from ...models.base import (ModelOutput, reparameterize_dirichlet, LOGVAR_CLAMP_MIN,
+from ...models.base import (ModelOutput, dirichlet_mean, LOGVAR_CLAMP_MIN,
                             LOGVAR_CLAMP_MAX, EPS, NETWORK_CUTOFF, BaseEncoder)
 from vaedecon.models.base.positional_encoding import PositionalEncoding
 
@@ -251,7 +251,7 @@ class EncoderSGNN(BaseEncoder):
             # softplus ensures alpha > 0; EPS prevents numerical instability
             dd_alpha = F.softplus(self.gnn_dd_alpha(cell_embedding)) + EPS
             output['dd_alpha'] = dd_alpha
-            cell_prop = reparameterize_dirichlet(dd_alpha, device=current_device)
+            cell_prop = dirichlet_mean(dd_alpha)
         elif y is not None:
             cell_prop = y.to(current_device)
         else:

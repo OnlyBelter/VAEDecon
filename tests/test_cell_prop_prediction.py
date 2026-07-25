@@ -4,13 +4,18 @@ import pandas as pd
 import pytest
 import torch
 import torch.nn.functional as F
+from torch.distributions import Dirichlet, kl_divergence
 
-from vaedecon.models.base import has_usable_labels
+from vaedecon.models.base import dirichlet_mean, has_usable_labels
 from vaedecon.models.vae.vae_model import VAE
 from vaedecon.workflow.workflow import evaluate_model
 
 
-def _build_dummy_vae(cell_prop_weight: float = 2.0, training: bool = True):
+def _build_dummy_vae(
+    cell_prop_weight: float = 2.0,
+    kld_p_weight: float = 0.0,
+    training: bool = True,
+):
     class DummyVAE:
         pass
 
@@ -26,6 +31,7 @@ def _build_dummy_vae(cell_prop_weight: float = 2.0, training: bool = True):
             hierarchical_code_weight=0.0,
             low_mean_threshold=0.0,
             low_std_threshold=0.0,
+            kld_p=kld_p_weight,
             cell_prop=cell_prop_weight,
             gene_mean_weight=0.0,
             gene_std_weight=0.0,
@@ -75,8 +81,16 @@ def test_has_usable_labels_handles_empty_tensor():
     assert has_usable_labels(torch.tensor([[0.7, 0.3]], dtype=torch.float32))
 
 
-def test_loss_function_includes_supervised_cell_prop_term():
-    dummy = _build_dummy_vae(cell_prop_weight=2.0, training=True)
+def test_dirichlet_mean_returns_deterministic_normalized_alpha():
+    dd_alpha = torch.tensor([[1.0, 3.0], [3.0, 1.0]], dtype=torch.float32)
+
+    expected = torch.tensor([[0.25, 0.75], [0.75, 0.25]], dtype=torch.float32)
+
+    assert torch.allclose(dirichlet_mean(dd_alpha), expected)
+
+
+def test_loss_function_includes_weighted_kld_p_and_supervised_cell_prop_term():
+    dummy = _build_dummy_vae(cell_prop_weight=2.0, kld_p_weight=0.5, training=True)
     x = torch.zeros((2, 3), dtype=torch.float32)
     y = torch.tensor([[0.7, 0.3], [0.2, 0.8]], dtype=torch.float32)
     dd_alpha = torch.tensor([[1.0, 3.0], [3.0, 1.0]], dtype=torch.float32)
@@ -104,9 +118,11 @@ def test_loss_function_includes_supervised_cell_prop_term():
         y,
         reduction="none",
     ).sum(dim=-1)
-    expected_total = (2.0 * expected_cell_prop_loss).mean()
+    expected_kld_p = kl_divergence(Dirichlet(dd_alpha), Dirichlet(torch.ones_like(dd_alpha)))
+    expected_total = (0.5 * expected_kld_p + 2.0 * expected_cell_prop_loss).mean()
 
     assert torch.isclose(loss_terms.cell_prop, expected_cell_prop_loss.mean())
+    assert torch.isclose(loss_terms.kld_p, expected_kld_p.mean())
     assert torch.isclose(loss_terms.total, expected_total)
 
 
@@ -131,6 +147,24 @@ def test_loss_function_requires_labels_for_supervised_training():
             device=torch.device("cpu"),
             recon_x_all_types_cpm=torch.ones((2, 3, 2), dtype=torch.float32),
         )
+
+
+def test_cell_prop_dirichlet_loss_keeps_kl_without_labels():
+    dummy = _build_dummy_vae(cell_prop_weight=1.0, training=False)
+    dd_alpha = torch.tensor([[1.0, 3.0], [3.0, 1.0]], dtype=torch.float32)
+
+    kld_p, cell_prop_loss = VAE._cell_prop_dirichlet_loss(
+        dummy,
+        y=torch.empty(0, dtype=torch.float32),
+        dd_alpha=dd_alpha,
+        batch_size=dd_alpha.shape[0],
+        device=torch.device("cpu"),
+    )
+
+    expected_kld_p = kl_divergence(Dirichlet(dd_alpha), Dirichlet(torch.ones_like(dd_alpha)))
+
+    assert torch.allclose(kld_p, expected_kld_p)
+    assert torch.allclose(cell_prop_loss, torch.zeros_like(cell_prop_loss))
 
 
 class _DummyPredictionDataset(torch.utils.data.Dataset):

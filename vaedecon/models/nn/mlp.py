@@ -7,7 +7,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ...models.base import (ModelOutput, reparameterize_dirichlet,
+from ...models.base import (ModelOutput, dirichlet_mean,
                             LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
                             BaseEncoder, BaseDecoder, PositionalEncoding,
                             has_usable_labels)
@@ -123,8 +123,7 @@ class EncoderMLP(BaseEncoder):
             # Softplus ensures alpha > 0
             dd_alpha = F.softplus(self.fc_dd_alpha(out)) + eps
             output['dd_alpha'] = dd_alpha
-            # Pass device explicitly to random generator if needed, or rely on tensor ops
-            cell_prop = reparameterize_dirichlet(dd_alpha, device=x.device)
+            cell_prop = dirichlet_mean(dd_alpha)
         elif has_usable_labels(y):
             cell_prop = y
         else:

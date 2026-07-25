@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import List, Optional
 
 from ...configs import ModelConfig
-from ...models.base import (ModelOutput, reparameterize_dirichlet,
+from ...models.base import (ModelOutput, dirichlet_mean,
                             LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
                             BaseEncoder, has_usable_labels)
 from vaedecon.models.base.positional_encoding import PositionalEncoding
@@ -140,7 +140,7 @@ class GeneTransformerEncoder(BaseEncoder):
         if self.predict_cell_prop:
             dd_alpha = F.softplus(self.fc_dd_alpha(global_out)) + eps
             output['dd_alpha'] = dd_alpha
-            cell_prop = reparameterize_dirichlet(dd_alpha, device=device)
+            cell_prop = dirichlet_mean(dd_alpha)
         elif has_usable_labels(y):
             cell_prop = y
         else:

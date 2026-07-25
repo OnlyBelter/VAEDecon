@@ -20,6 +20,7 @@ from ...data.datasets import DatasetOutput
 from ...models.base import (
     BaseAE,
     reparameterize_gaussian,
+    dirichlet_mean,
     ModelOutput,
     BaseDecoder,
     BaseEncoder,
@@ -587,6 +588,7 @@ class VAE(BaseAE):
             recon_loss
             + lo.low_mean_std_weight * low_mean_std_gene_loss_per_sample
             + beta * kld_z_types
+            + lo.kld_p * kld_p
             + lo.cell_prop * cell_prop_loss
             + gamma * repulsion_loss
             + attractor_weight * attractor_loss
@@ -703,15 +705,16 @@ class VAE(BaseAE):
         kld_p = torch.zeros(batch_size, device=device)
         cell_prop_loss = torch.zeros(batch_size, device=device)
 
-        if has_usable_labels(y) and self.model_config.predict_cell_prop and dd_alpha is not None:
+        if self.model_config.predict_cell_prop and dd_alpha is not None:
             # KL(Posterior || Prior), prior is Uniform Dirichlet(alpha=1)
             prior_alpha = torch.ones_like(dd_alpha)
             prior_dist = Dirichlet(prior_alpha)
             posterior_dist = Dirichlet(dd_alpha)
             kld_p = kl_divergence(posterior_dist, prior_dist)
 
+        if has_usable_labels(y) and self.model_config.predict_cell_prop and dd_alpha is not None:
             # Supervised loss for proportions
-            normalized_dd_alpha = dd_alpha / torch.sum(dd_alpha, dim=-1, keepdim=True).clamp_min(1e-8)
+            normalized_dd_alpha = dirichlet_mean(dd_alpha)
             cell_prop_loss = F.mse_loss(normalized_dd_alpha, y, reduction="none").sum(dim=-1)
 
         return kld_p, cell_prop_loss

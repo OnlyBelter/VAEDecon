@@ -63,9 +63,10 @@ model:
   fusion_dropout_rate: [0.1, 0]
   encoders: ['EncoderResMLP']
   decoders: ['DecoderResMLP']
-  predict_cell_prop: false
+  predict_cell_prop: false  # Set to true to learn Dirichlet concentration parameters and output their mean as cell fractions.
   loss_coefficient:
-    cell_prop: 0
+    kld_p: 0.0  # Set > 0 to regularize predicted Dirichlet concentration parameters toward a uniform prior.
+    cell_prop: 0  # Set > 0 to supervise the Dirichlet mean against known training fractions.
     beta: 2
     gamma: 0.005
     kld_type: 'ave'

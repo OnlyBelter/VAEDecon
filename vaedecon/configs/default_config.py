@@ -13,6 +13,7 @@ class LossCoefficient(BaseModel):
     gamma: float = 0.005
     attractor_weight: float = 0.0
     kld_type: Literal["ave", "sep"] = "ave"   # your code uses 'sep', not 'sum'
+    kld_p: float = 0.0
     cell_prop: float = 0.0
     weighting_gene_by_exp: bool = True
     weight_clamp_range: Tuple[float, float] = (0.2, 5.0)
@@ -30,6 +31,7 @@ class LossCoefficient(BaseModel):
         "beta",
         "gamma",
         "attractor_weight",
+        "kld_p",
         "cell_prop",
         "gene_mean_weight",
         "gene_std_weight",
@@ -372,6 +374,7 @@ class ModelConfig(BaseModelConfig):
         Loss Configuration:
             loss_coefficient: Dictionary containing:
                 - cell_prop: Weight for cell proportion loss
+                - kld_p: Weight for Dirichlet KL regularization on cell proportions
                 - beta: Weight for reconstruction loss
                 - gamma: Weight for regularization
                 - kld_type: Type of KLD computation ('ave' or 'sum')
@@ -687,11 +690,24 @@ class ModelConfig(BaseModelConfig):
     @model_validator(mode='after')
     def validate_cell_prop_consistency(self):
         """Ensure cell proportion prediction settings are consistent."""
+        kld_p_weight = self.loss_coefficient.kld_p
         cell_prop_weight = self.loss_coefficient.cell_prop
+
+        if kld_p_weight < 0:
+            raise ValueError(
+                f"loss_coefficient['kld_p'] must be >= 0, got {kld_p_weight}."
+            )
 
         if cell_prop_weight < 0:
             raise ValueError(
                 f"loss_coefficient['cell_prop'] must be >= 0, got {cell_prop_weight}."
+            )
+
+        if kld_p_weight > 0 and not self.predict_cell_prop:
+            raise ValueError(
+                f"loss_coefficient['kld_p'] = {kld_p_weight} > 0 "
+                f"but predict_cell_prop=False. "
+                f"Either set predict_cell_prop=True or set kld_p to 0."
             )
 
         if cell_prop_weight > 0 and not self.predict_cell_prop:
@@ -701,11 +717,12 @@ class ModelConfig(BaseModelConfig):
                 f"Either set predict_cell_prop=True or set cell_prop to 0."
             )
 
-        if self.predict_cell_prop and cell_prop_weight == 0:
+        if self.predict_cell_prop and cell_prop_weight == 0 and kld_p_weight == 0:
             import warnings
             warnings.warn(
-                "predict_cell_prop=True but loss_coefficient['cell_prop']=0. "
-                "The prediction head will not receive direct supervision during training."
+                "predict_cell_prop=True but both loss_coefficient['cell_prop']=0 "
+                "and loss_coefficient['kld_p']=0. "
+                "The prediction head will not receive direct supervision or Dirichlet regularization during training."
             )
 
         return self
@@ -755,6 +772,7 @@ class ModelConfig(BaseModelConfig):
             "loss_settings": {
                 "beta": self.loss_coefficient.beta,
                 "gamma": self.loss_coefficient.gamma,
+                "kld_p_weight": self.loss_coefficient.kld_p,
                 "cell_prop_weight": self.loss_coefficient.cell_prop,
                 "gene_mean_weight": self.loss_coefficient.gene_mean_weight,
                 "gene_std_weight": self.loss_coefficient.gene_std_weight,
