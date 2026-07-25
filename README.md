@@ -95,6 +95,65 @@ The `VAEDeconConfig` object controls all aspects of the pipeline. Key sections i
 
 See `configs/example_config.yaml` for a complete example.
 
+## How cell proportions are learned
+
+`VAEDecon` can either use known cell fractions during training or learn to
+predict them from bulk expression. The behavior is controlled by
+`model.predict_cell_prop`, `model.loss_coefficient.cell_prop`, and
+`model.loss_coefficient.kld_p`.
+
+When you enable cell proportion prediction with `predict_cell_prop: true`, the
+active encoder adds a cell proportion head that outputs a positive concentration
+vector `dd_alpha` for each sample. The model then uses that vector in three
+ways:
+
+1. It converts `dd_alpha` to the deterministic Dirichlet mean
+   `dd_alpha / sum(dd_alpha)` for the forward cell-proportion output.
+2. It uses the predicted proportions to weight the reconstructed
+   cell-type-specific GEPs when rebuilding the bulk profile.
+3. It can regularize `dd_alpha` with a Dirichlet KL term and compare the
+   Dirichlet mean against known training-set cell fractions through the
+   supervised `cell_prop` loss term.
+
+To train this branch with direct supervision and optional Dirichlet
+regularization, set these options:
+
+```yaml
+model:
+  predict_cell_prop: true
+  loss_coefficient:
+    kld_p: 0.1
+    cell_prop: 1.0
+```
+
+When `predict_cell_prop: true` and `loss_coefficient.cell_prop > 0`, the
+training dataset must include cell fraction labels. During inference, labels are
+not required. The trained model predicts cell proportions directly from bulk
+expression, saves them to `predicted_cell_prop.csv`, and reports the
+deterministic Dirichlet mean instead of a sampled composition vector.
+
+## How the Dirichlet distribution is used
+
+The Dirichlet distribution gives the model a natural way to represent cell
+fractions because it produces positive vectors that sum to one. In
+`VAEDecon`, the encoder does not predict proportions directly. Instead, it
+predicts the Dirichlet concentration parameters `dd_alpha`, using a `softplus`
+layer so every entry stays positive.
+
+This design lets the model represent both the estimated composition and its
+concentration pattern across cell types:
+
+- larger `dd_alpha` values indicate stronger concentration on specific
+  proportions
+- the normalized vector `dd_alpha / sum(dd_alpha)` gives the mean-style
+  proportion estimate used for both forward prediction and supervision
+
+The VAE code also computes a KL divergence between `Dirichlet(dd_alpha)` and a
+uniform Dirichlet prior and reports it as `kld_p`. You can control the strength
+of that regularization with `loss_coefficient.kld_p`. The supervised training
+path uses `loss_coefficient.cell_prop` to match the Dirichlet mean to known
+training fractions when labels are available.
+
 ## Examples
 
 Check the `examples/` directory for complete scripts:
