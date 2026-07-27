@@ -79,7 +79,7 @@ class GeneTransformerEncoder(BaseEncoder):
         self.fc_mu_logvar = nn.Linear(self.d_model, self.latent_dim * 2)
         if self.predict_cell_prop:
             if self.cell_prop_activation_function == "sigmoid":
-                self.cancer_cell_type_index = resolve_cancer_cell_type_index_from_config(args)
+                self.cancer_cell_type_index = resolve_cancer_cell_type_index_from_config(self.args)
             self.fc_dd_alpha = nn.Linear(
                 self.d_model,
                 get_cell_prop_head_output_dim(

@@ -172,7 +172,7 @@ class EncoderSGNN(BaseEncoder):
 
         if self.predict_cell_prop:
             if self.cell_prop_activation_function == "sigmoid":
-                self.cancer_cell_type_index = resolve_cancer_cell_type_index_from_config(args)
+                self.cancer_cell_type_index = resolve_cancer_cell_type_index_from_config(self.args)
             self.gnn_dd_alpha = nn.Linear(
                 self.embd_col_dim,
                 get_cell_prop_head_output_dim(

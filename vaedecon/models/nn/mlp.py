@@ -76,7 +76,7 @@ class EncoderMLP(BaseEncoder):
         # 2. Cell Proportion Head (Dirichlet parameters)
         if self.predict_cell_prop:
             if self.cell_prop_activation_function == "sigmoid":
-                self.cancer_cell_type_index = resolve_cancer_cell_type_index_from_config(args)
+                self.cancer_cell_type_index = resolve_cancer_cell_type_index_from_config(self.args)
             self.fc_dd_alpha = nn.Linear(
                 self.hidden_dims[-1],
                 get_cell_prop_head_output_dim(
