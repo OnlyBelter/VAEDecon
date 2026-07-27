@@ -72,3 +72,31 @@ def test_duplicate_yaml_keys_raise(tmp_path: Path):
     p.write_text("evaluation:\n  val_batch_size: 128\n  val_batch_size: 64\n")
     with pytest.raises(ValueError):
         _ = VAEDeconConfig.from_yaml(p)
+
+
+def test_sigmoid_cell_prop_requires_cancer_cell_type_name():
+    with pytest.raises(ValueError, match="cancer_cell_type_name must be set"):
+        VAEDeconConfig.from_dict(
+            {
+                "model": {
+                    "predict_cell_prop": True,
+                    "cell_prop_activation_function": "sigmoid",
+                }
+            }
+        )
+
+
+def test_sigmoid_cell_prop_rejects_dirichlet_kld():
+    with pytest.raises(ValueError, match="loss_coefficient\\['kld_p'\\] must be 0"):
+        VAEDeconConfig.from_dict(
+            {
+                "model": {
+                    "predict_cell_prop": True,
+                    "cell_prop_activation_function": "sigmoid",
+                    "cancer_cell_type_name": "Cancer Cells",
+                    "loss_coefficient": {
+                        "kld_p": 0.1,
+                    },
+                }
+            }
+        )

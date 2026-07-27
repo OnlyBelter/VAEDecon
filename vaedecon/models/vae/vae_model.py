@@ -26,6 +26,8 @@ from ...models.base import (
     BaseEncoder,
     EPS,
     has_usable_labels,
+    remove_cancer_cell_type,
+    resolve_cancer_cell_type_index,
 )
 from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor, non_log2cpm_tensor
 from ...utility.hierarchical_encoding import HIERARCHICAL_ENCODING
@@ -179,6 +181,13 @@ class VAE(BaseAE):
             "hierarchical_code_targets",
             torch.tensor(hierarchical_targets, dtype=torch.float32),
         )
+        self.cell_prop_activation_function = model_config.cell_prop_activation_function
+        self.cancer_cell_type_index = None
+        if self.cell_prop_activation_function == "sigmoid":
+            self.cancer_cell_type_index = resolve_cancer_cell_type_index(
+                cell_types=self.cell_types,
+                cancer_cell_type_name=model_config.cancer_cell_type_name,
+            )
 
         # ---------------------------------------------------------------------
         # --- Gene Weights Calculation ---
@@ -291,7 +300,7 @@ class VAE(BaseAE):
             logvar_mean_list.append(out.logvar_mean)        # (B, L)
             prop_list.append(out.cell_prop)                 # (B, C)
 
-            if self.model_config.predict_cell_prop:
+            if self.model_config.predict_cell_prop and out.dd_alpha is not None:
                 # Dirichlet distribution parameters for cell type proportions.
                 dd_alpha_list.append(out.dd_alpha)          # (B, C)
 
@@ -404,6 +413,7 @@ class VAE(BaseAE):
             recon_x_conv=recon_x_conv_log,
             mu_types=mu_types,
             logvar_types=log_var_types,
+            pred_cell_prop=cell_prop,
             dd_alpha=dd_alpha,
             mu_prior=mu_prior,
             recon_gene_mean=recon_gene_mean,
@@ -446,6 +456,7 @@ class VAE(BaseAE):
         recon_x_conv: torch.Tensor,
         mu_types: torch.Tensor,
         logvar_types: torch.Tensor,
+        pred_cell_prop: Optional[torch.Tensor],
         dd_alpha: Optional[torch.Tensor],
         mu_prior: Optional[torch.Tensor],
         recon_gene_mean: torch.Tensor,
@@ -552,6 +563,7 @@ class VAE(BaseAE):
         kld_p, cell_prop_loss = self._cell_prop_dirichlet_loss(
             y=y,
             dd_alpha=dd_alpha,
+            pred_cell_prop=pred_cell_prop,
             batch_size=batch_size,
             device=device,
         )                                                                                   # (B,), (B,)
@@ -695,6 +707,7 @@ class VAE(BaseAE):
         self,
         y: Optional[torch.Tensor],
         dd_alpha: Optional[torch.Tensor],
+        pred_cell_prop: Optional[torch.Tensor],
         batch_size: int,
         device: torch.device,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -705,17 +718,34 @@ class VAE(BaseAE):
         kld_p = torch.zeros(batch_size, device=device)
         cell_prop_loss = torch.zeros(batch_size, device=device)
 
-        if self.model_config.predict_cell_prop and dd_alpha is not None:
+        if (
+            self.model_config.predict_cell_prop
+            and self.cell_prop_activation_function == "softplus"
+            and dd_alpha is not None
+        ):
             # KL(Posterior || Prior), prior is Uniform Dirichlet(alpha=1)
             prior_alpha = torch.ones_like(dd_alpha)
             prior_dist = Dirichlet(prior_alpha)
             posterior_dist = Dirichlet(dd_alpha)
             kld_p = kl_divergence(posterior_dist, prior_dist)
 
-        if has_usable_labels(y) and self.model_config.predict_cell_prop and dd_alpha is not None:
-            # Supervised loss for proportions
-            normalized_dd_alpha = dirichlet_mean(dd_alpha)
-            cell_prop_loss = F.mse_loss(normalized_dd_alpha, y, reduction="none").sum(dim=-1)
+        if has_usable_labels(y) and self.model_config.predict_cell_prop:
+            if self.cell_prop_activation_function == "softplus" and dd_alpha is not None:
+                supervised_pred = dirichlet_mean(dd_alpha)
+                target = y
+            elif self.cell_prop_activation_function == "sigmoid" and pred_cell_prop is not None:
+                supervised_pred = remove_cancer_cell_type(pred_cell_prop, self.cancer_cell_type_index)
+                target = remove_cancer_cell_type(y, self.cancer_cell_type_index)
+            else:
+                supervised_pred = None
+                target = None
+
+            if supervised_pred is not None and target is not None:
+                cell_prop_loss = F.mse_loss(
+                    supervised_pred,
+                    target,
+                    reduction="none",
+                ).sum(dim=-1)
 
         return kld_p, cell_prop_loss
 

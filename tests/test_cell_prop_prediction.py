@@ -6,7 +6,12 @@ import torch
 import torch.nn.functional as F
 from torch.distributions import Dirichlet, kl_divergence
 
-from vaedecon.models.base import dirichlet_mean, has_usable_labels
+from vaedecon.models.base import (
+    build_cell_prop_from_head_output,
+    dirichlet_mean,
+    has_usable_labels,
+    remove_cancer_cell_type,
+)
 from vaedecon.models.vae.vae_model import VAE
 from vaedecon.workflow.workflow import evaluate_model
 
@@ -15,6 +20,8 @@ def _build_dummy_vae(
     cell_prop_weight: float = 2.0,
     kld_p_weight: float = 0.0,
     training: bool = True,
+    activation_function: str = "softplus",
+    cancer_cell_type_index: int | None = None,
 ):
     class DummyVAE:
         pass
@@ -38,7 +45,10 @@ def _build_dummy_vae(
         ),
         learn_gep_residual=False,
         predict_cell_prop=True,
+        cell_prop_activation_function=activation_function,
     )
+    dummy.cell_prop_activation_function = activation_function
+    dummy.cancer_cell_type_index = cancer_cell_type_index
     dummy.training = training
     dummy.scaling_factor = 1.0
     dummy.g_mean_non_log = torch.ones((3, 2), dtype=torch.float32)
@@ -53,10 +63,11 @@ def _build_dummy_vae(
     dummy._z_score_kl_loss = lambda recon_x_all_types_cpm: torch.zeros(
         recon_x_all_types_cpm.shape[0], device=recon_x_all_types_cpm.device
     )
-    dummy._cell_prop_dirichlet_loss = lambda y, dd_alpha, batch_size, device: VAE._cell_prop_dirichlet_loss(
+    dummy._cell_prop_dirichlet_loss = lambda y, dd_alpha, pred_cell_prop, batch_size, device: VAE._cell_prop_dirichlet_loss(
         dummy,
         y=y,
         dd_alpha=dd_alpha,
+        pred_cell_prop=pred_cell_prop,
         batch_size=batch_size,
         device=device,
     )
@@ -102,6 +113,7 @@ def test_loss_function_includes_weighted_kld_p_and_supervised_cell_prop_term():
         recon_x_conv=torch.zeros_like(x),
         mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
         logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
+        pred_cell_prop=dirichlet_mean(dd_alpha),
         dd_alpha=dd_alpha,
         mu_prior=torch.zeros((2, 1), dtype=torch.float32),
         recon_gene_mean=torch.ones((3, 2), dtype=torch.float32),
@@ -138,6 +150,7 @@ def test_loss_function_requires_labels_for_supervised_training():
             recon_x_conv=torch.zeros_like(x),
             mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
             logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
+            pred_cell_prop=torch.ones((2, 2), dtype=torch.float32) / 2,
             dd_alpha=torch.ones((2, 2), dtype=torch.float32),
             mu_prior=torch.zeros((2, 1), dtype=torch.float32),
             recon_gene_mean=torch.ones((3, 2), dtype=torch.float32),
@@ -157,6 +170,7 @@ def test_cell_prop_dirichlet_loss_keeps_kl_without_labels():
         dummy,
         y=torch.empty(0, dtype=torch.float32),
         dd_alpha=dd_alpha,
+        pred_cell_prop=dirichlet_mean(dd_alpha),
         batch_size=dd_alpha.shape[0],
         device=torch.device("cpu"),
     )
@@ -165,6 +179,63 @@ def test_cell_prop_dirichlet_loss_keeps_kl_without_labels():
 
     assert torch.allclose(kld_p, expected_kld_p)
     assert torch.allclose(cell_prop_loss, torch.zeros_like(cell_prop_loss))
+
+
+def test_sigmoid_cell_prop_builder_inserts_cancer_and_normalizes_rows():
+    logits = torch.tensor([[2.0, 2.0]], dtype=torch.float32)
+
+    cell_prop, dd_alpha = build_cell_prop_from_head_output(
+        head_output=logits,
+        activation_function="sigmoid",
+        n_cell_types=3,
+        cancer_cell_type_index=1,
+    )
+
+    expected_non_cancer = torch.sigmoid(logits)
+    expected_non_cancer = expected_non_cancer / expected_non_cancer.sum(dim=-1, keepdim=True)
+    expected = torch.tensor(
+        [[expected_non_cancer[0, 0].item(), 0.0, expected_non_cancer[0, 1].item()]],
+        dtype=torch.float32,
+    )
+
+    assert dd_alpha is None
+    assert torch.allclose(cell_prop.sum(dim=-1), torch.ones(1, dtype=torch.float32))
+    assert torch.allclose(cell_prop, expected, atol=1e-6)
+
+
+def test_sigmoid_cell_prop_loss_supervises_only_non_cancer_columns():
+    dummy = _build_dummy_vae(
+        cell_prop_weight=1.0,
+        training=True,
+        activation_function="sigmoid",
+        cancer_cell_type_index=1,
+    )
+    pred_cell_prop = torch.tensor(
+        [[0.25, 0.35, 0.40], [0.10, 0.60, 0.30]],
+        dtype=torch.float32,
+    )
+    y = torch.tensor(
+        [[0.20, 0.50, 0.30], [0.30, 0.40, 0.30]],
+        dtype=torch.float32,
+    )
+
+    kld_p, cell_prop_loss = VAE._cell_prop_dirichlet_loss(
+        dummy,
+        y=y,
+        dd_alpha=None,
+        pred_cell_prop=pred_cell_prop,
+        batch_size=pred_cell_prop.shape[0],
+        device=torch.device("cpu"),
+    )
+
+    expected_loss = F.mse_loss(
+        remove_cancer_cell_type(pred_cell_prop, 1),
+        remove_cancer_cell_type(y, 1),
+        reduction="none",
+    ).sum(dim=-1)
+
+    assert torch.allclose(kld_p, torch.zeros_like(kld_p))
+    assert torch.allclose(cell_prop_loss, expected_loss)
 
 
 class _DummyPredictionDataset(torch.utils.data.Dataset):

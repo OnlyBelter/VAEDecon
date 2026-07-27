@@ -547,6 +547,17 @@ class ModelConfig(BaseModelConfig):
         default=False,
         description="Whether to predict cell type proportions"
     )
+    cell_prop_activation_function: Literal["softplus", "sigmoid"] = Field(
+        default="softplus",
+        description="Activation used for the cell proportion head. "
+                    "'softplus' keeps the Dirichlet workflow; 'sigmoid' predicts only non-cancer "
+                    "cell types and assigns the cancer proportion as the remainder."
+    )
+    cancer_cell_type_name: Optional[str] = Field(
+        default=None,
+        description="Exact cell type label used for the cancer cell type when "
+                    "cell_prop_activation_function='sigmoid'."
+    )
 
 
     # Mask fraction for input dropout
@@ -692,6 +703,7 @@ class ModelConfig(BaseModelConfig):
         """Ensure cell proportion prediction settings are consistent."""
         kld_p_weight = self.loss_coefficient.kld_p
         cell_prop_weight = self.loss_coefficient.cell_prop
+        activation_function = self.cell_prop_activation_function
 
         if kld_p_weight < 0:
             raise ValueError(
@@ -716,6 +728,23 @@ class ModelConfig(BaseModelConfig):
                 f"but predict_cell_prop=False. "
                 f"Either set predict_cell_prop=True or set cell_prop to 0."
             )
+
+        if activation_function == "sigmoid":
+            if not self.predict_cell_prop:
+                raise ValueError(
+                    "cell_prop_activation_function='sigmoid' requires predict_cell_prop=True."
+                )
+            if not self.cancer_cell_type_name or not self.cancer_cell_type_name.strip():
+                raise ValueError(
+                    "cancer_cell_type_name must be set when "
+                    "cell_prop_activation_function='sigmoid'."
+                )
+            if kld_p_weight > 0:
+                raise ValueError(
+                    "loss_coefficient['kld_p'] must be 0 when "
+                    "cell_prop_activation_function='sigmoid' because the sigmoid branch "
+                    "does not define a Dirichlet posterior."
+                )
 
         if self.predict_cell_prop and cell_prop_weight == 0 and kld_p_weight == 0:
             import warnings
@@ -769,6 +798,7 @@ class ModelConfig(BaseModelConfig):
             "total_params_estimate": self.estimate_total_params(),
             "encoder_types": self.encoders,
             "predict_cell_prop": self.predict_cell_prop,
+            "cell_prop_activation_function": self.cell_prop_activation_function,
             "loss_settings": {
                 "beta": self.loss_coefficient.beta,
                 "gamma": self.loss_coefficient.gamma,

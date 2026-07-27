@@ -5,12 +5,11 @@ from typing import List, Optional
 import torch
 import numpy as np
 import torch.nn as nn
-import torch.nn.functional as F
-
-from ...models.base import (ModelOutput, dirichlet_mean,
+from ...models.base import (ModelOutput, build_cell_prop_from_head_output,
+                            get_cell_prop_head_output_dim,
                             LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
                             BaseEncoder, BaseDecoder, PositionalEncoding,
-                            has_usable_labels)
+                            has_usable_labels, resolve_cancer_cell_type_index_from_config)
 from ...configs import ModelConfig, DataConfig
 
 
@@ -32,6 +31,8 @@ class EncoderMLP(BaseEncoder):
         self.n_cell_types = args.n_cell_types
         self.using_positional_encoding = args.using_positional_encoding
         self.predict_cell_prop = args.predict_cell_prop
+        self.cell_prop_activation_function = args.cell_prop_activation_function
+        self.cancer_cell_type_index = None
 
         # --- Params that subclasses may override BEFORE calling _build ---
         self.input_dim = args.input_dim
@@ -74,7 +75,15 @@ class EncoderMLP(BaseEncoder):
 
         # 2. Cell Proportion Head (Dirichlet parameters)
         if self.predict_cell_prop:
-            self.fc_dd_alpha = nn.Linear(self.hidden_dims[-1], self.n_cell_types)
+            if self.cell_prop_activation_function == "sigmoid":
+                self.cancer_cell_type_index = resolve_cancer_cell_type_index_from_config(args)
+            self.fc_dd_alpha = nn.Linear(
+                self.hidden_dims[-1],
+                get_cell_prop_head_output_dim(
+                    n_cell_types=self.n_cell_types,
+                    activation_function=self.cell_prop_activation_function,
+                ),
+            )
 
     def forward(
         self,
@@ -120,14 +129,19 @@ class EncoderMLP(BaseEncoder):
 
         # 2. Predict Cell Proportions
         if self.predict_cell_prop:
-            # Softplus ensures alpha > 0
-            dd_alpha = F.softplus(self.fc_dd_alpha(out)) + eps
+            cell_prop, dd_alpha = build_cell_prop_from_head_output(
+                head_output=self.fc_dd_alpha(out),
+                activation_function=self.cell_prop_activation_function,
+                n_cell_types=self.n_cell_types,
+                eps=eps,
+                cancer_cell_type_index=self.cancer_cell_type_index,
+            )
             output['dd_alpha'] = dd_alpha
-            cell_prop = dirichlet_mean(dd_alpha)
         elif has_usable_labels(y):
             cell_prop = y
         else:
             cell_prop = None
+            output['dd_alpha'] = None
             # Only warn once per runtime ideally, but keeping logic simple here
             # warnings.warn(...)
 

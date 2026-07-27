@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import List, Optional
 
 from ...configs import ModelConfig
-from ...models.base import (ModelOutput, dirichlet_mean,
+from ...models.base import (ModelOutput, build_cell_prop_from_head_output,
+                            get_cell_prop_head_output_dim,
                             LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS,
-                            BaseEncoder, has_usable_labels)
+                            BaseEncoder, has_usable_labels,
+                            resolve_cancer_cell_type_index_from_config)
 from vaedecon.models.base.positional_encoding import PositionalEncoding
 
 
@@ -27,6 +28,8 @@ class GeneTransformerEncoder(BaseEncoder):
         self.n_cell_types = args.n_cell_types
         self.predict_cell_prop = args.predict_cell_prop
         self.using_positional_encoding = args.using_positional_encoding
+        self.cell_prop_activation_function = args.cell_prop_activation_function
+        self.cancer_cell_type_index = None
 
         # Config
         self.d_model = getattr(args, 'transformer_d_model', 256)
@@ -75,7 +78,15 @@ class GeneTransformerEncoder(BaseEncoder):
         # 5. Heads
         self.fc_mu_logvar = nn.Linear(self.d_model, self.latent_dim * 2)
         if self.predict_cell_prop:
-            self.fc_dd_alpha = nn.Linear(self.d_model, self.n_cell_types)
+            if self.cell_prop_activation_function == "sigmoid":
+                self.cancer_cell_type_index = resolve_cancer_cell_type_index_from_config(args)
+            self.fc_dd_alpha = nn.Linear(
+                self.d_model,
+                get_cell_prop_head_output_dim(
+                    n_cell_types=self.n_cell_types,
+                    activation_function=self.cell_prop_activation_function,
+                ),
+            )
 
         # Positional Encoding
         if self.using_positional_encoding:
@@ -138,13 +149,19 @@ class GeneTransformerEncoder(BaseEncoder):
         # --- 7. Cell Proportions ---
         output = ModelOutput()
         if self.predict_cell_prop:
-            dd_alpha = F.softplus(self.fc_dd_alpha(global_out)) + eps
+            cell_prop, dd_alpha = build_cell_prop_from_head_output(
+                head_output=self.fc_dd_alpha(global_out),
+                activation_function=self.cell_prop_activation_function,
+                n_cell_types=self.n_cell_types,
+                eps=eps,
+                cancer_cell_type_index=self.cancer_cell_type_index,
+            )
             output['dd_alpha'] = dd_alpha
-            cell_prop = dirichlet_mean(dd_alpha)
         elif has_usable_labels(y):
             cell_prop = y
         else:
             cell_prop = None
+            output['dd_alpha'] = None
 
         # --- 8. Positional Encoding Logic (Legacy) ---
         if self.using_positional_encoding and self.position_encoding is not None and cell_prop is not None:

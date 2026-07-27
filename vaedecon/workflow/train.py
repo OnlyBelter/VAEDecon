@@ -246,6 +246,8 @@ class VAEDeconTrainer:
             fusion_hidden_dims=self.config.model.fusion_hidden_dims,
             fusion_dropout_rate=self.config.model.fusion_dropout_rate,
             predict_cell_prop=self.config.model.predict_cell_prop,
+            cell_prop_activation_function=self.config.model.cell_prop_activation_function,
+            cancer_cell_type_name=self.config.model.cancer_cell_type_name,
             loss_coefficient=self.config.model.loss_coefficient,
             gnn_n_genes=self.config.model.gnn_n_genes,
             gnn_inter_col_dim=self.config.model.gnn_inter_col_dim,

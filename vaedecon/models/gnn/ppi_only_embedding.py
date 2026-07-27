@@ -8,8 +8,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ...configs import ModelConfig, DataConfig
-from ...models.base import (ModelOutput, dirichlet_mean, LOGVAR_CLAMP_MIN,
-                            LOGVAR_CLAMP_MAX, EPS, NETWORK_CUTOFF, BaseEncoder)
+from ...models.base import (ModelOutput, build_cell_prop_from_head_output,
+                            get_cell_prop_head_output_dim, LOGVAR_CLAMP_MIN,
+                            LOGVAR_CLAMP_MAX, EPS, NETWORK_CUTOFF, BaseEncoder,
+                            resolve_cancer_cell_type_index_from_config)
 from vaedecon.models.base.positional_encoding import PositionalEncoding
 
 logger = logging.getLogger(__name__)
@@ -134,6 +136,8 @@ class EncoderSGNN(BaseEncoder):
         self.drop_p = args.gnn_drop_p
         self.num_layers = args.gnn_num_layers
         self.predict_cell_prop = args.predict_cell_prop
+        self.cell_prop_activation_function = args.cell_prop_activation_function
+        self.cancer_cell_type_index = None
 
         self.position_encoding = position_encoding if self.args.using_positional_encoding else None
         
@@ -167,7 +171,15 @@ class EncoderSGNN(BaseEncoder):
         self.fc_mu_logvar = nn.Linear(self.embd_col_dim, self.n_cell_types * self.cell_latent_dim * 2)
 
         if self.predict_cell_prop:
-            self.gnn_dd_alpha = nn.Linear(self.embd_col_dim, self.n_cell_types)
+            if self.cell_prop_activation_function == "sigmoid":
+                self.cancer_cell_type_index = resolve_cancer_cell_type_index_from_config(args)
+            self.gnn_dd_alpha = nn.Linear(
+                self.embd_col_dim,
+                get_cell_prop_head_output_dim(
+                    n_cell_types=self.n_cell_types,
+                    activation_function=self.cell_prop_activation_function,
+                ),
+            )
 
     def forward(
         self, x: torch.Tensor,
@@ -248,15 +260,21 @@ class EncoderSGNN(BaseEncoder):
 
         # --- Step 5: Cell Proportions ---
         if self.predict_cell_prop:
-            # softplus ensures alpha > 0; EPS prevents numerical instability
-            dd_alpha = F.softplus(self.gnn_dd_alpha(cell_embedding)) + EPS
+            cell_prop, dd_alpha = build_cell_prop_from_head_output(
+                head_output=self.gnn_dd_alpha(cell_embedding),
+                activation_function=self.cell_prop_activation_function,
+                n_cell_types=self.n_cell_types,
+                eps=EPS,
+                cancer_cell_type_index=self.cancer_cell_type_index,
+            )
             output['dd_alpha'] = dd_alpha
-            cell_prop = dirichlet_mean(dd_alpha)
         elif y is not None:
             cell_prop = y.to(current_device)
+            output['dd_alpha'] = None
         else:
             # Fallback or Error
             cell_prop = torch.zeros(batch_size, self.n_cell_types, device=current_device)
+            output['dd_alpha'] = None
             if self.training:
                 raise ValueError("y must be provided if predict_cell_prop is False")
 

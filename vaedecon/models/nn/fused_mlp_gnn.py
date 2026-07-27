@@ -1,13 +1,14 @@
 from typing import Optional, Union, Tuple
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import logging
 import warnings
 
 from ...configs import ModelConfig
-from ...models.base import (ModelOutput, dirichlet_mean,
+from ...models.base import (ModelOutput, build_cell_prop_from_head_output,
+                            get_cell_prop_head_output_dim,
                             LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX, EPS, BaseEncoder)
+from ...models.base import resolve_cancer_cell_type_index_from_config
 from vaedecon.models.base.positional_encoding import PositionalEncoding
 from .mlp import EncoderMLP
 from ..gnn import EncoderSGNN
@@ -44,6 +45,8 @@ class EncoderHybrid(BaseEncoder):
         self.n_cell_types = args.n_cell_types
         self.predict_cell_prop = args.predict_cell_prop
         self.using_positional_encoding = args.using_positional_encoding
+        self.cell_prop_activation_function = args.cell_prop_activation_function
+        self.cancer_cell_type_index = None
 
         self.device_param = nn.Parameter(torch.empty(0))  # For device inference
 
@@ -101,7 +104,15 @@ class EncoderHybrid(BaseEncoder):
         # Output heads (operate on the output of fusion_mlp_layers)
         self.fc_mu_logvar = nn.Linear(self.final_fused_embedding_dim, self.n_cell_types * self.latent_dim * 2)
         if self.predict_cell_prop:
-            self.fc_dd_alpha = nn.Linear(self.final_fused_embedding_dim, self.n_cell_types)
+            if self.cell_prop_activation_function == "sigmoid":
+                self.cancer_cell_type_index = resolve_cancer_cell_type_index_from_config(args)
+            self.fc_dd_alpha = nn.Linear(
+                self.final_fused_embedding_dim,
+                get_cell_prop_head_output_dim(
+                    n_cell_types=self.n_cell_types,
+                    activation_function=self.cell_prop_activation_function,
+                ),
+            )
 
         self.position_encoding_module: Optional[PositionalEncoding] = None
         if self.using_positional_encoding:
@@ -154,8 +165,13 @@ class EncoderHybrid(BaseEncoder):
         cell_prop_final = None  # Initialize
         dd_alpha_final = None  # Initialize
         if self.predict_cell_prop:
-            dd_alpha_final = F.softplus(self.fc_dd_alpha(final_embedding)) + eps
-            cell_prop_final = dirichlet_mean(dd_alpha_final)
+            cell_prop_final, dd_alpha_final = build_cell_prop_from_head_output(
+                head_output=self.fc_dd_alpha(final_embedding),
+                activation_function=self.cell_prop_activation_function,
+                n_cell_types=self.n_cell_types,
+                eps=eps,
+                cancer_cell_type_index=self.cancer_cell_type_index,
+            )
         elif y is not None and len(y) > 0:
             cell_prop_final = y  # Use ground truth y directly
         else:
@@ -189,8 +205,7 @@ class EncoderHybrid(BaseEncoder):
         output['logvar_all_types'] = logvar_all_types
         output['mu_mean'] = mu_mean
         output['logvar_mean'] = logvar_mean
-        if self.predict_cell_prop:
-            output['dd_alpha'] = dd_alpha_final
+        output['dd_alpha'] = dd_alpha_final
 
         if cell_prop_final is not None:  # Ensure cell_prop_final is populated before accessing
             output_cell_prop = cell_prop_final
