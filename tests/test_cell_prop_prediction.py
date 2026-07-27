@@ -238,6 +238,56 @@ def test_sigmoid_cell_prop_loss_supervises_only_non_cancer_columns():
     assert torch.allclose(cell_prop_loss, expected_loss)
 
 
+def test_softmax_cell_prop_builder_predicts_all_cell_types_and_normalizes_rows():
+    logits = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32)
+
+    cell_prop, dd_alpha = build_cell_prop_from_head_output(
+        head_output=logits,
+        activation_function="softmax",
+        n_cell_types=3,
+    )
+
+    expected = torch.softmax(logits, dim=-1)
+
+    assert dd_alpha is None
+    assert torch.allclose(cell_prop, expected)
+    assert torch.allclose(cell_prop.sum(dim=-1), torch.ones(1, dtype=torch.float32))
+
+
+def test_softmax_cell_prop_loss_supervises_all_cell_type_columns():
+    dummy = _build_dummy_vae(
+        cell_prop_weight=1.0,
+        training=True,
+        activation_function="softmax",
+    )
+    pred_cell_prop = torch.tensor(
+        [[0.25, 0.35, 0.40], [0.10, 0.60, 0.30]],
+        dtype=torch.float32,
+    )
+    y = torch.tensor(
+        [[0.20, 0.50, 0.30], [0.30, 0.40, 0.30]],
+        dtype=torch.float32,
+    )
+
+    kld_p, cell_prop_loss = VAE._cell_prop_dirichlet_loss(
+        dummy,
+        y=y,
+        dd_alpha=None,
+        pred_cell_prop=pred_cell_prop,
+        batch_size=pred_cell_prop.shape[0],
+        device=torch.device("cpu"),
+    )
+
+    expected_loss = F.mse_loss(
+        pred_cell_prop,
+        y,
+        reduction="none",
+    ).sum(dim=-1)
+
+    assert torch.allclose(kld_p, torch.zeros_like(kld_p))
+    assert torch.allclose(cell_prop_loss, expected_loss)
+
+
 class _DummyPredictionDataset(torch.utils.data.Dataset):
     def __init__(self):
         self._sample_ids = ["sample_1"]

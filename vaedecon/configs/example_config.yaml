@@ -97,11 +97,11 @@ model:
   encoders: ['EncoderResMLP']
   decoders: ['DecoderResMLP']
   predict_cell_prop: false  # Set to true to learn Dirichlet concentration parameters and output their mean as cell fractions.
-  cell_prop_activation_function: 'softplus'  # 'softplus' keeps the Dirichlet workflow; 'sigmoid' predicts non-cancer cell types and fills cancer as the remainder.
+  cell_prop_activation_function: 'softplus'  # 'softplus' keeps the Dirichlet workflow; 'sigmoid' predicts non-cancer cell types and fills cancer as the remainder; 'softmax' predicts all cell types directly.
   cancer_cell_type_name: 'Cancer Cells'  # Required when cell_prop_activation_function is 'sigmoid'.
   loss_coefficient:
-    kld_p: 0.0  # Set > 0 to regularize predicted Dirichlet concentration parameters toward a uniform prior.
-    cell_prop: 0  # Set > 0 to supervise the Dirichlet mean against known training fractions.
+    kld_p: 0.0  # Only valid for 'softplus'; keep 0 for 'sigmoid' and 'softmax'.
+    cell_prop: 0  # Set > 0 to supervise known training fractions for any enabled cell-proportion activation mode.
     beta: 2
     gamma: 0.005
     attractor_weight: 0.0  # weight for the attractor loss (default 0.0)

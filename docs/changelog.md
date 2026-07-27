@@ -12,10 +12,10 @@ workflow.
 
 ### Cell proportion activation modes
 
-The cell-proportion head now supports two explicit prediction modes.
+The cell-proportion head now supports three explicit prediction modes.
 
-- Added `model.cell_prop_activation_function` with `softplus` and `sigmoid`
-  options.
+- Added `model.cell_prop_activation_function` with `softplus`, `sigmoid`, and
+  `softmax` options.
 - Added `model.cancer_cell_type_name` so the runtime can resolve the cancer
   cell index from the configured cell type order.
 - Kept the existing Dirichlet-based workflow unchanged when
@@ -49,6 +49,21 @@ heads.
   proportion heads to use the shared activation-aware cell-proportion builder.
 - Added regression tests for sigmoid remainder reconstruction, row-sum
   normalization, and config validation.
+
+### Softmax cell proportion mode
+
+The cell-proportion head now also supports a direct full-cell-type softmax
+workflow.
+
+- Added `softmax` as a third `model.cell_prop_activation_function` option.
+- Predicted all cell types directly in the softmax branch, including cancer
+  cells.
+- Enforced per-sample normalization with `softmax`, so predicted cell
+  proportions sum to `1` by construction.
+- Used full-vector supervised cell-proportion loss in the softmax branch.
+- Rejected `loss_coefficient.kld_p > 0` when
+  `cell_prop_activation_function: softmax`, because that branch does not define
+  a Dirichlet posterior.
 
 ## July 25, 2026
 

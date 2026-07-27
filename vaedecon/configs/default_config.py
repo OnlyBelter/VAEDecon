@@ -547,11 +547,12 @@ class ModelConfig(BaseModelConfig):
         default=False,
         description="Whether to predict cell type proportions"
     )
-    cell_prop_activation_function: Literal["softplus", "sigmoid"] = Field(
+    cell_prop_activation_function: Literal["softplus", "sigmoid", "softmax"] = Field(
         default="softplus",
         description="Activation used for the cell proportion head. "
                     "'softplus' keeps the Dirichlet workflow; 'sigmoid' predicts only non-cancer "
-                    "cell types and assigns the cancer proportion as the remainder."
+                    "cell types and assigns the cancer proportion as the remainder; "
+                    "'softmax' predicts all cell types directly and normalizes them to sum to 1."
     )
     cancer_cell_type_name: Optional[str] = Field(
         default=None,
@@ -743,6 +744,17 @@ class ModelConfig(BaseModelConfig):
                 raise ValueError(
                     "loss_coefficient['kld_p'] must be 0 when "
                     "cell_prop_activation_function='sigmoid' because the sigmoid branch "
+                    "does not define a Dirichlet posterior."
+                )
+        elif activation_function == "softmax":
+            if not self.predict_cell_prop:
+                raise ValueError(
+                    "cell_prop_activation_function='softmax' requires predict_cell_prop=True."
+                )
+            if kld_p_weight > 0:
+                raise ValueError(
+                    "loss_coefficient['kld_p'] must be 0 when "
+                    "cell_prop_activation_function='softmax' because the softmax branch "
                     "does not define a Dirichlet posterior."
                 )
 

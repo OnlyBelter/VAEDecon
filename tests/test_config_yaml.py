@@ -100,3 +100,33 @@ def test_sigmoid_cell_prop_rejects_dirichlet_kld():
                 }
             }
         )
+
+
+def test_softmax_cell_prop_rejects_dirichlet_kld():
+    with pytest.raises(ValueError, match="loss_coefficient\\['kld_p'\\] must be 0"):
+        VAEDeconConfig.from_dict(
+            {
+                "model": {
+                    "predict_cell_prop": True,
+                    "cell_prop_activation_function": "softmax",
+                    "loss_coefficient": {
+                        "kld_p": 0.1,
+                    },
+                }
+            }
+        )
+
+
+def test_softmax_cell_prop_does_not_require_cancer_cell_type_name():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "predict_cell_prop": True,
+                "cell_prop_activation_function": "softmax",
+                "loss_coefficient": {
+                    "kld_p": 0.0,
+                },
+            }
+        }
+    )
+    assert loaded.model.cell_prop_activation_function == "softmax"

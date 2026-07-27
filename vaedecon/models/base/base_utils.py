@@ -218,6 +218,14 @@ def build_cell_prop_from_head_output(
         dd_alpha = F.softplus(head_output) + eps
         return dirichlet_mean(dd_alpha), dd_alpha
 
+    if activation_function == "softmax":
+        if head_output.shape[-1] != n_cell_types:
+            raise ValueError(
+                f"Softmax cell proportion head output must have size {n_cell_types}, "
+                f"got {head_output.shape[-1]}."
+            )
+        return F.softmax(head_output, dim=-1), None
+
     if activation_function != "sigmoid":
         raise ValueError(f"Unsupported cell proportion activation: {activation_function}")
 

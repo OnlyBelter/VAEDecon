@@ -736,6 +736,9 @@ class VAE(BaseAE):
             elif self.cell_prop_activation_function == "sigmoid" and pred_cell_prop is not None:
                 supervised_pred = remove_cancer_cell_type(pred_cell_prop, self.cancer_cell_type_index)
                 target = remove_cancer_cell_type(y, self.cancer_cell_type_index)
+            elif self.cell_prop_activation_function == "softmax" and pred_cell_prop is not None:
+                supervised_pred = pred_cell_prop
+                target = y
             else:
                 supervised_pred = None
                 target = None
