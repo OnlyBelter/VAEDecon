@@ -39,6 +39,90 @@ def _configured_test_sets(config: VAEDeconConfig) -> Dict[str, TestSetConfig]:
     return dict(getattr(config.data, "test_sets", {}) or {})
 
 
+def _align_cell_prop_tables(
+        true_cell_prop: pd.DataFrame,
+        pred_cell_prop: pd.DataFrame,
+        cell_types: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Align true and predicted cell proportions to shared sample IDs and cell types."""
+    shared_columns = [cell_type for cell_type in cell_types
+                      if cell_type in true_cell_prop.columns and cell_type in pred_cell_prop.columns]
+    shared_sample_ids = [sample_id for sample_id in pred_cell_prop.index if sample_id in true_cell_prop.index]
+    if not shared_columns:
+        raise ValueError("No shared cell-type columns found between true and predicted cell proportions.")
+    if not shared_sample_ids:
+        raise ValueError("No shared sample IDs found between true and predicted cell proportions.")
+    aligned_true = true_cell_prop.loc[shared_sample_ids, shared_columns].copy()
+    aligned_pred = pred_cell_prop.loc[shared_sample_ids, shared_columns].copy()
+    return aligned_true, aligned_pred
+
+
+def _merge_cell_prop_tables(
+        true_cell_prop: pd.DataFrame,
+        pred_cell_prop: pd.DataFrame,
+) -> pd.DataFrame:
+    """Merge aligned true and predicted cell proportions into one comparison table."""
+    return pd.concat(
+        [
+            true_cell_prop.add_prefix("true_"),
+            pred_cell_prop.add_prefix("pred_"),
+        ],
+        axis=1,
+    )
+
+
+def _save_cell_prop_comparison_table(
+        true_cell_prop: pd.DataFrame,
+        pred_cell_prop_file_path: str,
+        cell_prop_result_dir: str,
+        cell_types: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Save one merged comparison table for the aligned true and predicted cell proportions."""
+    pred_cell_prop = pd.read_csv(pred_cell_prop_file_path, index_col=0)
+    aligned_true, aligned_pred = _align_cell_prop_tables(
+        true_cell_prop=true_cell_prop,
+        pred_cell_prop=pred_cell_prop,
+        cell_types=cell_types,
+    )
+    merged_cell_prop = _merge_cell_prop_tables(aligned_true, aligned_pred)
+    merged_cell_prop.to_csv(os.path.join(cell_prop_result_dir, "cell_prop_comparison.csv"))
+    return aligned_true, aligned_pred
+
+
+def _save_selected_sample_cell_props(
+        true_cell_prop: pd.DataFrame,
+        pred_cell_prop_file_path: str,
+        selected_sample2cell_id_file_path: str,
+        sc_gep_result_dir: str,
+        cell_types: list[str],
+) -> None:
+    """Save aligned true and predicted cell proportions for the selected scGEP samples."""
+    if (not pred_cell_prop_file_path or not selected_sample2cell_id_file_path
+            or not os.path.exists(pred_cell_prop_file_path)
+            or not os.path.exists(selected_sample2cell_id_file_path)):
+        return
+
+    if not isinstance(true_cell_prop, pd.DataFrame) or true_cell_prop.empty:
+        return
+
+    pred_cell_prop = pd.read_csv(pred_cell_prop_file_path, index_col=0)
+    selected_sample2cell_id = pd.read_csv(selected_sample2cell_id_file_path, index_col=0)
+    selected_sample_ids = [sample_id for sample_id in selected_sample2cell_id.index.drop_duplicates().tolist()
+                           if sample_id in pred_cell_prop.index and sample_id in true_cell_prop.index]
+    if not selected_sample_ids:
+        return
+
+    selected_true = true_cell_prop.loc[selected_sample_ids, :].copy()
+    selected_pred = pred_cell_prop.loc[selected_sample_ids, :].copy()
+    aligned_true, aligned_pred = _align_cell_prop_tables(
+        true_cell_prop=selected_true,
+        pred_cell_prop=selected_pred,
+        cell_types=cell_types,
+    )
+    aligned_true.to_csv(os.path.join(sc_gep_result_dir, "selected_samples_true_cell_prop.csv"))
+    aligned_pred.to_csv(os.path.join(sc_gep_result_dir, "selected_samples_predicted_cell_prop.csv"))
+
+
 class VAEDeconPredictor:
     """Predictor for VAEDecon model"""
 
@@ -298,10 +382,16 @@ class VAEDeconPredictor:
             and not true_cell_prop.empty
         ):
             logger.info("Plotting cell proportions...")
+            aligned_true_cell_prop, aligned_pred_cell_prop = _save_cell_prop_comparison_table(
+                true_cell_prop=true_cell_prop,
+                pred_cell_prop_file_path=pred_cell_prop_fp,
+                cell_prop_result_dir=cell_prop_result_dir,
+                cell_types=cell_types,
+            )
             _, _, metrics = compare_y_y_pred_subplot(
-                y_true=true_cell_prop,
-                y_pred=pred_cell_prop_fp,
-                show_columns=cell_types,
+                y_true=aligned_true_cell_prop,
+                y_pred=aligned_pred_cell_prop,
+                show_columns=aligned_true_cell_prop.columns.tolist(),
                 result_file_dir=cell_prop_result_dir,
                 dataset_name='VAEDecon',
                 show_metrics=self.config.evaluation.show_metrics,
@@ -310,6 +400,7 @@ class VAEDeconPredictor:
                 figsize=self.config.evaluation.figsize,
                 figure_format=self.figure_format,
                 return_metrics=True,
+                show_legend=True,
                 collapse_columns=False,
             )
             pd.DataFrame([metrics]).to_csv(
@@ -352,6 +443,13 @@ class VAEDeconPredictor:
                 max_visualize_samples=3,
                 selected_sample2cell_id_file_path=selected_sample2cell_id_fp,
                 return_metrics=False,
+            )
+            _save_selected_sample_cell_props(
+                true_cell_prop=true_cell_prop,
+                pred_cell_prop_file_path=pred_cell_prop_fp,
+                selected_sample2cell_id_file_path=selected_sample2cell_id_fp,
+                sc_gep_result_dir=sc_gep_result_dir,
+                cell_types=cell_types,
             )
             if getattr(self.config.evaluation, 'save_cell_type_specific_gep_metrics', False):
                 metrics_df = calculate_single_cell_gep_metrics_per_sample(
