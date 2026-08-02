@@ -130,6 +130,8 @@ model:
 
 evaluation:
   n_samples: 3
+  visualize_n_sample: 3
+  cell_prop_threshold: 0.005
   plot_cell_proportions: true
   plot_single_cell_gep: true
   plot_bulk_gep: true

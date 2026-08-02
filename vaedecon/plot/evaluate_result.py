@@ -214,7 +214,9 @@ class ScatterPlot(object):
 def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, pd.DataFrame],
                           show_columns: list = None, result_file_dir=None, annotation: dict = None,
                           y_label=None, x_label=None, model_name='average', figure_format: str='svg',
-                          show_metrics: bool = False, figsize: tuple = (8, 8), rasterized=False):
+                          show_metrics: bool = False, figsize: tuple = (8, 8), rasterized=False,
+                          legend_label_map: Dict[str, str] = None,
+                          series_color_map: Dict[str, str] = None):
     """
     Plot y against y_pred to visualize the performance of prediction result
 
@@ -275,13 +277,23 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
     plt.figure(figsize=figsize)
     all_x = []
     all_y = []
+    legend_label_map = legend_label_map or {}
+    series_color_map = series_color_map or {}
     for i, col in enumerate(show_columns):
         _x = y_true.loc[:, col]
         _y = y_pred.loc[:, col]
         all_x.append(_x)
         all_y.append(_y)
         alpha = 1 - 0.05 * i if i < 10 else 0.5
-        plt.scatter(_x, _y, label=col, s=6, alpha=alpha, rasterized=rasterized)
+        scatter_kwargs = {
+            "label": legend_label_map.get(col, col),
+            "s": 6,
+            "alpha": alpha,
+            "rasterized": rasterized,
+        }
+        if col in series_color_map:
+            scatter_kwargs["color"] = series_color_map[col]
+        plt.scatter(_x, _y, **scatter_kwargs)
         if annotation:
             x_left, x_right = plt.xlim()
             y_bottom, y_top = plt.ylim()
@@ -327,7 +339,9 @@ def compare_y_y_pred_subplot(y_true,
                              figsize: tuple = (8, 8),
                              ax=None,
                              show_legend=False,
-                             collapse_columns: bool = False
+                             collapse_columns: bool = False,
+                             legend_label_map: Dict[str, str] = None,
+                             series_color_map: Dict[str, str] = None,
 ) -> tuple:
     """
     Scatter plot of predicted vs. true cell-type fractions (or GEPs).
@@ -382,6 +396,8 @@ def compare_y_y_pred_subplot(y_true,
 
     y_true = read_xy(a=y_true, xy='cell_frac')
     y_pred = read_xy(a=y_pred, xy='cell_frac')
+    legend_label_map = legend_label_map or {}
+    series_color_map = series_color_map or {}
 
     # Axes Setup
     if ax is None:
@@ -418,7 +434,15 @@ def compare_y_y_pred_subplot(y_true,
         show_legend = False
     else:
         for i, col in enumerate(show_columns):
-            ax.scatter(all_x[i], all_y[i], label=col, s=1, alpha=0.65, rasterized=True)
+            scatter_kwargs = {
+                "label": legend_label_map.get(col, col),
+                "s": 1,
+                "alpha": 0.65,
+                "rasterized": True,
+            }
+            if col in series_color_map:
+                scatter_kwargs["color"] = series_color_map[col]
+            ax.scatter(all_x[i], all_y[i], **scatter_kwargs)
     data_min = min(all_x_cat.min(), all_y_cat.min())
     data_max = max(all_x_cat.max(), all_y_cat.max())
     margin = (data_max - data_min) * 0.02
@@ -483,6 +507,74 @@ def compare_y_y_pred_subplot(y_true,
     if return_metrics:
         return fig, ax, metrics
     return fig, ax
+
+
+def _format_cell_prop_for_legend(value: float) -> str:
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def _format_threshold_for_filename(value: float) -> str:
+    formatted = f"{value:.6f}".rstrip("0").rstrip(".")
+    return formatted.replace(".", "p")
+
+
+def _build_selected_sample_legend_label_map(
+    selected_true_cell_prop: pd.DataFrame | None,
+    cell_type: str,
+    sample_ids: List[str],
+) -> Dict[str, str]:
+    if selected_true_cell_prop is None or cell_type not in selected_true_cell_prop.columns:
+        return {sample_id: sample_id for sample_id in sample_ids}
+
+    label_map = {}
+    for sample_id in sample_ids:
+        if sample_id in selected_true_cell_prop.index:
+            cell_prop = float(selected_true_cell_prop.at[sample_id, cell_type])
+            label_map[sample_id] = (
+                f"{sample_id} (true={_format_cell_prop_for_legend(cell_prop)})"
+            )
+        else:
+            label_map[sample_id] = sample_id
+    return label_map
+
+
+def _build_selected_sample_color_map(sample_ids: List[str]) -> Dict[str, str]:
+    prop_cycle = plt.rcParams.get("axes.prop_cycle")
+    palette = prop_cycle.by_key().get("color", []) if prop_cycle is not None else []
+    if not palette:
+        palette = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple"]
+    return {
+        sample_id: palette[i % len(palette)]
+        for i, sample_id in enumerate(sample_ids)
+    }
+
+
+def _filter_selected_samples_by_true_prop(
+    selected_true_cell_prop: pd.DataFrame | None,
+    cell_type: str,
+    sample_ids: List[str],
+    min_true_cell_prop: float,
+) -> List[str]:
+    if selected_true_cell_prop is None or cell_type not in selected_true_cell_prop.columns:
+        return list(sample_ids)
+    return [
+        sample_id for sample_id in sample_ids
+        if sample_id in selected_true_cell_prop.index
+        and float(selected_true_cell_prop.at[sample_id, cell_type]) >= min_true_cell_prop
+    ]
+
+
+def _draw_empty_selected_sample_panel(ax, threshold: float) -> None:
+    ax.plot([0, 1], [0, 1], linestyle='--', linewidth=0.8, color='tab:gray', zorder=0)
+    ax.text(
+        0.5,
+        0.5,
+        f"No sample with true prop >= {_format_cell_prop_for_legend(threshold)}",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=5,
+    )
 
 
 def compare_exp_and_cell_fraction(merged_file_path, result_dir,
@@ -934,6 +1026,8 @@ def plot_single_cell_gep(
     figure_format: str = 'svg',
     selected_sample2cell_id_file_path: str = None,
     return_metrics: bool = False,
+    selected_true_cell_prop: pd.DataFrame | None = None,
+    filtered_min_true_cell_prop: float = 0.005,
 ) -> Dict[str, Dict[str, float]] | None:
     """Plots the reconstructed single-cell GEPs."""
     check_dir(Path(sc_gep_result_dir))
@@ -941,22 +1035,11 @@ def plot_single_cell_gep(
     sample_ids = test_set.get_sample_ids()
     gene_list = test_set.get_gene_list()
 
-    nrows = 4
-    ncols = 4
-    fig, axes = plt.subplots(nrows, ncols, sharex=False, sharey=False, figsize=(8, 8))
-    plt.subplots_adjust(
-        left=0.08,  # Left margin for y-axis label
-        right=0.98,
-        bottom=0.06,  # Bottom margin for x-axis label
-        top=0.98,
-        wspace=0.15,
-        hspace=0.25)
-
     # cell ids may have duplicate records
     selected_sample2cell_id = pd.read_csv(selected_sample2cell_id_file_path, index_col=0)
-    # selected_sample2cell_id = selected_sample2cell_id.rename(columns={selected_sample2cell_id.columns[0]: 'sample_id'})
 
     metrics_all_cell_types: Dict[str, Dict[str, float]] = {}
+    all_cell_type_plot_inputs = []
 
     for i, cell_type in enumerate(cell_types):
         selected_sample2cell_id_mapping = selected_sample2cell_id.loc[selected_sample2cell_id['cell_type'] == cell_type,'selected_cell_id'].to_dict()
@@ -971,12 +1054,8 @@ def plot_single_cell_gep(
             sc_gep_result_dir, f"sct_gep_{cell_type}_from_{n_samples}_bulksamples.csv"
         )
         y = pd.read_csv(result_file_path_ground_truth, index_col=0)
-        # if y.shape[1] != len(query_ids):  # some cell ids are missing by deduplication
         y = y.loc[:, [selected_sample2cell_id_mapping[i] for i in query_ids]]
         y.columns = query_ids
-        # reverse the key and value in the dict
-        # cell_id2sample_id_mapping = {v: k for k, v in selected_sample2cell_id_mapping.items()}
-        # y = y.rename(columns=query_ids)
         if not os.path.exists(result_file_path):
             recon_sc_gep_ct = recon_sc_gep[query_inx, :, i]
             recon_sc_gep_ct_pd = pd.DataFrame(
@@ -984,70 +1063,137 @@ def plot_single_cell_gep(
             )
             recon_sc_gep_ct_pd = non_log2log_cpm(recon_sc_gep_ct_pd, transpose=False)
             recon_sc_gep_ct_pd.T.to_csv(result_file_path)
-            compare_y_y_pred_plot(
-                y_true=y,
-                y_pred=result_file_path,
-                show_columns=query_ids_visual,
-                result_file_dir=sc_gep_result_dir,
-                model_name=f"DeSide_{cell_type}",
-                show_metrics=True,
-                y_label="y_recon_sc_gep",
-                figsize=(3.5, 3.5),
-                rasterized=True,
-                figure_format=figure_format,
-            )
-        row_index = i // nrows
-        col_index = i % ncols
-        if return_metrics:
-            fig, ax, metrics = compare_y_y_pred_subplot(
-                y_pred=result_file_path,
-                y_true=y,
-                show_columns=query_ids_visual,
-                x_label=cell_type,
-                show_metrics=True,
-                return_metrics=True,
-                figsize=(2, 2),
-                dataset_name='',
-                ax=axes[row_index, col_index],
-                show_legend=True,
-                collapse_columns=False,
-                figure_format=figure_format,
-            )
-            metrics_all_cell_types[cell_type] = metrics
-        else:
-            fig, ax = compare_y_y_pred_subplot(
-                y_pred=result_file_path,
-                y_true=y,
-                show_columns=query_ids_visual,
-                x_label=cell_type,
-                show_metrics=True,
-                return_metrics=False,
-                figsize=(2, 2),
-                dataset_name='',
-                ax=axes[row_index, col_index],
-                show_legend=True,
-                collapse_columns=False,
-                figure_format=figure_format,
-            )
-    # fig.add_subplot(111, frameon=False)
-    ax_shared = fig.add_axes((0.0, 0.0, 1.0, 1.0), frameon=False)
-    ax_shared.set_xlim(0, 1)
-    ax_shared.set_ylim(0, 1)
+        legend_label_map = _build_selected_sample_legend_label_map(
+            selected_true_cell_prop=selected_true_cell_prop,
+            cell_type=cell_type,
+            sample_ids=query_ids_visual,
+        )
+        series_color_map = _build_selected_sample_color_map(query_ids_visual)
+        compare_y_y_pred_plot(
+            y_true=y,
+            y_pred=result_file_path,
+            show_columns=query_ids_visual,
+            result_file_dir=sc_gep_result_dir,
+            model_name=f"DeSide_{cell_type}",
+            show_metrics=True,
+            y_label="y_recon_sc_gep",
+            figsize=(3.5, 3.5),
+            rasterized=True,
+            figure_format=figure_format,
+            legend_label_map=legend_label_map,
+            series_color_map=series_color_map,
+        )
+        all_cell_type_plot_inputs.append(
+            {
+                "cell_type": cell_type,
+                "y_true": y,
+                "y_pred": result_file_path,
+                "show_columns": query_ids_visual,
+                "legend_label_map": legend_label_map,
+                "series_color_map": series_color_map,
+                "filtered_show_columns": _filter_selected_samples_by_true_prop(
+                    selected_true_cell_prop=selected_true_cell_prop,
+                    cell_type=cell_type,
+                    sample_ids=query_ids_visual,
+                    min_true_cell_prop=filtered_min_true_cell_prop,
+                ),
+            }
+        )
 
-    ax_shared.tick_params(
-        labelcolor="none", which="both", top=False, bottom=False, left=False, right=False
-    )
-    ax_shared.set_xticks([])
-    ax_shared.set_yticks([])
+    def _plot_all_cell_types_figure(
+        filtered: bool,
+        output_name: str,
+    ) -> Dict[str, Dict[str, float]]:
+        nrows = 4
+        ncols = 4
+        fig, axes = plt.subplots(nrows, ncols, sharex=False, sharey=False, figsize=(8, 8))
+        plt.subplots_adjust(
+            left=0.08,
+            right=0.98,
+            bottom=0.06,
+            top=0.98,
+            wspace=0.15,
+            hspace=0.25,
+        )
+        collected_metrics: Dict[str, Dict[str, float]] = {}
+        for i, plot_input in enumerate(all_cell_type_plot_inputs):
+            row_index = i // nrows
+            col_index = i % ncols
+            current_show_columns = (
+                plot_input["filtered_show_columns"] if filtered else plot_input["show_columns"]
+            )
+            current_ax = axes[row_index, col_index]
+            if not current_show_columns:
+                current_ax.set_xlabel(plot_input["cell_type"], fontsize=5)
+                current_ax.set_ylabel("", fontsize=5)
+                _draw_empty_selected_sample_panel(current_ax, filtered_min_true_cell_prop)
+                continue
+            if return_metrics and not filtered:
+                fig, ax, metrics = compare_y_y_pred_subplot(
+                    y_pred=plot_input["y_pred"],
+                    y_true=plot_input["y_true"],
+                    show_columns=current_show_columns,
+                    x_label=plot_input["cell_type"],
+                    show_metrics=True,
+                    return_metrics=True,
+                    figsize=(2, 2),
+                    dataset_name='',
+                    ax=current_ax,
+                    show_legend=True,
+                    collapse_columns=False,
+                    figure_format=figure_format,
+                    legend_label_map=plot_input["legend_label_map"],
+                    series_color_map=plot_input["series_color_map"],
+                )
+                collected_metrics[plot_input["cell_type"]] = metrics
+            else:
+                compare_y_y_pred_subplot(
+                    y_pred=plot_input["y_pred"],
+                    y_true=plot_input["y_true"],
+                    show_columns=current_show_columns,
+                    x_label=plot_input["cell_type"],
+                    show_metrics=True,
+                    return_metrics=False,
+                    figsize=(2, 2),
+                    dataset_name='',
+                    ax=current_ax,
+                    show_legend=True,
+                    collapse_columns=False,
+                    figure_format=figure_format,
+                    legend_label_map=plot_input["legend_label_map"],
+                    series_color_map=plot_input["series_color_map"],
+                )
 
-    ax_shared.set_xlabel("Predicted gene expression values", labelpad=2)
-    ax_shared.set_ylabel("True gene expression values", labelpad=2)
-    fig.savefig(
-        os.path.join(sc_gep_result_dir, f"y_true_vs_y_pred_gep_all_cell_types.{figure_format}"),
-        dpi=300,
-        bbox_inches="tight",
+        ax_shared = fig.add_axes((0.0, 0.0, 1.0, 1.0), frameon=False)
+        ax_shared.set_xlim(0, 1)
+        ax_shared.set_ylim(0, 1)
+        ax_shared.tick_params(
+            labelcolor="none", which="both", top=False, bottom=False, left=False, right=False
+        )
+        ax_shared.set_xticks([])
+        ax_shared.set_yticks([])
+        ax_shared.set_xlabel("Predicted gene expression values", labelpad=2)
+        ax_shared.set_ylabel("True gene expression values", labelpad=2)
+        fig.savefig(
+            os.path.join(sc_gep_result_dir, f"{output_name}.{figure_format}"),
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+        return collected_metrics
+
+    metrics_all_cell_types = _plot_all_cell_types_figure(
+        filtered=False,
+        output_name="y_true_vs_y_pred_gep_all_cell_types",
     )
-    plt.close(fig)
+    if selected_true_cell_prop is not None and not selected_true_cell_prop.empty:
+        _plot_all_cell_types_figure(
+            filtered=True,
+            output_name=(
+                "y_true_vs_y_pred_gep_all_cell_types_true_prop_ge_"
+                f"{_format_threshold_for_filename(filtered_min_true_cell_prop)}"
+            ),
+        )
     if return_metrics:
         return metrics_all_cell_types
     return None

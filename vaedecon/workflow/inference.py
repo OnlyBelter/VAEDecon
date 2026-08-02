@@ -71,6 +71,25 @@ def _merge_cell_prop_tables(
     )
 
 
+def _merge_aligned_cell_prop_long_table(
+        true_cell_prop: pd.DataFrame,
+        pred_cell_prop: pd.DataFrame,
+) -> pd.DataFrame:
+    """Convert aligned true/predicted cell proportions into one long table."""
+    rows = []
+    for sample_id in true_cell_prop.index.tolist():
+        for cell_type in true_cell_prop.columns.tolist():
+            rows.append(
+                {
+                    "sample_id": sample_id,
+                    "cell_type": cell_type,
+                    "true_cell_prop": float(true_cell_prop.at[sample_id, cell_type]),
+                    "pred_cell_prop": float(pred_cell_prop.at[sample_id, cell_type]),
+                }
+            )
+    return pd.DataFrame(rows, columns=["sample_id", "cell_type", "true_cell_prop", "pred_cell_prop"])
+
+
 def _save_cell_prop_comparison_table(
         true_cell_prop: pd.DataFrame,
         pred_cell_prop_file_path: str,
@@ -95,22 +114,22 @@ def _save_selected_sample_cell_props(
         selected_sample2cell_id_file_path: str,
         sc_gep_result_dir: str,
         cell_types: list[str],
-) -> None:
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Save aligned true and predicted cell proportions for the selected scGEP samples."""
     if (not pred_cell_prop_file_path or not selected_sample2cell_id_file_path
             or not os.path.exists(pred_cell_prop_file_path)
             or not os.path.exists(selected_sample2cell_id_file_path)):
-        return
+        return None, None
 
     if not isinstance(true_cell_prop, pd.DataFrame) or true_cell_prop.empty:
-        return
+        return None, None
 
     pred_cell_prop = pd.read_csv(pred_cell_prop_file_path, index_col=0)
     selected_sample2cell_id = pd.read_csv(selected_sample2cell_id_file_path, index_col=0)
     selected_sample_ids = [sample_id for sample_id in selected_sample2cell_id.index.drop_duplicates().tolist()
                            if sample_id in pred_cell_prop.index and sample_id in true_cell_prop.index]
     if not selected_sample_ids:
-        return
+        return None, None
 
     selected_true = true_cell_prop.loc[selected_sample_ids, :].copy()
     selected_pred = pred_cell_prop.loc[selected_sample_ids, :].copy()
@@ -121,6 +140,15 @@ def _save_selected_sample_cell_props(
     )
     aligned_true.to_csv(os.path.join(sc_gep_result_dir, "selected_samples_true_cell_prop.csv"))
     aligned_pred.to_csv(os.path.join(sc_gep_result_dir, "selected_samples_predicted_cell_prop.csv"))
+    _merge_aligned_cell_prop_long_table(
+        true_cell_prop=aligned_true,
+        pred_cell_prop=aligned_pred,
+    ).to_csv(
+        os.path.join(sc_gep_result_dir, "selected_samples_cell_prop_long.csv"),
+        index=False,
+        float_format="%.6f",
+    )
+    return aligned_true, aligned_pred
 
 
 class VAEDeconPredictor:
@@ -433,6 +461,13 @@ class VAEDeconPredictor:
                     random_seed=42,
                     selected_sample2cell_id_file_path=selected_sample2cell_id_fp
                 )
+            selected_true_cell_prop, _ = _save_selected_sample_cell_props(
+                true_cell_prop=true_cell_prop,
+                pred_cell_prop_file_path=pred_cell_prop_fp,
+                selected_sample2cell_id_file_path=selected_sample2cell_id_fp,
+                sc_gep_result_dir=sc_gep_result_dir,
+                cell_types=cell_types,
+            )
             plot_single_cell_gep(
                 test_set=test_set,
                 cell_types=cell_types,
@@ -440,16 +475,11 @@ class VAEDeconPredictor:
                 figure_format=self.figure_format,
                 sc_gep_result_dir=sc_gep_result_dir,
                 n_samples=self.config.evaluation.n_samples,
-                max_visualize_samples=3,
+                max_visualize_samples=self.config.evaluation.visualize_n_sample,
                 selected_sample2cell_id_file_path=selected_sample2cell_id_fp,
                 return_metrics=False,
-            )
-            _save_selected_sample_cell_props(
-                true_cell_prop=true_cell_prop,
-                pred_cell_prop_file_path=pred_cell_prop_fp,
-                selected_sample2cell_id_file_path=selected_sample2cell_id_fp,
-                sc_gep_result_dir=sc_gep_result_dir,
-                cell_types=cell_types,
+                selected_true_cell_prop=selected_true_cell_prop,
+                filtered_min_true_cell_prop=self.config.evaluation.cell_prop_threshold,
             )
             if getattr(self.config.evaluation, 'save_cell_type_specific_gep_metrics', False):
                 metrics_df = calculate_single_cell_gep_metrics_per_sample(

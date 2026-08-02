@@ -861,6 +861,8 @@ class ModelConfig(BaseModelConfig):
 class EvaluationConfig:
     """evaluation configuration"""
     n_samples: int = 3
+    visualize_n_sample: int = 3
+    cell_prop_threshold: float = 0.005
     plot_cell_proportions: bool = True
     plot_single_cell_gep: bool = True
     plot_bulk_gep: bool = True
