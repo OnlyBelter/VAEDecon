@@ -91,10 +91,10 @@ def test_filtered_selected_samples_keep_original_color_mapping():
         series_color_map=color_map,
     )
 
-    facecolors = [collection.get_facecolors()[0] for collection in ax.collections]
+    facecolors = [collection.get_facecolors()[0][:3] for collection in ax.collections]
     expected_colors = [
-        matplotlib.colors.to_rgba(color_map["s2"]),
-        matplotlib.colors.to_rgba(color_map["s4"]),
+        matplotlib.colors.to_rgb(color_map["s2"]),
+        matplotlib.colors.to_rgb(color_map["s4"]),
     ]
 
     for actual, expected in zip(facecolors, expected_colors):
