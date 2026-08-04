@@ -67,6 +67,47 @@ def test_named_test_sets_backfill_legacy_fields():
     )
 
 
+def test_sct_gep_gene_mean_std_reference_falls_back_to_existing_path():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "sct_gep_file_path": "./datasets/sct_gep.h5ad",
+            }
+        }
+    )
+    assert str(loaded.data.sct_gep_file_path) == "./datasets/sct_gep.h5ad"
+    assert str(loaded.data.gene_mean_std_sct_gep_file_path) == ""
+
+
+def test_sct_gep_gene_mean_std_reference_accepts_dedicated_path():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "gene_mean_std_sct_gep_file_path": "./datasets/gene_mean_std_ref.h5ad",
+            }
+        }
+    )
+    assert str(loaded.data.gene_mean_std_sct_gep_file_path) == "./datasets/gene_mean_std_ref.h5ad"
+
+
+def test_sct_gep_gene_mean_std_reference_requires_any_reference_path():
+    with pytest.raises(
+        ValueError,
+        match="gene_mean_std_sct_gep_file_path or sct_gep_file_path must be set",
+    ):
+        VAEDeconConfig.from_dict(
+            {
+                "data": {
+                    "gene_mean_std_source": "sct_gep",
+                    "sct_gep_file_path": "",
+                    "gene_mean_std_sct_gep_file_path": "",
+                }
+            }
+        )
+
+
 def test_duplicate_yaml_keys_raise(tmp_path: Path):
     p = tmp_path / "dup.yaml"
     p.write_text("evaluation:\n  val_batch_size: 128\n  val_batch_size: 64\n")

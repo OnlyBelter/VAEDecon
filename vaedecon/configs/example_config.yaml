@@ -8,6 +8,7 @@ data:
   scaling_factor: 20.0  #  Default scaling divisor when scaling_by_constant is True.
   min_var: 1.0  # Minimum variance threshold for gene filtering (if remove_low_var_genes is True).
   gene_mean_std_source: "sct_gep"  # "sct_gep" or "pooled_sc"
+  gene_mean_std_sct_gep_file_path: ""  # Optional dedicated SCT .h5ad for gene mean/std when gene_mean_std_source is "sct_gep"
   pooled_sc_h5ad_path: ""  # Required when gene_mean_std_source is "pooled_sc"
   pooled_sc_cell_type_col: "cell_type"
   pooled_sc_cell_subtype_col: "cell_subtype"

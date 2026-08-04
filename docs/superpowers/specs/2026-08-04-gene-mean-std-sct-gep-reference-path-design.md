@@ -2,7 +2,7 @@
 
 ## Goal
 
-Support a dedicated single-cell reference `.h5ad` for computing gene mean/std when:
+Support a dedicated single-cell-type reference `.h5ad` for computing gene mean/std when:
 
 - `data.gene_mean_std_source: "sct_gep"`
 

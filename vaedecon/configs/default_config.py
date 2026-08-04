@@ -108,6 +108,13 @@ class DataConfig(BaseConfig):
         default="sct_gep",
         description="Source of the reference gene mean/std statistics used in training.",
     )
+    gene_mean_std_sct_gep_file_path: str | Path = Field(
+        default="",
+        description=(
+            "Optional dedicated SCT .h5ad used to compute gene mean/std when "
+            "gene_mean_std_source='sct_gep'. Falls back to sct_gep_file_path when empty."
+        ),
+    )
     pooled_sc_h5ad_path: str | Path = Field(
         default="",
         description="Path to the pooled scRNA-seq .h5ad used when gene_mean_std_source='pooled_sc'.",
@@ -157,6 +164,17 @@ class DataConfig(BaseConfig):
                 raise ValueError("pooled_sc_h5ad_path must be set when gene_mean_std_source='pooled_sc'")
             if self.pooled_sc_sample_size <= 0:
                 raise ValueError("pooled_sc_sample_size must be > 0")
+        elif (
+            not self.gene_mean_std_sct_gep_file_path
+            or str(self.gene_mean_std_sct_gep_file_path).strip() == ""
+        ) and (
+            not self.sct_gep_file_path
+            or str(self.sct_gep_file_path).strip() == ""
+        ):
+            raise ValueError(
+                "gene_mean_std_sct_gep_file_path or sct_gep_file_path must be set "
+                "when gene_mean_std_source='sct_gep'"
+            )
         return self
 
     @model_validator(mode="after")

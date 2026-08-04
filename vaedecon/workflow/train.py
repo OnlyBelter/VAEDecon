@@ -175,7 +175,7 @@ class VAEDeconTrainer:
             )
         else:
             load_or_compute_gene_mean_std(
-                sct_gep_fp=self.config.data.sct_gep_file_path,
+                sct_gep_fp=str(self._resolve_gene_mean_std_sct_gep_path()),
                 gene_list=dataset.gene_list,
                 cell_type_fp=self.config.model.cell_type_fp,
                 input_gene_list_fp=self.config.model.input_gene_list_fp,
@@ -184,6 +184,19 @@ class VAEDeconTrainer:
                 log_fn=log_message,
                 out_fp=gene_mean_std_fp,
             )
+
+    def _resolve_gene_mean_std_sct_gep_path(self) -> Path:
+        dedicated_fp = self.config.data.gene_mean_std_sct_gep_file_path
+        if dedicated_fp and str(dedicated_fp).strip() != "":
+            return Path(dedicated_fp)
+        return Path(self.config.data.sct_gep_file_path)
+
+    def _build_gene_mean_std_output_path(self) -> Path:
+        scaling_factor = self.config.data.scaling_factor
+        model_dir = Path(self.config.model.model_dir)
+        if self.config.data.scaling_by_constant:
+            return model_dir / f"gene_mean_std_log2p1_scaled_by_{scaling_factor}.csv"
+        return model_dir / "gene_mean_std_log2p1.csv"
 
     def _create_model(self, model_config: ModelConfig):
         """Instantiate the VAE model using the cached ModelConfig."""
@@ -207,24 +220,7 @@ class VAEDeconTrainer:
         """
         input_dim = dataset.data.shape[1]  # same as n_genes in each GEP
         n_genes = input_dim
-        scaling_factor = self.config.data.scaling_factor
-        if self.config.data.gene_mean_std_source == "pooled_sc":
-            if self.config.data.scaling_by_constant:
-                gene_mean_std_fp = (
-                    Path(self.config.model.model_dir)
-                    / f"gene_mean_std_log2p1_scaled_by_{scaling_factor}.csv"
-                )
-            else:
-                gene_mean_std_fp = Path(self.config.model.model_dir) / "gene_mean_std_log2p1.csv"
-        else:
-            suffix = (
-                f"gene_mean_std_log2p1_scaled_by_{scaling_factor}_{len(training_file_paths)}training_files_{n_genes}genes.csv"
-                if self.config.data.scaling_by_constant
-                else f"gene_mean_std_log2p1_{len(training_file_paths)}training_files_{n_genes}genes.csv"
-            )
-            gene_mean_std_fp = (
-                Path(self.config.data.sct_gep_file_path).parent / suffix
-            )
+        gene_mean_std_fp = self._build_gene_mean_std_output_path()
 
         return ModelConfig(
             name='ModelConfig',
