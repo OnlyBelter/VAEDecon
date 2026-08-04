@@ -311,6 +311,14 @@ class VAEDeconTrainer:
             chunk_size=self.config.data.chunk_size,
             min_var=self.config.data.min_var,
             scaling_factor=self.config.data.scaling_factor,
+            gene_mean_std_source=self.config.data.gene_mean_std_source,
+            gene_mean_std_sct_gep_file_path=self.config.data.gene_mean_std_sct_gep_file_path,
+            sct_gep_file_path=self.config.data.sct_gep_file_path,
+            pooled_sc_h5ad_path=self.config.data.pooled_sc_h5ad_path,
+            pooled_sc_cell_type_col=self.config.data.pooled_sc_cell_type_col,
+            pooled_sc_cell_subtype_col=self.config.data.pooled_sc_cell_subtype_col,
+            pooled_sc_sample_size=self.config.data.pooled_sc_sample_size,
+            pooled_sc_seed=self.config.data.pooled_sc_seed,
             processed_data_dir=self._processed_training_set_dir,
         )
 
