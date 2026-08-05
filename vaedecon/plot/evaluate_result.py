@@ -577,6 +577,154 @@ def _draw_empty_selected_sample_panel(ax, threshold: float) -> None:
     )
 
 
+def _compute_pairwise_ccc_matrix(
+    left_df: pd.DataFrame,
+    right_df: pd.DataFrame,
+    row_sample_ids: List[str],
+    col_sample_ids: List[str] | None = None,
+) -> pd.DataFrame:
+    if col_sample_ids is None:
+        col_sample_ids = row_sample_ids
+
+    common_genes = [gene for gene in left_df.index if gene in right_df.index]
+    if not common_genes:
+        raise ValueError("No common genes found when computing pairwise CCC matrix.")
+
+    left_df = left_df.loc[common_genes, row_sample_ids]
+    right_df = right_df.loc[common_genes, col_sample_ids]
+
+    matrix = pd.DataFrame(index=row_sample_ids, columns=col_sample_ids, dtype=float)
+    for row_sample_id in row_sample_ids:
+        left_values = left_df[row_sample_id].to_numpy()
+        for col_sample_id in col_sample_ids:
+            matrix.at[row_sample_id, col_sample_id] = get_ccc(
+                x=left_values,
+                y=right_df[col_sample_id].to_numpy(),
+            )
+    return matrix
+
+
+def _draw_empty_similarity_heatmap(
+    output_fp: str | Path,
+    title: str,
+    threshold: float,
+) -> None:
+    fig, ax = plt.subplots(figsize=(3.5, 3.0))
+    ax.axis("off")
+    ax.text(
+        0.5,
+        0.6,
+        "No sample passed the threshold",
+        ha="center",
+        va="center",
+        fontsize=8,
+    )
+    ax.text(
+        0.5,
+        0.4,
+        f"true prop >= {_format_cell_prop_for_legend(threshold)}",
+        ha="center",
+        va="center",
+        fontsize=7,
+    )
+    ax.set_title(title, fontsize=9)
+    fig.savefig(output_fp, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_pairwise_ccc_heatmap(
+    matrix_df: pd.DataFrame,
+    output_fp: str | Path,
+    title: str,
+) -> None:
+    n_rows = max(matrix_df.shape[0], 1)
+    n_cols = max(matrix_df.shape[1], 1)
+    fig_width = max(3.5, min(0.28 * n_cols + 1.8, 14))
+    fig_height = max(3.0, min(0.28 * n_rows + 1.6, 14))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    sns.heatmap(
+        matrix_df,
+        ax=ax,
+        cmap="vlag",
+        vmin=-1,
+        vmax=1,
+        square=True,
+        cbar_kws={"label": "CCC"},
+    )
+    ax.set_title(title, fontsize=9)
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.tick_params(axis="x", labelrotation=45, labelsize=6)
+    ax.tick_params(axis="y", labelrotation=0, labelsize=6)
+    fig.savefig(output_fp, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_selected_sample_similarity_outputs(
+    *,
+    cell_type: str,
+    y_true: pd.DataFrame,
+    y_pred: pd.DataFrame,
+    sample_ids: List[str],
+    similarity_result_dir: str | Path,
+    threshold: float,
+    figure_format: str,
+) -> None:
+    threshold_tag = _format_threshold_for_filename(threshold)
+    prefix = f"{cell_type}_ccc_true_prop_ge_{threshold_tag}"
+    if not sample_ids:
+        for matrix_name, title in [
+            ("true_vs_true", f"{cell_type}: true vs true"),
+            ("recon_vs_recon", f"{cell_type}: reconstructed vs reconstructed"),
+            ("true_vs_recon", f"{cell_type}: true vs reconstructed"),
+        ]:
+            _draw_empty_similarity_heatmap(
+                output_fp=Path(similarity_result_dir) / f"{prefix}_{matrix_name}.{figure_format}",
+                title=title,
+                threshold=threshold,
+            )
+        return
+
+    matrix_builders = {
+        "true_vs_true": (
+            _compute_pairwise_ccc_matrix(
+                left_df=y_true,
+                right_df=y_true,
+                row_sample_ids=sample_ids,
+                col_sample_ids=sample_ids,
+            ),
+            f"{cell_type}: true vs true",
+        ),
+        "recon_vs_recon": (
+            _compute_pairwise_ccc_matrix(
+                left_df=y_pred,
+                right_df=y_pred,
+                row_sample_ids=sample_ids,
+                col_sample_ids=sample_ids,
+            ),
+            f"{cell_type}: reconstructed vs reconstructed",
+        ),
+        "true_vs_recon": (
+            _compute_pairwise_ccc_matrix(
+                left_df=y_true,
+                right_df=y_pred,
+                row_sample_ids=sample_ids,
+                col_sample_ids=sample_ids,
+            ),
+            f"{cell_type}: true vs reconstructed",
+        ),
+    }
+    for matrix_name, (matrix_df, title) in matrix_builders.items():
+        csv_fp = Path(similarity_result_dir) / f"{prefix}_{matrix_name}.csv"
+        fig_fp = Path(similarity_result_dir) / f"{prefix}_{matrix_name}.{figure_format}"
+        matrix_df.to_csv(csv_fp, float_format="%.6f")
+        _plot_pairwise_ccc_heatmap(
+            matrix_df=matrix_df,
+            output_fp=fig_fp,
+            title=title,
+        )
+
+
 def compare_exp_and_cell_fraction(merged_file_path, result_dir,
                                   cell_types: list, clustering_ct: list = None,
                                   outlier_file_path=None, predicted_by='DeSide', font_scale=1.5,
@@ -1031,6 +1179,8 @@ def plot_single_cell_gep(
 ) -> Dict[str, Dict[str, float]] | None:
     """Plots the reconstructed single-cell GEPs."""
     check_dir(Path(sc_gep_result_dir))
+    similarity_result_dir = os.path.join(sc_gep_result_dir, "inter_sample_similarity_ccc")
+    check_dir(Path(similarity_result_dir))
     recon_sc_gep = pred_a["recon_x_all_types"].detach().cpu().numpy()
     sample_ids = test_set.get_sample_ids()
     gene_list = test_set.get_gene_list()
@@ -1063,6 +1213,8 @@ def plot_single_cell_gep(
             )
             recon_sc_gep_ct_pd = non_log2log_cpm(recon_sc_gep_ct_pd, transpose=False)
             recon_sc_gep_ct_pd.T.to_csv(result_file_path)
+        y_pred_df = pd.read_csv(result_file_path, index_col=0)
+        y_pred_df = y_pred_df.loc[:, query_ids]
         legend_label_map = _build_selected_sample_legend_label_map(
             selected_true_cell_prop=selected_true_cell_prop,
             cell_type=cell_type,
@@ -1098,6 +1250,20 @@ def plot_single_cell_gep(
                     min_true_cell_prop=filtered_min_true_cell_prop,
                 ),
             }
+        )
+        _save_selected_sample_similarity_outputs(
+            cell_type=cell_type,
+            y_true=y,
+            y_pred=y_pred_df,
+            sample_ids=_filter_selected_samples_by_true_prop(
+                selected_true_cell_prop=selected_true_cell_prop,
+                cell_type=cell_type,
+                sample_ids=query_ids,
+                min_true_cell_prop=filtered_min_true_cell_prop,
+            ),
+            similarity_result_dir=similarity_result_dir,
+            threshold=filtered_min_true_cell_prop,
+            figure_format=figure_format,
         )
 
     def _plot_all_cell_types_figure(

@@ -7,6 +7,8 @@ pytest.importorskip("statsmodels")
 from vaedecon.plot.evaluate_result import (
     _build_selected_sample_color_map,
     _build_selected_sample_legend_label_map,
+    _compute_pairwise_ccc_matrix,
+    _save_selected_sample_similarity_outputs,
     compare_y_y_pred_subplot,
     _draw_empty_selected_sample_panel,
     _filter_selected_samples_by_true_prop,
@@ -101,3 +103,70 @@ def test_filtered_selected_samples_keep_original_color_mapping():
         assert tuple(actual) == pytest.approx(expected)
 
     matplotlib.pyplot.close(fig)
+
+
+def test_compute_pairwise_ccc_matrix_returns_expected_shape_and_labels():
+    y_true = pd.DataFrame(
+        {
+            "s1": [1.0, 2.0, 3.0],
+            "s2": [1.1, 2.1, 3.1],
+        },
+        index=["g1", "g2", "g3"],
+    )
+    y_pred = pd.DataFrame(
+        {
+            "s1": [1.0, 2.0, 3.0],
+            "s2": [1.2, 2.2, 3.2],
+        },
+        index=["g1", "g2", "g3"],
+    )
+
+    matrix = _compute_pairwise_ccc_matrix(
+        left_df=y_pred,
+        right_df=y_true,
+        row_sample_ids=["s1", "s2"],
+        col_sample_ids=["s1", "s2"],
+    )
+
+    assert list(matrix.index) == ["s1", "s2"]
+    assert list(matrix.columns) == ["s1", "s2"]
+    assert matrix.shape == (2, 2)
+    assert matrix.loc["s1", "s1"] == pytest.approx(1.0)
+
+
+def test_save_selected_sample_similarity_outputs_writes_expected_matrix_types(tmp_path):
+    y_true = pd.DataFrame(
+        {
+            "s1": [1.0, 2.0, 3.0],
+            "s2": [1.1, 2.1, 3.1],
+        },
+        index=["g1", "g2", "g3"],
+    )
+    y_pred = pd.DataFrame(
+        {
+            "s1": [1.0, 2.0, 3.0],
+            "s2": [1.2, 2.2, 3.2],
+        },
+        index=["g1", "g2", "g3"],
+    )
+
+    _save_selected_sample_similarity_outputs(
+        cell_type="Cancer Cells",
+        y_true=y_true,
+        y_pred=y_pred,
+        sample_ids=["s1", "s2"],
+        similarity_result_dir=tmp_path,
+        threshold=0.005,
+        figure_format="png",
+    )
+
+    expected_stem = "Cancer Cells_ccc_true_prop_ge_0p005"
+    for matrix_name in ["true_vs_true", "recon_vs_recon", "true_vs_recon"]:
+        assert (tmp_path / f"{expected_stem}_{matrix_name}.csv").exists()
+        assert (tmp_path / f"{expected_stem}_{matrix_name}.png").exists()
+
+    true_vs_recon = pd.read_csv(
+        tmp_path / f"{expected_stem}_true_vs_recon.csv",
+        index_col=0,
+    )
+    assert true_vs_recon.loc["s1", "s1"] == pytest.approx(1.0)
