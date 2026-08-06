@@ -8,6 +8,7 @@ from vaedecon.plot.evaluate_result import (
     _build_selected_sample_color_map,
     _build_selected_sample_legend_label_map,
     _compute_pairwise_ccc_matrix,
+    _plot_pairwise_ccc_heatmap,
     _save_selected_sample_similarity_outputs,
     compare_y_y_pred_subplot,
     _draw_empty_selected_sample_panel,
@@ -170,3 +171,31 @@ def test_save_selected_sample_similarity_outputs_writes_expected_matrix_types(tm
         index_col=0,
     )
     assert true_vs_recon.loc["s1", "s1"] == pytest.approx(1.0)
+
+
+def test_plot_pairwise_ccc_heatmap_uses_nonnegative_data_driven_bounds(tmp_path, monkeypatch):
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("matplotlib.pyplot")
+
+    matrix_df = pd.DataFrame(
+        [[0.21, 0.35], [0.41, 0.93]],
+        index=["s1", "s2"],
+        columns=["s1", "s2"],
+    )
+    captured = {}
+
+    def _fake_heatmap(*_args, **kwargs):
+        captured["vmin"] = kwargs.get("vmin")
+        captured["vmax"] = kwargs.get("vmax")
+        return kwargs["ax"]
+
+    monkeypatch.setattr("vaedecon.plot.evaluate_result.sns.heatmap", _fake_heatmap)
+
+    _plot_pairwise_ccc_heatmap(
+        matrix_df=matrix_df,
+        output_fp=tmp_path / "ccc.png",
+        title="CCC",
+    )
+
+    assert captured["vmin"] == pytest.approx(0.21)
+    assert captured["vmax"] == pytest.approx(0.93)

@@ -641,13 +641,17 @@ def _plot_pairwise_ccc_heatmap(
     n_cols = max(matrix_df.shape[1], 1)
     fig_width = max(3.5, min(0.28 * n_cols + 1.8, 14))
     fig_height = max(3.0, min(0.28 * n_rows + 1.6, 14))
+    matrix_min = float(np.nanmin(matrix_df.values)) if matrix_df.size else 0.0
+    matrix_max = float(np.nanmax(matrix_df.values)) if matrix_df.size else 1.0
+    vmin = max(0.0, matrix_min)
+    vmax = max(vmin, matrix_max)
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     sns.heatmap(
         matrix_df,
         ax=ax,
         cmap="vlag",
-        vmin=-1,
-        vmax=1,
+        vmin=vmin,
+        vmax=vmax,
         square=True,
         cbar_kws={"label": "CCC"},
     )
