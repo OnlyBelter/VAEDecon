@@ -54,6 +54,31 @@ def test_trainer_falls_back_to_all_training_sct_paths_for_gene_mean_std(tmp_path
     ]
 
 
+def test_trainer_prefers_training_sct_paths_over_test_set_sct_reference(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "sct_gep_file_path": "./datasets/test_set_sct_gep.h5ad",
+                "sct_file_path": [
+                    "./datasets/train_sct_a.h5ad",
+                    "./datasets/train_sct_b.h5ad",
+                ],
+            },
+            "model": {
+                "model_dir": tmp_path / "final_model",
+            },
+        }
+    )
+
+    trainer = VAEDeconTrainer(config=config)
+
+    assert trainer._resolve_gene_mean_std_sct_gep_paths() == [
+        Path("./datasets/train_sct_a.h5ad"),
+        Path("./datasets/train_sct_b.h5ad"),
+    ]
+
+
 def test_trainer_keeps_gene_mean_std_output_under_model_dir(tmp_path: Path):
     config = VAEDeconConfig.from_dict(
         {

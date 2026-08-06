@@ -603,16 +603,18 @@ def compute_training_sct_cross_sample_gene_var(
         if isinstance(sct_dataset_fp, (list, tuple))
         else [Path(sct_dataset_fp)]
     )
+    loaded_sct_datasets = []
+    for current_fp in sct_dataset_fps:
+        sct_obj = ReadH5AD(current_fp)
+        h5ad: an.AnnData = sct_obj.get_h5ad()
+        loaded_sct_datasets.append((h5ad, h5ad.obs.copy()))
 
     ct2var = {}
     missing_or_small = []
 
     for ct in cell_type_list:
         pooled_exp_space = []
-        for current_fp in sct_dataset_fps:
-            sct_obj = ReadH5AD(current_fp)
-            h5ad: an.AnnData = sct_obj.get_h5ad()
-            obs = h5ad.obs.copy()
+        for h5ad, obs in loaded_sct_datasets:
             if ct not in obs.columns:
                 continue
             mask = obs[ct] == 1
@@ -749,14 +751,17 @@ def load_or_compute_gene_mean_std(
             scaling_factor=scaling_factor,
         )
     else:
+        loaded_sct_datasets = []
+        for current_fp in sct_gep_fps:
+            sct_obj = ReadH5AD(current_fp)
+            h5ad = sct_obj.get_h5ad()
+            loaded_sct_datasets.append((h5ad, h5ad.obs.copy()))
+
         cell_type_list = pd.read_csv(cell_type_fp, index_col=0, header=None).index.tolist()
         ct2ave = {}
         for cell_type in cell_type_list:
             pooled_exp = []
-            for current_fp in sct_gep_fps:
-                sct_obj = ReadH5AD(current_fp)
-                h5ad = sct_obj.get_h5ad()
-                h5ad_obs = h5ad.obs.copy()
+            for h5ad, h5ad_obs in loaded_sct_datasets:
                 if cell_type not in h5ad_obs.columns:
                     continue
                 x = h5ad[h5ad_obs[cell_type] == 1, :]

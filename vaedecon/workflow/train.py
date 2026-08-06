@@ -195,10 +195,13 @@ class VAEDeconTrainer:
         dedicated_fp = self.config.data.gene_mean_std_sct_gep_file_path
         if dedicated_fp and str(dedicated_fp).strip() != "":
             return [Path(dedicated_fp)]
+        training_sct_paths = [Path(fp) for fp in (self.config.data.sct_file_path or []) if fp and str(fp).strip() != ""]
+        if training_sct_paths:
+            return training_sct_paths
         top_level_fp = self.config.data.sct_gep_file_path
         if top_level_fp and str(top_level_fp).strip() != "":
             return [Path(top_level_fp)]
-        return [Path(fp) for fp in (self.config.data.sct_file_path or []) if fp and str(fp).strip() != ""]
+        return []
 
     def _resolve_gene_mean_std_sct_gep_path(self) -> Path:
         paths = self._resolve_gene_mean_std_sct_gep_paths()
