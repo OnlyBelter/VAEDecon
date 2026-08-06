@@ -566,7 +566,7 @@ def compute_gene_mean_std_from_pooled_sc_h5ad(
 
 
 def compute_training_sct_cross_sample_gene_var(
-    sct_dataset_fp: str | Path,
+    sct_dataset_fp: str | Path | list[str | Path],
     result_fp: str | Path,
     gene_list_fp: str | Path,
     cell_type_fp: str | Path,
@@ -596,48 +596,59 @@ def compute_training_sct_cross_sample_gene_var(
         min_samples_per_cell_type: Cell types with fewer SCT rows are skipped
             and filled with 0.0 variance (loss becomes a no-op for those).
     """
-    import anndata as an  # local import to keep top light
-
     gene_list = pd.read_csv(gene_list_fp, index_col=0, header=None).index.tolist()
     cell_type_list = pd.read_csv(cell_type_fp, index_col=0, header=None).index.tolist()
-
-    sct_obj = ReadH5AD(sct_dataset_fp)
-    h5ad: an.AnnData = sct_obj.get_h5ad()
-    obs = h5ad.obs.copy()
+    sct_dataset_fps = (
+        [Path(fp) for fp in sct_dataset_fp]
+        if isinstance(sct_dataset_fp, (list, tuple))
+        else [Path(sct_dataset_fp)]
+    )
 
     ct2var = {}
     missing_or_small = []
 
     for ct in cell_type_list:
-        if ct not in obs.columns:
+        pooled_exp_space = []
+        for current_fp in sct_dataset_fps:
+            sct_obj = ReadH5AD(current_fp)
+            h5ad: an.AnnData = sct_obj.get_h5ad()
+            obs = h5ad.obs.copy()
+            if ct not in obs.columns:
+                continue
+            mask = obs[ct] == 1
+            selected_idx = obs.index[mask].astype(str).tolist()
+            if len(selected_idx) == 0:
+                continue
+
+            adata_view = h5ad[selected_idx, :]
+            x_values = adata_view.X.toarray() if hasattr(adata_view.X, "toarray") else np.asarray(adata_view.X)
+            x_df = pd.DataFrame(
+                x_values.astype(np.float32, copy=False),
+                index=adata_view.obs.index.astype(str).tolist(),
+                columns=adata_view.var.index.astype(str).tolist(),
+            )
+
+            exp_obj = ReadExp(x_df, exp_type='log_space')
+            exp_obj.align_with_gene_list(gene_list=gene_list, fill_not_exist=True, pathway_list=True)
+            exp_obj.to_tpm()
+            exp_cpm = exp_obj.get_exp()
+
+            if log2p1:
+                exp_space = np.log2(exp_cpm.values.astype(np.float64) + 1.0)
+            else:
+                exp_space = exp_cpm.values.astype(np.float64)
+
+            if scaling_by_constant:
+                exp_space = exp_space / float(scaling_factor)
+            pooled_exp_space.append(exp_space)
+
+        if not pooled_exp_space:
             missing_or_small.append(ct)
             continue
-        mask = obs[ct] == 1
-        selected_idx = obs.index[mask].astype(str).tolist()
-        if len(selected_idx) < min_samples_per_cell_type:
+        exp_space = np.concatenate(pooled_exp_space, axis=0)
+        if exp_space.shape[0] < min_samples_per_cell_type:
             missing_or_small.append(ct)
             continue
-
-        adata_view = h5ad[selected_idx, :]
-        x_values = adata_view.X.toarray() if hasattr(adata_view.X, "toarray") else np.asarray(adata_view.X)
-        x_df = pd.DataFrame(
-            x_values.astype(np.float32, copy=False),
-            index=adata_view.obs.index.astype(str).tolist(),
-            columns=adata_view.var.index.astype(str).tolist(),
-        )
-
-        exp_obj = ReadExp(x_df, exp_type='log_space')
-        exp_obj.align_with_gene_list(gene_list=gene_list, fill_not_exist=True, pathway_list=True)
-        exp_obj.to_tpm()
-        exp_cpm = exp_obj.get_exp()
-
-        if log2p1:
-            exp_space = np.log2(exp_cpm.values.astype(np.float64) + 1.0)
-        else:
-            exp_space = exp_cpm.values.astype(np.float64)
-
-        if scaling_by_constant:
-            exp_space = exp_space / float(scaling_factor)
 
         # ddof=1 sample variance; zero-variance cases are benign (loss pushes toward 0)
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -675,7 +686,7 @@ def compute_training_sct_cross_sample_gene_var(
 
 
 def load_or_compute_gene_mean_std(
-    sct_gep_fp: str,
+    sct_gep_fp: str | Path | list[str | Path],
     gene_list: list[str],
     cell_type_fp: str | Path,
     input_gene_list_fp: str | Path,
@@ -687,7 +698,7 @@ def load_or_compute_gene_mean_std(
     """
     1) Determine the gene‐mean/std filename based on `scaling_by_constant`
     2) If it exists and perfectly matches `gene_list`, load & return it
-    3) Otherwise, (re)compute it via `get_gene_mean_std_across_cell_types`
+      3) Otherwise, (re)compute it via `get_gene_mean_std_across_cell_types`
        and then load & return it
     """
     # base_dir = Path(sct_gep_fp).parent
@@ -720,16 +731,61 @@ def load_or_compute_gene_mean_std(
     else:
         log_fn(f"> No precomputed file found at {out_fp}, computing now...")
 
+    sct_gep_fps = (
+        [Path(fp) for fp in sct_gep_fp]
+        if isinstance(sct_gep_fp, (list, tuple))
+        else [Path(sct_gep_fp)]
+    )
+
     # (re)compute
     log_fn("> Computing means & stds of each gene across cell types …")
-    get_gene_mean_std_across_cell_types(
-        result_fp=str(out_fp),
-        gene_list_fp=input_gene_list_fp,
-        cell_type_fp=cell_type_fp,
-        sct_dataset_fp=sct_gep_fp,
-        scaling_by_constant=scaling_by_constant,
-        scaling_factor=scaling_factor,
-    )
+    if len(sct_gep_fps) == 1:
+        get_gene_mean_std_across_cell_types(
+            result_fp=str(out_fp),
+            gene_list_fp=input_gene_list_fp,
+            cell_type_fp=cell_type_fp,
+            sct_dataset_fp=str(sct_gep_fps[0]),
+            scaling_by_constant=scaling_by_constant,
+            scaling_factor=scaling_factor,
+        )
+    else:
+        cell_type_list = pd.read_csv(cell_type_fp, index_col=0, header=None).index.tolist()
+        ct2ave = {}
+        for cell_type in cell_type_list:
+            pooled_exp = []
+            for current_fp in sct_gep_fps:
+                sct_obj = ReadH5AD(current_fp)
+                h5ad = sct_obj.get_h5ad()
+                h5ad_obs = h5ad.obs.copy()
+                if cell_type not in h5ad_obs.columns:
+                    continue
+                x = h5ad[h5ad_obs[cell_type] == 1, :]
+                if x.shape[0] == 0:
+                    continue
+                x_values = x.X.toarray() if hasattr(x.X, "toarray") else np.asarray(x.X)
+                x_df = pd.DataFrame(x_values, index=x.obs.index, columns=x.var.index)
+                exp_obj = ReadExp(x_df, exp_type='log_space')
+                exp_obj.align_with_gene_list(gene_list=gene_list, fill_not_exist=True)
+                exp_obj.to_tpm()
+                pooled_exp.append(exp_obj.get_exp().values.astype(np.float64))
+            if not pooled_exp:
+                continue
+            exp = np.concatenate(pooled_exp, axis=0)
+            exp_avg = exp.mean(axis=0)
+            exp_std = np.std(exp, axis=0, ddof=1) if exp.shape[0] > 1 else np.zeros(exp.shape[1], dtype=np.float64)
+            exp_std = np.where(np.isfinite(exp_std), exp_std, 0.0)
+            ct2ave[cell_type + '_avg'] = exp_avg
+            ct2ave[cell_type + '_std'] = exp_std
+        ct2ave = pd.DataFrame(ct2ave, index=gene_list)
+        ct2ave = ct2ave.reindex(gene_list)
+        if ct2ave.isna().any().any():
+            raise RuntimeError("Gene alignment failed: missing values after pooling SCT datasets.")
+        if scaling_by_constant:
+            ct2ave = np.log2(ct2ave + 1) / scaling_factor
+        else:
+            ct2ave = np.log2(ct2ave + 1)
+        out_fp.parent.mkdir(parents=True, exist_ok=True)
+        ct2ave.to_csv(out_fp, float_format='%.6f')
 
     # load and return
     df = pd.read_csv(out_fp, index_col=0)

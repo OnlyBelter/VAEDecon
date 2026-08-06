@@ -25,9 +25,33 @@ def test_trainer_prefers_dedicated_sct_reference_for_gene_mean_std(tmp_path: Pat
 
     trainer = VAEDeconTrainer(config=config)
 
-    assert trainer._resolve_gene_mean_std_sct_gep_path() == Path(
+    assert trainer._resolve_gene_mean_std_sct_gep_paths() == [Path(
         "./datasets/dedicated_gene_mean_std_ref.h5ad"
+    )]
+
+
+def test_trainer_falls_back_to_all_training_sct_paths_for_gene_mean_std(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "sct_file_path": [
+                    "./datasets/train_sct_a.h5ad",
+                    "./datasets/train_sct_b.h5ad",
+                ],
+            },
+            "model": {
+                "model_dir": tmp_path / "final_model",
+            },
+        }
     )
+
+    trainer = VAEDeconTrainer(config=config)
+
+    assert trainer._resolve_gene_mean_std_sct_gep_paths() == [
+        Path("./datasets/train_sct_a.h5ad"),
+        Path("./datasets/train_sct_b.h5ad"),
+    ]
 
 
 def test_trainer_keeps_gene_mean_std_output_under_model_dir(tmp_path: Path):
@@ -190,6 +214,71 @@ def test_compute_training_sct_cross_sample_gene_var_roundtrip(tmp_path: Path, mo
     assert np.all(df.values >= 0.0)
 
 
+def test_compute_training_sct_cross_sample_gene_var_pools_multiple_sct_files(tmp_path: Path):
+    pytest.importorskip("anndata")
+    import anndata as an
+
+    from vaedecon.utility import compute_training_sct_cross_sample_gene_var
+    from vaedecon.utility.read_file import ReadExp
+
+    genes = ["GeneA", "GeneB"]
+    cell_types = ["CT1", "CT2"]
+
+    def _write_sct(fp: Path, ct1_rows: list[list[float]], ct2_rows: list[list[float]]):
+        obs_rows = []
+        x_rows = []
+        for rows, ct in [(ct1_rows, "CT1"), (ct2_rows, "CT2")]:
+            for vec in rows:
+                # The helper expects SCT matrices in log-space and internally
+                # converts them back to CPM via ReadExp(..., exp_type="log_space").to_tpm().
+                x_rows.append(np.log2(np.asarray(vec, dtype=np.float32) + 1.0))
+                obs_rows.append({c: 1 if c == ct else 0 for c in cell_types})
+        adata = an.AnnData(
+            X=np.asarray(x_rows, dtype=np.float32),
+            obs=pd.DataFrame(obs_rows, index=[f"{fp.stem}_{i}" for i in range(len(x_rows))]),
+            var=pd.DataFrame(index=genes),
+        )
+        adata.write_h5ad(fp)
+
+    sct_fp_a = tmp_path / "sct_a.h5ad"
+    sct_fp_b = tmp_path / "sct_b.h5ad"
+    _write_sct(sct_fp_a, ct1_rows=[[1.0, 3.0], [2.0, 4.0]], ct2_rows=[[5.0, 7.0], [6.0, 8.0]])
+    _write_sct(sct_fp_b, ct1_rows=[[3.0, 5.0], [4.0, 6.0]], ct2_rows=[[7.0, 9.0], [8.0, 10.0]])
+
+    gene_list_fp = tmp_path / "genes.txt"
+    gene_list_fp.write_text("".join(f"{g}\n" for g in genes))
+    cell_type_fp = tmp_path / "cts.txt"
+    cell_type_fp.write_text("".join(f"{c}\n" for c in cell_types))
+
+    out_fp = tmp_path / "out_var_multi.csv"
+    compute_training_sct_cross_sample_gene_var(
+        sct_dataset_fp=[sct_fp_a, sct_fp_b],
+        result_fp=out_fp,
+        gene_list_fp=gene_list_fp,
+        cell_type_fp=cell_type_fp,
+        scaling_by_constant=False,
+        log2p1=False,
+        scaling_factor=20.0,
+    )
+
+    df = pd.read_csv(out_fp, index_col=0)
+    def _expected_var(rows: list[list[float]]) -> np.ndarray:
+        x_df = pd.DataFrame(
+            np.log2(np.asarray(rows, dtype=np.float32) + 1.0),
+            columns=genes,
+        )
+        exp_obj = ReadExp(x_df, exp_type="log_space")
+        exp_obj.align_with_gene_list(gene_list=genes, fill_not_exist=True, pathway_list=True)
+        exp_obj.to_tpm()
+        exp = exp_obj.get_exp().values.astype(np.float64)
+        return np.var(exp, axis=0, ddof=1)
+
+    expected_ct1 = _expected_var([[1.0, 3.0], [2.0, 4.0], [3.0, 5.0], [4.0, 6.0]])
+    expected_ct2 = _expected_var([[5.0, 7.0], [6.0, 8.0], [7.0, 9.0], [8.0, 10.0]])
+    assert df["CT1_var"].values == pytest.approx(expected_ct1)
+    assert df["CT2_var"].values == pytest.approx(expected_ct2)
+
+
 def test_vae_cross_sample_gene_variance_loss_math():
     """Ensure the loss math matches: mean |recon_var - target_var| scaled per-sample repeat."""
     import torch
@@ -243,4 +332,3 @@ def test_vae_cross_sample_gene_variance_loss_math():
         batch_size=B,
     )
     assert per_sample2[0].item() < 1e-5
-

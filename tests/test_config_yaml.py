@@ -92,10 +92,28 @@ def test_sct_gep_gene_mean_std_reference_accepts_dedicated_path():
     assert str(loaded.data.gene_mean_std_sct_gep_file_path) == "./datasets/gene_mean_std_ref.h5ad"
 
 
+def test_sct_gep_gene_mean_std_reference_accepts_training_sct_list():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "sct_file_path": [
+                    "./datasets/train_sct_a.h5ad",
+                    "./datasets/train_sct_b.h5ad",
+                ],
+            }
+        }
+    )
+    assert [str(p) for p in loaded.data.sct_file_path] == [
+        "./datasets/train_sct_a.h5ad",
+        "./datasets/train_sct_b.h5ad",
+    ]
+
+
 def test_sct_gep_gene_mean_std_reference_requires_any_reference_path():
     with pytest.raises(
         ValueError,
-        match="gene_mean_std_sct_gep_file_path or sct_gep_file_path must be set",
+        match="gene_mean_std_sct_gep_file_path, sct_gep_file_path, or sct_file_path must be set",
     ):
         VAEDeconConfig.from_dict(
             {

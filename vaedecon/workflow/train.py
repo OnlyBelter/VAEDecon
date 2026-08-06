@@ -181,7 +181,7 @@ class VAEDeconTrainer:
             )
         else:
             load_or_compute_gene_mean_std(
-                sct_gep_fp=str(self._resolve_gene_mean_std_sct_gep_path()),
+                sct_gep_fp=self._resolve_gene_mean_std_sct_gep_paths(),
                 gene_list=dataset.gene_list,
                 cell_type_fp=self.config.model.cell_type_fp,
                 input_gene_list_fp=self.config.model.input_gene_list_fp,
@@ -191,11 +191,20 @@ class VAEDeconTrainer:
                 out_fp=gene_mean_std_fp,
             )
 
-    def _resolve_gene_mean_std_sct_gep_path(self) -> Path:
+    def _resolve_gene_mean_std_sct_gep_paths(self) -> list[Path]:
         dedicated_fp = self.config.data.gene_mean_std_sct_gep_file_path
         if dedicated_fp and str(dedicated_fp).strip() != "":
-            return Path(dedicated_fp)
-        return Path(self.config.data.sct_gep_file_path)
+            return [Path(dedicated_fp)]
+        top_level_fp = self.config.data.sct_gep_file_path
+        if top_level_fp and str(top_level_fp).strip() != "":
+            return [Path(top_level_fp)]
+        return [Path(fp) for fp in (self.config.data.sct_file_path or []) if fp and str(fp).strip() != ""]
+
+    def _resolve_gene_mean_std_sct_gep_path(self) -> Path:
+        paths = self._resolve_gene_mean_std_sct_gep_paths()
+        if not paths:
+            return Path("")
+        return paths[0]
 
     def _build_gene_mean_std_output_path(self) -> Path:
         scaling_factor = self.config.data.scaling_factor
@@ -217,24 +226,18 @@ class VAEDeconTrainer:
         if weight <= 0:
             return None
 
-        sct_gep_fp = self._resolve_gene_mean_std_sct_gep_path()
-        if sct_gep_fp is None or not Path(sct_gep_fp).exists():
-            # Fall back to data.sct_file_path[0] if available
-            sct_paths = self.config.data.sct_file_path or []
-            existing = [p for p in sct_paths if p is not None and Path(p).exists()]
-            if not existing:
-                raise FileNotFoundError(
-                    "loss_coefficient.cross_sample_gene_var_weight > 0 requires a "
-                    "training SCT h5ad path, but neither "
-                    "gene_mean_std_sct_gep_file_path/sct_gep_file_path nor sct_file_path "
-                    "point to an existing file."
-                )
-            sct_gep_fp = Path(existing[0])
+        sct_gep_fps = [p for p in self._resolve_gene_mean_std_sct_gep_paths() if p is not None and Path(p).exists()]
+        if not sct_gep_fps:
+            raise FileNotFoundError(
+                "loss_coefficient.cross_sample_gene_var_weight > 0 requires training SCT h5ad path(s), "
+                "but none of gene_mean_std_sct_gep_file_path, sct_gep_file_path, or sct_file_path "
+                "point to an existing file."
+            )
 
         out_fp = self._build_training_sct_cross_sample_gene_var_output_path()
         if not Path(out_fp).exists():
             compute_training_sct_cross_sample_gene_var(
-                sct_dataset_fp=sct_gep_fp,
+                sct_dataset_fp=sct_gep_fps,
                 result_fp=out_fp,
                 gene_list_fp=self.config.model.input_gene_list_fp,
                 cell_type_fp=self.config.model.cell_type_fp,

@@ -166,17 +166,28 @@ class DataConfig(BaseConfig):
                 raise ValueError("pooled_sc_h5ad_path must be set when gene_mean_std_source='pooled_sc'")
             if self.pooled_sc_sample_size <= 0:
                 raise ValueError("pooled_sc_sample_size must be > 0")
-        elif (
-            not self.gene_mean_std_sct_gep_file_path
-            or str(self.gene_mean_std_sct_gep_file_path).strip() == ""
-        ) and (
-            not self.sct_gep_file_path
-            or str(self.sct_gep_file_path).strip() == ""
-        ):
-            raise ValueError(
-                "gene_mean_std_sct_gep_file_path or sct_gep_file_path must be set "
-                "when gene_mean_std_source='sct_gep'"
+        else:
+            has_dedicated_sct = bool(
+                self.gene_mean_std_sct_gep_file_path
+                and str(self.gene_mean_std_sct_gep_file_path).strip() != ""
             )
+            has_top_level_sct = bool(
+                self.sct_gep_file_path
+                and str(self.sct_gep_file_path).strip() != ""
+            )
+            has_training_sct = any(
+                p is not None and str(p).strip() != ""
+                for p in self.sct_file_path
+            )
+            has_test_set_sct = any(
+                cfg.sct_gep_file_path and str(cfg.sct_gep_file_path).strip() != ""
+                for cfg in self.test_sets.values()
+            )
+            if not (has_dedicated_sct or has_top_level_sct or has_training_sct or has_test_set_sct):
+                raise ValueError(
+                    "gene_mean_std_sct_gep_file_path, sct_gep_file_path, or sct_file_path "
+                    "must be set when gene_mean_std_source='sct_gep'"
+                )
         return self
 
     @model_validator(mode="after")
