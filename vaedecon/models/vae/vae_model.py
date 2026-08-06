@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+import numpy as np
 import pandas as pd
 import logging
 from typing import Optional, List, Tuple, Literal
@@ -57,6 +58,7 @@ class LossTerms:
     z_score_kl_loss: torch.Tensor = torch.tensor(0.0)  # New KL term for empirical z-score to N(0,1)
     low_mean_std_gene_loss: torch.Tensor = torch.tensor(0.0)  # Optional term to prevent collapse of low-mean/std genes
     hierarchical_code: torch.Tensor = torch.tensor(0.0)
+    cross_sample_gene_var_loss: torch.Tensor = torch.tensor(0.0)
 
 
 class VAE(BaseAE):
@@ -166,6 +168,50 @@ class VAE(BaseAE):
         self.register_buffer("g_std", g_std)
         self.register_buffer("g_mean_non_log", g_mean_non_log)
         self.register_buffer("g_std_non_log", g_std_non_log)
+
+        # --- Cross-sample gene-variance targets (for loss_coefficient.cross_sample_gene_var_weight) ---
+        cross_var_fp = getattr(model_config, "training_sct_cross_sample_gene_var_fp", None)
+        cross_var_weight = float(
+            getattr(getattr(model_config, "loss_coefficient", None), "cross_sample_gene_var_weight", 0.0) or 0.0
+        )
+        if cross_var_weight > 0.0:
+            if cross_var_fp is None or not os.path.exists(cross_var_fp):
+                raise FileNotFoundError(
+                    "loss_coefficient.cross_sample_gene_var_weight > 0 requires a valid "
+                    f"training_sct_cross_sample_gene_var_fp; got {cross_var_fp}"
+                )
+            cv_df = pd.read_csv(cross_var_fp, index_col=0)
+            var_cols = [c for c in cv_df.columns if c.endswith("_var")]
+            expected_order = [f"{ct}_var" for ct in self.cell_types]
+            if list(cv_df.index) != list(gf_df.index):
+                cv_df = cv_df.reindex(gf_df.index)
+                if cv_df.isna().any().any():
+                    raise RuntimeError(
+                        "training_sct_cross_sample_gene_var_fp gene index does not match "
+                        "gene_mean_std_fp after reindex."
+                    )
+            if len(var_cols) != len(self.cell_types):
+                raise RuntimeError(
+                    f"training_sct_cross_sample_gene_var_fp has {len(var_cols)} *_var columns, "
+                    f"expected {len(self.cell_types)} for cell types {self.cell_types}."
+                )
+            try:
+                cv_df_sorted = cv_df.loc[:, expected_order]
+            except KeyError as exc:
+                raise RuntimeError(
+                    "training_sct_cross_sample_gene_var_fp columns do not match cell types "
+                    f"(expected {expected_order}, got {var_cols})"
+                ) from exc
+            g_cross_var_np = cv_df_sorted.values.astype(np.float32)
+            if g_cross_var_np.shape != (g_mean_np.shape[0], len(self.cell_types)):
+                raise RuntimeError(
+                    "training_sct_cross_sample_gene_var_fp shape mismatch after alignment: "
+                    f"{g_cross_var_np.shape} vs expected {(g_mean_np.shape[0], len(self.cell_types))}"
+                )
+            g_cross_var = torch.tensor(g_cross_var_np, dtype=torch.float32)
+        else:
+            g_cross_var = torch.zeros((g_mean_np.shape[0], len(self.cell_types)), dtype=torch.float32)
+        self.register_buffer("g_cross_sample_gene_var", g_cross_var)
 
         hierarchical_targets = []
         missing = []
@@ -437,6 +483,7 @@ class VAE(BaseAE):
             cell_prop_loss=loss_terms.cell_prop,
             z_score_kl_loss=loss_terms.z_score_kl_loss,
             low_mean_std_gene_loss=loss_terms.low_mean_std_gene_loss,
+            cross_sample_gene_var_loss=loss_terms.cross_sample_gene_var_loss,
             mu=mu_mean,
             mu_deconv=mu_types,
             log_var=log_var_types,
@@ -559,6 +606,16 @@ class VAE(BaseAE):
         denom = mask_f.sum(dim=(1, 2)).clamp_min(1.0)
         low_mean_std_gene_loss_per_sample = diff2.sum(dim=(1, 2)) / denom  # (B,)
 
+        # --- 2.75 Cross-sample gene-variance matching loss ---
+        cross_sample_gene_var_weight = float(getattr(lo, "cross_sample_gene_var_weight", 0.0) or 0.0)
+        if cross_sample_gene_var_weight > 0 and batch_size >= 2:
+            cross_var_loss_per_sample = self._cross_sample_gene_variance_loss(
+                recon_x_all_types_log=recon_x_all_types_log,
+                batch_size=batch_size,
+            )
+        else:
+            cross_var_loss_per_sample = torch.zeros((batch_size,), device=device)
+
         # --- 3. KL Divergence (Cell Proportions - Dirichlet) ---
         kld_p, cell_prop_loss = self._cell_prop_dirichlet_loss(
             y=y,
@@ -608,6 +665,7 @@ class VAE(BaseAE):
             # + lo.gene_mean_weight * gm_loss
             # + lo.gene_std_weight * gs_loss
             + lo.z_score_kl_weight * z_score_kl_loss
+            + cross_sample_gene_var_weight * cross_var_loss_per_sample
             # + z_score_reg_weight * (1 / mean_z_scores)
         ).mean()
 
@@ -625,6 +683,7 @@ class VAE(BaseAE):
             z_score_reciprocal=(1 / mean_z_scores).mean(),
             z_score_kl_loss=z_score_kl_loss.mean(),
             low_mean_std_gene_loss=low_mean_std_gene_loss_per_sample.mean(),
+            cross_sample_gene_var_loss=cross_var_loss_per_sample.mean(),
         )
 
     # -------------------------------------------------------------------------
@@ -660,6 +719,42 @@ class VAE(BaseAE):
         gm_loss = (gm_loss * self.w).sum(dim=0).mean()  # Weighted sum over genes, mean over types
         gs_loss = F.mse_loss(recon_gene_std, self.g_std, reduction="none").sum(dim=0).mean()
         return gm_loss, gs_loss
+
+    def _cross_sample_gene_variance_loss(
+        self,
+        recon_x_all_types_log: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """Penalize mismatch between recon and training-SCT per-(gene, cell_type) cross-sample variance.
+
+        Operates in scaled log-space (log2(CPM+1)/factor) so it directly matches
+        the ``training_sct_cross_sample_gene_variances_*.csv`` targets and the
+        per-(gene, ct) sample variance of ``recon_x_all_types_log`` over B.
+
+        Shapes:
+            recon_x_all_types_log: (B, G, C)
+        Returns:
+            Per-sample tensor of shape (B,); each row has the same scalar value
+            (mean absolute difference per element) for consistency with other
+            per-sample loss terms averaged at the end.
+        """
+        # Per-(gene, ct) sample variance over batch (ddof=1)
+        # shape: (G, C)
+        if batch_size < 2:
+            B = recon_x_all_types_log.shape[0]
+            return torch.zeros((B,), device=recon_x_all_types_log.device)
+
+        mean_per_g = recon_x_all_types_log.mean(dim=0, keepdim=False)  # (G, C)
+        sq_dev = (recon_x_all_types_log - mean_per_g.unsqueeze(0)).pow(2)  # (B, G, C)
+        recon_var_per_g = sq_dev.sum(dim=0) / float(batch_size - 1)  # (G, C), unbiased
+
+        target = self.g_cross_sample_gene_var.to(dtype=recon_var_per_g.dtype, device=recon_var_per_g.device)  # (G, C)
+        abs_diff = (recon_var_per_g - target).abs()  # (G, C)
+        denom = float(abs_diff.numel()) if abs_diff.numel() > 0 else 1.0
+        scalar = abs_diff.sum() / denom  # mean absolute difference per (gene, ct) element
+
+        B = recon_x_all_types_log.shape[0]
+        return scalar.expand(B)
 
     def _z_score_kl_loss(self, recon_x_all_types_cpm: torch.Tensor) -> torch.Tensor:
         """

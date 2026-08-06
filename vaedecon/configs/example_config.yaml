@@ -113,7 +113,9 @@ model:
     weight_clamp_range: [0.2, 5]
     gene_mean_weight: 0
     gene_std_weight: 0
-    z_score_kl_weight: 1.0
+    cross_sample_gene_var_weight: 1.0  # Matches per-(gene, cell_type) cross-sample variance of recon GEPs to training-SCT targets.
+    z_score_kl_weight: 0.1
+    hierarchical_code_weight: 0.1
     low_mean_std_weight: 0  # weight for low mean/std genes to fit pre-calculated gene mean and std
     low_mean_threshold: 2.0
     low_std_threshold: 1.0

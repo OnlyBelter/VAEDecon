@@ -32,7 +32,7 @@ from .pub_func import non_log2cpm_tensor, non_log2log_cpm_tensor, log_exp2cpm_te
 from .pub_func import set_output_dir, log_message
 from .pub_func import generate_time_signature
 from .pub_func import to_numpy
-from .read_file import load_or_compute_gene_mean_std, load_lightning_metrics, compute_gene_mean_std_from_pooled_sc_h5ad
+from .read_file import load_or_compute_gene_mean_std, load_lightning_metrics, compute_gene_mean_std_from_pooled_sc_h5ad, compute_training_sct_cross_sample_gene_var
 
 
 subcell_type2abbr = {'B Cells (1)': 'B1', 'B Cells (2)': 'B2', 'B Cells (3)': 'B3', 'B Cells (4)': 'B4',

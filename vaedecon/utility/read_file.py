@@ -565,6 +565,115 @@ def compute_gene_mean_std_from_pooled_sc_h5ad(
     ct2ave.to_csv(result_fp, float_format='%.6f')
 
 
+def compute_training_sct_cross_sample_gene_var(
+    sct_dataset_fp: str | Path,
+    result_fp: str | Path,
+    gene_list_fp: str | Path,
+    cell_type_fp: str | Path,
+    scaling_by_constant: bool = True,
+    log2p1: bool = True,
+    scaling_factor: float = 20.0,
+    min_samples_per_cell_type: int = 2,
+) -> None:
+    """Compute per-(gene, cell_type) cross-sample variance from a training SCT dataset.
+
+    The output matches the model's gene statistics file convention: the CSV has
+    genes as rows and cell-type columns (suffixed by ``_var`` for clarity).
+    Values are stored in the same space as the gene-mean/std statistics file:
+    ``log2(CPM + 1)`` and optionally divided by a constant.
+
+    Args:
+        sct_dataset_fp: Training SCT dataset (h5ad) produced by SimuTME /
+            SingleCellTypeGEPGenerator.
+        result_fp: Output CSV path.
+        gene_list_fp: Training gene list txt file.
+        cell_type_fp: Training cell type list txt file.
+        scaling_by_constant: If True, divide values by ``scaling_factor``.
+        log2p1: If True, apply log2(x + 1) to CPM values before computing
+            variance (recommended because reconstructions are compared in
+            log-space).
+        scaling_factor: Constant used for log-space scaling.
+        min_samples_per_cell_type: Cell types with fewer SCT rows are skipped
+            and filled with 0.0 variance (loss becomes a no-op for those).
+    """
+    import anndata as an  # local import to keep top light
+
+    gene_list = pd.read_csv(gene_list_fp, index_col=0, header=None).index.tolist()
+    cell_type_list = pd.read_csv(cell_type_fp, index_col=0, header=None).index.tolist()
+
+    sct_obj = ReadH5AD(sct_dataset_fp)
+    h5ad: an.AnnData = sct_obj.get_h5ad()
+    obs = h5ad.obs.copy()
+
+    ct2var = {}
+    missing_or_small = []
+
+    for ct in cell_type_list:
+        if ct not in obs.columns:
+            missing_or_small.append(ct)
+            continue
+        mask = obs[ct] == 1
+        selected_idx = obs.index[mask].astype(str).tolist()
+        if len(selected_idx) < min_samples_per_cell_type:
+            missing_or_small.append(ct)
+            continue
+
+        adata_view = h5ad[selected_idx, :]
+        x_values = adata_view.X.toarray() if hasattr(adata_view.X, "toarray") else np.asarray(adata_view.X)
+        x_df = pd.DataFrame(
+            x_values.astype(np.float32, copy=False),
+            index=adata_view.obs.index.astype(str).tolist(),
+            columns=adata_view.var.index.astype(str).tolist(),
+        )
+
+        exp_obj = ReadExp(x_df, exp_type='log_space')
+        exp_obj.align_with_gene_list(gene_list=gene_list, fill_not_exist=True, pathway_list=True)
+        exp_obj.to_tpm()
+        exp_cpm = exp_obj.get_exp()
+
+        if log2p1:
+            exp_space = np.log2(exp_cpm.values.astype(np.float64) + 1.0)
+        else:
+            exp_space = exp_cpm.values.astype(np.float64)
+
+        if scaling_by_constant:
+            exp_space = exp_space / float(scaling_factor)
+
+        # ddof=1 sample variance; zero-variance cases are benign (loss pushes toward 0)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            var_per_gene = np.var(exp_space, axis=0, ddof=1)
+        var_per_gene = np.where(np.isfinite(var_per_gene), var_per_gene, 0.0).astype(np.float32)
+        ct2var[f"{ct}_var"] = var_per_gene
+
+    # Initialize DataFrame with gene index first, so ordering matches gene_list
+    var_df = pd.DataFrame(
+        np.zeros((len(gene_list), len(cell_type_list)), dtype=np.float32),
+        index=gene_list,
+        columns=[f"{ct}_var" for ct in cell_type_list],
+    )
+    for ct in cell_type_list:
+        col = f"{ct}_var"
+        if col in ct2var:
+            var_df.loc[gene_list, col] = ct2var[col]
+
+    if missing_or_small:
+        logger.warning(
+            "Cross-sample gene-variance: skipped %s cell types due to missing "
+            "columns or too few samples (%s min): %s",
+            len(missing_or_small),
+            min_samples_per_cell_type,
+            missing_or_small,
+        )
+
+    if var_df.isna().any().any():
+        raise RuntimeError("Cross-sample gene-variance CSV contains NaN after construction.")
+
+    result_fp = Path(result_fp)
+    result_fp.parent.mkdir(parents=True, exist_ok=True)
+    var_df.to_csv(result_fp, float_format='%.6f')
+    logger.info(f"Saved training SCT cross-sample gene variance to {result_fp}")
+
+
 def load_or_compute_gene_mean_std(
     sct_gep_fp: str,
     gene_list: list[str],

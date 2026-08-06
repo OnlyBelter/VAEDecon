@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from vaedecon.configs import VAEDeconConfig
+import numpy as np
+import pandas as pd
+import pytest
+
+from vaedecon.configs import VAEDeconConfig, LossCoefficient
 from vaedecon.workflow.inference import VAEDeconPredictor
 from vaedecon.workflow.train import VAEDeconTrainer
 
@@ -45,6 +49,38 @@ def test_trainer_keeps_gene_mean_std_output_under_model_dir(tmp_path: Path):
 
     assert trainer._build_gene_mean_std_output_path() == (
         tmp_path / "final_model" / "gene_mean_std_log2p1_scaled_by_20.0.csv"
+    )
+
+
+def test_loss_coefficient_defaults_and_validation_cross_sample_gene_var_weight():
+    lo = LossCoefficient()
+    assert lo.cross_sample_gene_var_weight == 0.0
+
+    lo = LossCoefficient(cross_sample_gene_var_weight=2.5)
+    assert lo.cross_sample_gene_var_weight == 2.5
+
+    with pytest.raises(Exception):
+        LossCoefficient(cross_sample_gene_var_weight=-1.0)
+
+
+def test_trainer_cross_sample_gene_var_output_path_naming(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "sct_gep_file_path": "./datasets/test_set_sct_gep.h5ad",
+                "scaling_by_constant": True,
+                "scaling_factor": 20.0,
+            },
+            "model": {
+                "model_dir": tmp_path / "final_model",
+                "loss_coefficient": {"cross_sample_gene_var_weight": 0.0},
+            },
+        }
+    )
+    trainer = VAEDeconTrainer(config=config)
+    assert trainer._build_training_sct_cross_sample_gene_var_output_path() == (
+        tmp_path / "final_model" / "training_sct_cross_sample_gene_variances_log2p1_scaled_by_20.0.csv"
     )
 
 
@@ -94,4 +130,117 @@ def test_inference_builds_dataset_config_with_sct_gene_mean_std_refs(tmp_path: P
     assert dataset_cfg.pooled_sc_cell_subtype_col == "cell_subtype"
     assert dataset_cfg.pooled_sc_sample_size == 1
     assert dataset_cfg.pooled_sc_seed == 42
+
+
+def test_compute_training_sct_cross_sample_gene_var_roundtrip(tmp_path: Path, monkeypatch):
+    """Smoke test for the variance CSV export: verify shape, columns, gene index order."""
+    pytest.importorskip("anndata")
+    import anndata as an
+
+    from vaedecon.utility import compute_training_sct_cross_sample_gene_var
+
+    genes = ["GeneA", "GeneB", "GeneC", "GeneD"]
+    cell_types = ["CT1", "CT2"]
+    n_sct_per_ct = 20
+
+    obs_rows = []
+    x_rows = []
+    rng = np.random.default_rng(0)
+    for i, ct in enumerate(cell_types):
+        for k in range(n_sct_per_ct):
+            # Vary baseline per sample so cross-sample var is not zero
+            baseline = 0.5 + 0.1 * k
+            vec = np.clip(
+                rng.normal(loc=1.0 + i + baseline, scale=0.25, size=len(genes)),
+                1e-2,
+                None,
+            )
+            x_rows.append(2 ** vec - 1)  # non-log space for log-space var
+            row = {c: 1 if c == ct else 0 for c in cell_types}
+            obs_rows.append(row)
+
+    x = np.asarray(x_rows, dtype=np.float32)
+    obs = pd.DataFrame(obs_rows, index=[f"r{i}" for i in range(len(x_rows))])
+    adata = an.AnnData(X=x, obs=obs, var=pd.DataFrame(index=genes))
+    sct_fp = tmp_path / "sct.h5ad"
+    adata.write_h5ad(sct_fp)
+
+    gene_list_fp = tmp_path / "genes.txt"
+    gene_list_fp.write_text("".join(f"{g}\n" for g in genes))
+    cell_type_fp = tmp_path / "cts.txt"
+    cell_type_fp.write_text("".join(f"{c}\n" for c in cell_types))
+
+    out_fp = tmp_path / "out_var.csv"
+    compute_training_sct_cross_sample_gene_var(
+        sct_dataset_fp=sct_fp,
+        result_fp=out_fp,
+        gene_list_fp=gene_list_fp,
+        cell_type_fp=cell_type_fp,
+        scaling_by_constant=False,
+        log2p1=True,
+        scaling_factor=20.0,
+    )
+
+    df = pd.read_csv(out_fp, index_col=0)
+    assert list(df.index) == genes
+    assert list(df.columns) == [f"{c}_var" for c in cell_types]
+    assert df.shape == (len(genes), len(cell_types))
+    # Variance must be non-negative and finite
+    assert np.all(np.isfinite(df.values))
+    assert np.all(df.values >= 0.0)
+
+
+def test_vae_cross_sample_gene_variance_loss_math():
+    """Ensure the loss math matches: mean |recon_var - target_var| scaled per-sample repeat."""
+    import torch
+    from unittest.mock import MagicMock
+
+    from vaedecon.models.vae.vae_model import VAE
+
+    B, G, C = 5, 4, 2
+    # Build a mock VAE: we only need attributes g_cross_sample_gene_var and _cross_sample_gene_variance_loss
+    m = MagicMock(spec=VAE)
+    target = torch.tensor([
+        [0.1, 0.4],
+        [0.0, 0.2],
+        [0.5, 0.05],
+        [0.03, 0.1],
+    ], dtype=torch.float32)
+    m.g_cross_sample_gene_var = target
+    m._cross_sample_gene_variance_loss = VAE._cross_sample_gene_variance_loss.__get__(m, VAE)
+
+    # Construct x such that cross-sample variance per (gene,ct) is explicit.
+    # Set per-(g,c) column means = 0 and each column has variance tg,c.
+    # Choose pattern: repeat (a, -a, a, -a, 0) -> var = (sum sq_dev)/(B-1)
+    # For each (g,c) we want var = t; sum sq_dev = (B-1)*t
+    # Use pattern: sqrt(t*(B-1)/s) * signs; s=number of non-zero entries.
+    def build_col(t):
+        pattern = torch.tensor([1.0, -1.0, 1.0, -1.0, 0.0])  # B=5, 4 non-zero entries
+        s = (pattern != 0).sum().float()
+        # sum sq_dev = (B-1)*t -> (non-zero magnitude)^2 * s = (B-1)*t
+        mag = torch.sqrt((t * (B - 1)) / s) if t > 0 else 0.0
+        return pattern * mag
+
+    x = torch.zeros((B, G, C), dtype=torch.float32)
+    for g in range(G):
+        for c in range(C):
+            x[:, g, c] = build_col(float(target[g, c]))
+
+    per_sample = m._cross_sample_gene_variance_loss(
+        recon_x_all_types_log=x,
+        batch_size=B,
+    )
+    assert per_sample.shape == (B,)
+    # All elements equal (expand)
+    diffs = (per_sample - per_sample[0]).abs().max().item()
+    assert diffs < 1e-6
+    # Mean absolute difference should be ~0 (accounting for float)
+    assert per_sample[0].item() < 1e-5
+
+    # Now shift every value by +constant. Variance unchanged -> still zero.
+    per_sample2 = m._cross_sample_gene_variance_loss(
+        recon_x_all_types_log=x + 1.23,
+        batch_size=B,
+    )
+    assert per_sample2[0].item() < 1e-5
 

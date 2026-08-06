@@ -20,6 +20,7 @@ class LossCoefficient(BaseModel):
     gene_mean_weight: float = 1.0
     gene_std_weight: float = 0.0
     gene_mean_std_weight: Optional[float] = None
+    cross_sample_gene_var_weight: float = 0.0
     z_score_reg_weight: float = 0.0
     z_score_kl_weight: float = 0.0  # Weight for KL divergence between empirical Z-score distribution and N(0,1)
     low_mean_std_weight: float = 1.0  # Weight for MSE regularization on low mean/std genes
@@ -36,6 +37,7 @@ class LossCoefficient(BaseModel):
         "gene_mean_weight",
         "gene_std_weight",
         "gene_mean_std_weight",
+        "cross_sample_gene_var_weight",
         "z_score_reg_weight",
         "z_score_kl_weight",
         "low_mean_std_weight",
@@ -544,6 +546,14 @@ class ModelConfig(BaseModelConfig):
         default=None,
         description="Path to gene mean/std statistics file"
     )
+    training_sct_cross_sample_gene_var_fp: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Path to training-SCT cross-sample gene variance CSV used by "
+            "loss_coefficient.cross_sample_gene_var_weight. Usually saved "
+            "under model_dir/training_sct_cross_sample_gene_variances.csv."
+        ),
+    )
     model_dir: Path | str = Field(
         default=None,
         description="Directory to save model checkpoints and outputs"
@@ -605,9 +615,12 @@ class ModelConfig(BaseModelConfig):
             raise ValueError(f"All input dimensions must be positive, got {v}")
         return v
 
-    @field_validator('input_gene_list_fp', 'cell_type_fp', 'gene_mean_std_fp',
-                     check_fields=False,
-                     mode='before')
+    @field_validator(
+        'input_gene_list_fp', 'cell_type_fp', 'gene_mean_std_fp',
+        'training_sct_cross_sample_gene_var_fp',
+        check_fields=False,
+        mode='before',
+    )
     @classmethod
     def validate_file_paths(cls, v: Optional[Path]) -> Optional[Path]:
         """Validate file paths exist if provided."""
@@ -836,6 +849,7 @@ class ModelConfig(BaseModelConfig):
                 "cell_prop_weight": self.loss_coefficient.cell_prop,
                 "gene_mean_weight": self.loss_coefficient.gene_mean_weight,
                 "gene_std_weight": self.loss_coefficient.gene_std_weight,
+                "cross_sample_gene_var_weight": self.loss_coefficient.cross_sample_gene_var_weight,
                 "z_score_kl_weight": self.loss_coefficient.z_score_kl_weight,
             }
         }

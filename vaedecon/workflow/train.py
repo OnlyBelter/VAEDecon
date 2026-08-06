@@ -17,6 +17,7 @@ from ..models.nn import EncoderMLP, DecoderMLP
 from ..trainers import BaseTrainerL
 from ..utility import set_output_dir, log_message, set_fig_style
 from ..utility import load_or_compute_gene_mean_std, load_lightning_metrics, compute_gene_mean_std_from_pooled_sc_h5ad
+from ..utility import compute_training_sct_cross_sample_gene_var
 from .workflow import create_model, train_model, save_metadata
 from ..configs.default_config import VAEDeconConfig, TrainingConfig, ModelConfig, GEPDatasetConfig
 
@@ -145,6 +146,11 @@ class VAEDeconTrainer:
         # Calculate gene mean and std as features for GNN
         self._compute_gene_statistics(dataset, self.config.model.gene_mean_std_fp)
 
+        # Export training SCT cross-sample gene variance CSV (only if new loss is enabled)
+        cross_var_fp = self._prepare_and_save_training_sct_cross_sample_gene_var()
+        if cross_var_fp is not None:
+            self.config.model.training_sct_cross_sample_gene_var_fp = cross_var_fp
+
         return dataset, train_set, val_set
 
     def _compute_gene_statistics(
@@ -198,6 +204,48 @@ class VAEDeconTrainer:
             return model_dir / f"gene_mean_std_log2p1_scaled_by_{scaling_factor}.csv"
         return model_dir / "gene_mean_std_log2p1.csv"
 
+    def _build_training_sct_cross_sample_gene_var_output_path(self) -> Path:
+        model_dir = Path(self.config.model.model_dir)
+        scaling_factor = self.config.data.scaling_factor
+        if self.config.data.scaling_by_constant:
+            return model_dir / f"training_sct_cross_sample_gene_variances_log2p1_scaled_by_{scaling_factor}.csv"
+        return model_dir / "training_sct_cross_sample_gene_variances_log2p1.csv"
+
+    def _prepare_and_save_training_sct_cross_sample_gene_var(self) -> Optional[Path]:
+        """Compute and save SCT cross-sample gene variance CSV if the new loss is enabled."""
+        weight = getattr(getattr(self.config.model, "loss_coefficient", None), "cross_sample_gene_var_weight", 0.0) or 0.0
+        if weight <= 0:
+            return None
+
+        sct_gep_fp = self._resolve_gene_mean_std_sct_gep_path()
+        if sct_gep_fp is None or not Path(sct_gep_fp).exists():
+            # Fall back to data.sct_file_path[0] if available
+            sct_paths = self.config.data.sct_file_path or []
+            existing = [p for p in sct_paths if p is not None and Path(p).exists()]
+            if not existing:
+                raise FileNotFoundError(
+                    "loss_coefficient.cross_sample_gene_var_weight > 0 requires a "
+                    "training SCT h5ad path, but neither "
+                    "gene_mean_std_sct_gep_file_path/sct_gep_file_path nor sct_file_path "
+                    "point to an existing file."
+                )
+            sct_gep_fp = Path(existing[0])
+
+        out_fp = self._build_training_sct_cross_sample_gene_var_output_path()
+        if not Path(out_fp).exists():
+            compute_training_sct_cross_sample_gene_var(
+                sct_dataset_fp=sct_gep_fp,
+                result_fp=out_fp,
+                gene_list_fp=self.config.model.input_gene_list_fp,
+                cell_type_fp=self.config.model.cell_type_fp,
+                scaling_by_constant=self.config.data.scaling_by_constant,
+                log2p1=True,
+                scaling_factor=self.config.data.scaling_factor,
+            )
+        else:
+            logger.info(f"Using existing training SCT cross-sample gene variance CSV at {out_fp}")
+        return out_fp
+
     def _create_model(self, model_config: ModelConfig):
         """Instantiate the VAE model using the cached ModelConfig."""
         logger.info("Creating model...")
@@ -232,6 +280,7 @@ class VAEDeconTrainer:
             input_gene_list_fp=self.config.model.input_gene_list_fp,
             cell_type_fp=self.config.model.cell_type_fp,
             gene_mean_std_fp=gene_mean_std_fp,
+            training_sct_cross_sample_gene_var_fp=self.config.model.training_sct_cross_sample_gene_var_fp,
             # scaling_by_constant=self.config.data.scaling_by_constant,
             encoder_hidden_dims=self.config.model.encoder_hidden_dims,
             encoder_hidden_dims_pathway=self.config.model.encoder_hidden_dims_pathway,
