@@ -135,6 +135,104 @@ Also add a commented example in SimuTME `config_example.yaml` showing `sorted_bu
 - **Name options rejected:** `gene_variance_weight` (too easily confused with `gene_std_weight`). Accepted name: `cross_sample_gene_var_weight`.
 - **Reference source for variance target:** explicitly `data.sct_file_path` (training SCT datasets), not the separate gene-mean/std ref. Point (4) of user’s plan says both should be the same dataset for the next run. So this design enforces that the variance target is the training SCTs, and separately the user can set the mean/std ref to the same path by configuration.
 
+## Detailed comparison: `gene_std_weight` vs `cross_sample_gene_var_weight`
+
+Both terms compare a per-(gene, cell_type) statistic aggregated over a batch of B reconstructed
+cell-type-specific GEPs to a reference statistic precomputed on the training SCT dataset. They
+are **not redundant** — they operate on different statistical axes and enforce different
+structural constraints on the decoder output.
+
+### 1. Existing `gene_std_weight` (kept, no semantic change)
+
+Computation order, matching the current implementation:
+
+```python
+# Aggregate FIRST in raw CPM space (before log).
+recon_gene_mean = recon_x_all_types_cpm.mean(dim=0)   # (G, C)
+recon_gene_std  = recon_x_all_types_cpm.std(dim=0)    # (G, C)
+# Convert the two aggregates to scaled log-space AFTER aggregation.
+recon_gene_mean_log = to_log_space(recon_gene_mean, scaling_factor)
+recon_gene_std_log  = to_log_space(recon_gene_std,  scaling_factor)
+# Match population-level gene mean/std buffers.
+gm_loss = MSE(recon_gene_mean_log, g_mean)
+gs_loss = MSE(recon_gene_std_log,  g_std)
+```
+
+This is a **population-level match**: "does the population of outputs have the right mean
+expression and the right marginal std per gene, averaged across samples in the batch."
+
+### 2. New `cross_sample_gene_var_weight`
+
+Computation order in the implemented loss:
+
+```python
+# Convert to scaled log-space FIRST (per sample).
+recon_x_all_types_log = to_log_space(recon_x_all_types_cpm, scaling_factor)  # (B, G, C)
+
+# Sample variance (ddof=1) on per-sample log-space values, PER (gene, ct).
+mean_per_g     = recon_x_all_types_log.mean(dim=0)                          # (G, C)
+sq_dev         = (recon_x_all_types_log - mean_per_g[None, ...]).pow(2)      # (B, G, C)
+recon_var_per_g = sq_dev.sum(dim=0) / float(B - 1)                           # (G, C), unbiased
+
+# Compare to training-SCT variance target (also computed in scaled log-space,
+# same scaling_factor, log2(CPM+1) transform, and ddof=1).
+abs_diff = (recon_var_per_g - g_cross_sample_gene_var).abs()                 # (G, C)
+scalar   = abs_diff.sum() / (G * C)                                           # MAE per (gene, ct)
+```
+
+Here the deviations are computed **per sample first**: each sample's value in scaled log-space
+is compared against the batch centroid for that (gene, ct), then squared and averaged to a
+variance. This is therefore an explicit **sample-level variability** match, not just a
+two-number population summary.
+
+### 3. Why they are not redundant: a failure-mode thought experiment
+
+Consider a pathological collapsed decoder that outputs the same centroid GEP for every sample,
+with a small **gene-uniform global scale jitter** per batch (e.g., sample 1 × 1.01, sample
+2 × 0.99, … applied equally to every gene). Can the decoder achieve a low value for each loss
+term?
+
+| Loss term | Population statistic used | Foolable by collapsed + global-scale noise? |
+|---|---|---|
+| `gs_loss = MSE(std_B(CPM), g_std)` | Marginal std per (gene, ct) over B | **Yes** — uniform global jitter inflates the marginal std of every gene by roughly the same factor, so the population std can be "tuned" to match `g_std` even though every sample is still a scaled version of the same centroid (the exact collapse reported in `inter_sample_similarity_ccc/` with recon_vs_recon CCC ~ 0.9–0.99). |
+| `MAE(Var_B(log_CPM/20), target_var)` | Per-(gene, ct) unbiased variance of **per-sample** log-space deviations around their batch mean | **No** — a single global scale factor changes the absolute level of every gene equally, so it cannot produce *gene-specific* sample-to-sample variation. To minimize this loss, the decoder has to vary which genes are up/down on a per-sample basis, with the same per-gene spread structure as the training SCT distribution. This directly forces non-collapsed, sample-distinct GEPs. |
+
+Formally:
+- `gene_std_weight` uses two scalars per (gene, ct). No per-sample information enters the loss
+  beyond those two aggregates; the term is blind to the shape of individual samples.
+- `cross_sample_gene_var_weight` is built from B squared deviations per (gene, ct), so it
+  explicitly constrains the distribution of values *across samples* and is not fooled by
+  globally uniform batch perturbations.
+
+### 4. Order of log/aggregation differs (intentionally)
+
+Note the **different order of log vs aggregation**:
+
+- `gene_std_weight`: `std_B(CPM)` → `to_log_space(std)`  (aggregate first, log second)
+- `cross_sample_gene_var_weight`: `to_log_space(CPM)` → `Var_B(log)`  (log first, variance second)
+
+These are mathematically different operations. The new term's ordering was chosen to match
+the CSV generation pipeline on the training SCT side (which also logs first, then variances),
+guaranteeing an apples-to-apples variance comparison. The older `gene_std_weight` preserves
+its existing semantics (population-marginal CPM std, compared in log space) — both are valid
+losses, just on different distributional axes.
+
+### 5. Scale of the target variance (for magnitude sanity checks)
+
+Target `g_cross_sample_gene_var[g,c]` values are variances in scaled-log squared units
+`(log2(CPM+1)/20)^2`. For intuition:
+
+| CPM-space CV | approximate sd(log₂ CPM) | sd(log/20) | variance (log/20)² |
+|---|---|---|---|
+| ~10% (tight) | ~0.14 | 0.007 | ~5 × 10⁻⁵ |
+| ~30% (modest) | ~0.38 | 0.019 | ~3.6 × 10⁻⁴ |
+| ~2× (wide spread) | ~1.0 | 0.05 | ~2.5 × 10⁻³ |
+
+So typical target entries are in `[~1e-5, ~1e-2]`, and the resulting mean-absolute scalar
+loss (averaged over G × C entries) is accordingly ~O(1e-4) to ~O(1e-3) at initialization;
+a well-matched recon batch drives it to ~1e-6 and below (with float round-off producing
+~1e-8 exact-match residuals when the synthetic input variance exactly equals the target).
+
 ## File changes list (implementation)
 
 - `VAEDecon/vaedecon/configs/default_config.py` — add `cross_sample_gene_var_weight` field + validation, include in loss to_dict
