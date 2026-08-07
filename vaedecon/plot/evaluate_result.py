@@ -1,4 +1,5 @@
 import os
+import html
 import pandas as pd
 import numpy as np
 from typing import Union
@@ -664,6 +665,314 @@ def _plot_pairwise_ccc_heatmap(
     plt.close(fig)
 
 
+def _plot_pairwise_ccc_clustermap(
+    matrix_df: pd.DataFrame,
+    output_fp: str | Path,
+    title: str,
+) -> None:
+    if matrix_df.empty or min(matrix_df.shape) < 2:
+        return
+    matrix_min = float(np.nanmin(matrix_df.values)) if matrix_df.size else 0.0
+    matrix_max = float(np.nanmax(matrix_df.values)) if matrix_df.size else 1.0
+    vmin = max(0.0, matrix_min)
+    vmax = max(vmin, matrix_max)
+    cluster_grid = sns.clustermap(
+        matrix_df,
+        cmap="vlag",
+        vmin=vmin,
+        vmax=vmax,
+        cbar_kws={"label": "CCC"},
+    )
+    cluster_grid.ax_heatmap.set_title(title, fontsize=9, pad=12)
+    cluster_grid.ax_heatmap.set_xlabel("")
+    cluster_grid.ax_heatmap.set_ylabel("")
+    cluster_grid.ax_heatmap.tick_params(axis="x", labelrotation=45, labelsize=6)
+    cluster_grid.ax_heatmap.tick_params(axis="y", labelrotation=0, labelsize=6)
+    cluster_grid.savefig(output_fp, dpi=300)
+    plt.close(cluster_grid.figure)
+
+
+def _write_similarity_result_gallery(
+    similarity_result_dir: str | Path,
+    figure_format: str,
+) -> None:
+    result_dir = Path(similarity_result_dir)
+    matrix_names = ("true_vs_true", "recon_vs_recon", "true_vs_recon")
+    matrix_label_map = {
+        "true_vs_true": "True vs True",
+        "recon_vs_recon": "Recon vs Recon",
+        "true_vs_recon": "True vs Recon",
+    }
+    grouped_outputs: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
+
+    def _make_anchor_id(text: str, prefix: str) -> str:
+        slug_chars = []
+        previous_was_sep = False
+        for char in text.lower():
+            if char.isalnum():
+                slug_chars.append(char)
+                previous_was_sep = False
+            elif not previous_was_sep:
+                slug_chars.append("-")
+                previous_was_sep = True
+        slug = "".join(slug_chars).strip("-")
+        if not slug:
+            slug = "section"
+        return f"{prefix}-{slug}"
+
+    def _parse_prefix_and_matrix(stem: str) -> tuple[str, str] | tuple[None, None]:
+        for matrix_name in matrix_names:
+            for suffix in (f"_{matrix_name}_clustermap", f"_{matrix_name}"):
+                if stem.endswith(suffix):
+                    return stem[: -len(suffix)], matrix_name
+        return None, None
+
+    for artifact_fp in sorted(result_dir.iterdir()):
+        if not artifact_fp.is_file():
+            continue
+        if artifact_fp.suffix not in {".csv", f".{figure_format}"}:
+            continue
+        stem = artifact_fp.stem
+        prefix, matched_matrix_name = _parse_prefix_and_matrix(stem)
+        if matched_matrix_name is None or prefix is None:
+            continue
+        cell_type = prefix.split("_ccc_true_prop_ge_")[0]
+        grouped_outputs.setdefault(cell_type, {}).setdefault(prefix, {}).setdefault(matched_matrix_name, {})
+        if artifact_fp.suffix == ".csv":
+            grouped_outputs[cell_type][prefix][matched_matrix_name]["csv"] = artifact_fp.name
+        elif stem.endswith("_clustermap"):
+            grouped_outputs[cell_type][prefix][matched_matrix_name]["clustermap"] = artifact_fp.name
+        else:
+            grouped_outputs[cell_type][prefix][matched_matrix_name]["heatmap"] = artifact_fp.name
+
+    for cell_type in grouped_outputs:
+        for prefix in grouped_outputs[cell_type]:
+            for matched_matrix_name in matrix_names:
+                artifacts = grouped_outputs[cell_type][prefix].get(matched_matrix_name)
+                if not artifacts:
+                    continue
+                standard_png = result_dir / f"{prefix}_{matched_matrix_name}.{figure_format}"
+                if standard_png.exists():
+                    artifacts["heatmap"] = standard_png.name
+                clustermap_png = result_dir / f"{prefix}_{matched_matrix_name}_clustermap.{figure_format}"
+                if clustermap_png.exists():
+                    artifacts["clustermap"] = clustermap_png.name
+
+    sorted_cell_types = sorted(grouped_outputs)
+    cell_type_to_figure_links: dict[str, list[tuple[str, str]]] = {}
+    for cell_type in sorted_cell_types:
+        prefixes = sorted(grouped_outputs[cell_type])
+        multiple_prefixes = len(prefixes) > 1
+        figure_links = []
+        for prefix in prefixes:
+            threshold_tag = prefix.split("_ccc_true_prop_ge_", 1)[1] if "_ccc_true_prop_ge_" in prefix else ""
+            for matrix_name in matrix_names:
+                artifacts = grouped_outputs[cell_type][prefix].get(matrix_name)
+                if not artifacts:
+                    continue
+                variant_anchor = _make_anchor_id(f"{prefix}-{matrix_name}", prefix="variant")
+                label = matrix_label_map[matrix_name]
+                if multiple_prefixes and threshold_tag:
+                    label = f"{label} ({threshold_tag})"
+                figure_links.append((label, variant_anchor))
+        cell_type_to_figure_links[cell_type] = figure_links
+
+    def _append_figure_type_toc_links(*, html_buffer: list[str], cell_type: str) -> None:
+        for label, variant_anchor in cell_type_to_figure_links.get(cell_type, []):
+            html_buffer.append(
+                f"<li><a class=\"toc-link figure-type-link\" href=\"#{html.escape(variant_anchor)}\">"
+                f"{html.escape(label)}</a></li>"
+            )
+
+    html_parts = [
+        "<!DOCTYPE html>",
+        "<html lang=\"en\">",
+        "<head>",
+        "<meta charset=\"utf-8\">",
+        "<title>Inter-sample CCC Gallery</title>",
+        "<style>",
+        "html { scroll-behavior: smooth; }",
+        "body { font-family: Arial, sans-serif; margin: 0; color: #222; background: #fff; }",
+        "a { color: #0f5aa6; text-decoration: none; }",
+        "a:hover { text-decoration: underline; }",
+        ".page-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr) 220px; gap: 24px; max-width: 1800px; margin: 0 auto; padding: 24px; box-sizing: border-box; }",
+        ".toc { position: sticky; top: 16px; align-self: start; max-height: calc(100vh - 32px); overflow-y: auto; border: 1px solid #ddd; border-radius: 8px; padding: 14px 16px; background: #fafafa; }",
+        ".toc-title { font-weight: 700; margin-bottom: 10px; }",
+        ".toc ul { list-style: none; padding: 0; margin: 0; }",
+        ".toc li { margin-bottom: 8px; }",
+        ".toc-link { display: block; padding: 4px 6px; border-radius: 4px; }",
+        ".toc-link.is-active { background: #e7f0fb; font-weight: 700; }",
+        ".content { min-width: 0; }",
+        "h1 { margin-top: 0; margin-bottom: 8px; }",
+        "h2 { margin-top: 32px; margin-bottom: 8px; border-bottom: 1px solid #ddd; padding-bottom: 6px; scroll-margin-top: 16px; }",
+        "h3 { margin-top: 20px; margin-bottom: 6px; }",
+        ".subtitle { color: #555; margin-bottom: 10px; }",
+        ".usage-note { color: #555; margin-bottom: 24px; }",
+        ".cell-type-section { margin-bottom: 28px; }",
+        ".section-header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }",
+        ".back-to-top { font-size: 0.9em; white-space: nowrap; }",
+        ".variant { margin-bottom: 20px; }",
+        ".figure-type-link { font-size: 0.95em; }",
+        ".links a { margin-right: 12px; }",
+        ".images { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; }",
+        ".panel { border: 1px solid #ddd; padding: 10px; background: #fafafa; border-radius: 6px; }",
+        ".panel img { max-width: 560px; height: auto; display: block; }",
+        ".muted { color: #666; font-size: 0.95em; }",
+        "@media (max-width: 1200px) { .page-layout { grid-template-columns: 200px minmax(0, 1fr); } .toc-right { grid-column: 1 / -1; position: static; max-height: none; } }",
+        "@media (max-width: 900px) { .page-layout { grid-template-columns: 1fr; } .toc { position: static; max-height: none; } }",
+        "</style>",
+        "</head>",
+        "<body>",
+        "<div class=\"page-layout\">",
+        "<aside class=\"toc toc-left\">",
+        "<div class=\"toc-title\">Cell Types</div>",
+        "<ul>",
+    ]
+
+    for index, cell_type in enumerate(sorted_cell_types):
+        cell_type_anchor = _make_anchor_id(cell_type, prefix="cell-type")
+        html_parts.append(
+            f"<li><a class=\"toc-link{' is-active' if index == 0 else ''}\" "
+            f"href=\"#{html.escape(cell_type_anchor)}\" data-cell-type-link=\"{html.escape(cell_type_anchor)}\">"
+            f"{html.escape(cell_type)}</a></li>"
+        )
+
+    html_parts.extend([
+        "</ul>",
+        "</aside>",
+        "<main class=\"content\" id=\"top\">",
+        "<h1>Inter-sample CCC Gallery</h1>",
+        "<p class=\"subtitle\">Grouped by cell type and comparison type.</p>",
+        "<p class=\"usage-note\">Use the left panel to jump to a cell type. The right panel follows the current cell type and links to its figure sections.</p>",
+    ])
+
+    if not grouped_outputs:
+        html_parts.append("<p>No CCC outputs found.</p>")
+    else:
+        for cell_type in sorted_cell_types:
+            cell_type_anchor = _make_anchor_id(cell_type, prefix="cell-type")
+            html_parts.append(
+                f"<section class=\"cell-type-section\" id=\"{html.escape(cell_type_anchor)}\" "
+                f"data-cell-type-name=\"{html.escape(cell_type)}\">"
+            )
+            html_parts.append("<div class=\"section-header\">")
+            html_parts.append(f"<h2>{html.escape(cell_type)}</h2>")
+            html_parts.append("<a class=\"back-to-top\" href=\"#top\">Top</a>")
+            html_parts.append("</div>")
+            for prefix in sorted(grouped_outputs[cell_type]):
+                threshold_tag = prefix.split("_ccc_true_prop_ge_", 1)[1] if "_ccc_true_prop_ge_" in prefix else ""
+                if threshold_tag:
+                    html_parts.append(
+                        f"<p class=\"muted\">threshold tag: {html.escape(threshold_tag)}</p>"
+                    )
+                for matrix_name in matrix_names:
+                    artifacts = grouped_outputs[cell_type][prefix].get(matrix_name)
+                    if not artifacts:
+                        continue
+                    variant_anchor = _make_anchor_id(f"{prefix}-{matrix_name}", prefix="variant")
+                    html_parts.append(
+                        f"<div class=\"variant\" id=\"{html.escape(variant_anchor)}\" "
+                        f"data-matrix-name=\"{html.escape(matrix_name)}\">"
+                    )
+                    html_parts.append(f"<h3>{html.escape(matrix_label_map[matrix_name])}</h3>")
+                    links = []
+                    if "csv" in artifacts:
+                        links.append(f"<a href=\"{html.escape(artifacts['csv'])}\">CSV</a>")
+                    if "heatmap" in artifacts:
+                        links.append(f"<a href=\"{html.escape(artifacts['heatmap'])}\">Heatmap</a>")
+                    if "clustermap" in artifacts:
+                        links.append(f"<a href=\"{html.escape(artifacts['clustermap'])}\">Clustermap</a>")
+                    if links:
+                        html_parts.append(f"<div class=\"links\">{' '.join(links)}</div>")
+                    html_parts.append("<div class=\"images\">")
+                    if "heatmap" in artifacts:
+                        html_parts.append(
+                            "<div class=\"panel\"><div>Heatmap</div>"
+                            f"<img src=\"{html.escape(artifacts['heatmap'])}\" alt=\"{html.escape(matrix_name)} heatmap\"></div>"
+                        )
+                    if "clustermap" in artifacts:
+                        html_parts.append(
+                            "<div class=\"panel\"><div>Clustermap</div>"
+                            f"<img src=\"{html.escape(artifacts['clustermap'])}\" alt=\"{html.escape(matrix_name)} clustermap\"></div>"
+                        )
+                    html_parts.append("</div></div>")
+            html_parts.append("</section>")
+
+    html_parts.extend([
+        "</main>",
+        "<aside class=\"toc toc-right\">",
+        (
+            f"<div class=\"toc-title\" id=\"figure-type-title\">Figure Types: "
+            f"{html.escape(sorted_cell_types[0])}</div>"
+            if sorted_cell_types else
+            "<div class=\"toc-title\" id=\"figure-type-title\">Figure Types</div>"
+        ),
+        "<ul id=\"figure-type-list\">",
+    ])
+
+    if sorted_cell_types:
+        _append_figure_type_toc_links(html_buffer=html_parts, cell_type=sorted_cell_types[0])
+
+    html_parts.extend([
+        "</ul>",
+        "</aside>",
+        "</div>",
+        "<script>",
+        "const cellTypeLinks = Array.from(document.querySelectorAll('[data-cell-type-link]'));",
+        "const cellTypeSections = Array.from(document.querySelectorAll('.cell-type-section'));",
+        "const figureTypeList = document.getElementById('figure-type-list');",
+        "const figureTypeTitle = document.getElementById('figure-type-title');",
+        "function setActiveCellType(sectionId) {",
+        "  cellTypeLinks.forEach((link) => {",
+        "    link.classList.toggle('is-active', link.dataset.cellTypeLink === sectionId);",
+        "  });",
+        "}",
+        "function updateFigureTypeToc(section) {",
+        "  if (!section || !figureTypeList || !figureTypeTitle) {",
+        "    return;",
+        "  }",
+        "  const cellTypeName = section.dataset.cellTypeName || section.querySelector('h2')?.textContent || 'Current Cell Type';",
+        "  figureTypeTitle.textContent = `Figure Types: ${cellTypeName}`;",
+        "  const variantLinks = Array.from(section.querySelectorAll('.variant')).map((variant) => {",
+        "    const heading = variant.querySelector('h3');",
+        "    return { href: `#${variant.id}`, label: heading ? heading.textContent : variant.dataset.matrixName };",
+        "  });",
+        "  figureTypeList.innerHTML = variantLinks.map((item) => `",
+        "    <li><a class=\"toc-link figure-type-link\" href=\"${item.href}\">${item.label}</a></li>`).join('');",
+        "}",
+        "function syncSidebars(section) {",
+        "  if (!section) {",
+        "    return;",
+        "  }",
+        "  setActiveCellType(section.id);",
+        "  updateFigureTypeToc(section);",
+        "}",
+        "cellTypeLinks.forEach((link) => {",
+        "  link.addEventListener('click', () => {",
+        "    const sectionId = link.dataset.cellTypeLink;",
+        "    const targetSection = document.getElementById(sectionId);",
+        "    syncSidebars(targetSection);",
+        "  });",
+        "});",
+        "if (cellTypeSections.length > 0) {",
+        "  syncSidebars(cellTypeSections[0]);",
+        "  const observer = new IntersectionObserver((entries) => {",
+        "    const visibleEntries = entries.filter((entry) => entry.isIntersecting);",
+        "    if (visibleEntries.length === 0) {",
+        "      return;",
+        "    }",
+        "    visibleEntries.sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);",
+        "    syncSidebars(visibleEntries[0].target);",
+        "  }, { rootMargin: '-15% 0px -70% 0px', threshold: 0.05 });",
+        "  cellTypeSections.forEach((section) => observer.observe(section));",
+        "}",
+        "</script>",
+        "</body>",
+        "</html>",
+    ])
+    (result_dir / "index.html").write_text("\n".join(html_parts), encoding="utf-8")
+
+
 def _save_selected_sample_similarity_outputs(
     *,
     cell_type: str,
@@ -687,6 +996,10 @@ def _save_selected_sample_similarity_outputs(
                 title=title,
                 threshold=threshold,
             )
+        _write_similarity_result_gallery(
+            similarity_result_dir=similarity_result_dir,
+            figure_format=figure_format,
+        )
         return
 
     matrix_builders = {
@@ -721,12 +1034,22 @@ def _save_selected_sample_similarity_outputs(
     for matrix_name, (matrix_df, title) in matrix_builders.items():
         csv_fp = Path(similarity_result_dir) / f"{prefix}_{matrix_name}.csv"
         fig_fp = Path(similarity_result_dir) / f"{prefix}_{matrix_name}.{figure_format}"
+        clustermap_fp = Path(similarity_result_dir) / f"{prefix}_{matrix_name}_clustermap.{figure_format}"
         matrix_df.to_csv(csv_fp, float_format="%.6f")
         _plot_pairwise_ccc_heatmap(
             matrix_df=matrix_df,
             output_fp=fig_fp,
             title=title,
         )
+        _plot_pairwise_ccc_clustermap(
+            matrix_df=matrix_df,
+            output_fp=clustermap_fp,
+            title=title,
+        )
+    _write_similarity_result_gallery(
+        similarity_result_dir=similarity_result_dir,
+        figure_format=figure_format,
+    )
 
 
 def compare_exp_and_cell_fraction(merged_file_path, result_dir,
