@@ -1,9 +1,12 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from vaedecon.workflow.inference import _infer_result_set_name
 from vaedecon.workflow.inference import _merge_aligned_cell_prop_long_table
+from vaedecon.workflow.inference import _validate_input_file_path
+from vaedecon.workflow.inference import _build_simutme_path_suggestions
 
 
 def test_infer_result_set_name_uses_full_h5ad_stem():
@@ -46,3 +49,38 @@ def test_merge_aligned_cell_prop_long_table_preserves_alignment():
     ].iloc[0]
     assert sample_b_cd8["true_cell_prop"] == 0.8
     assert sample_b_cd8["pred_cell_prop"] == 0.75
+
+
+def test_validate_input_file_path_returns_existing_file(tmp_path: Path):
+    existing = tmp_path / "good.h5ad"
+    existing.write_bytes(b"not-really-h5-but-exists")
+
+    result = _validate_input_file_path(existing, context="test set data file")
+
+    assert result == existing
+
+
+def test_validate_input_file_path_raises_with_context_and_requested_path(tmp_path: Path):
+    missing = tmp_path / "segment_11ds_n_base30_no_filtering_median_gep" / "missing.h5ad"
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        _validate_input_file_path(missing, context="configured test set 'set1'")
+
+    message = str(exc_info.value)
+    assert "configured test set 'set1'" in message
+    assert str(missing) in message
+
+
+def test_build_simutme_path_suggestions_lists_nearby_candidates(tmp_path: Path):
+    parent = tmp_path / "segment_11ds_n_base30_no_filtering_median_gep"
+    parent.mkdir()
+    (parent / "simu_gep_Mixed_Test_set1_10Aug_segment_gepsamp-n_neighbors_log2cpm1p.h5ad").write_bytes(b"a")
+    (parent / "simu_gep_Mixed_Test_set2_gepsamp-n_neighbors_log2cpm1p.h5ad").write_bytes(b"b")
+    (parent / "not_relevant.txt").write_text("x")
+
+    wrong = parent / "simu_gep_Mixed_Test_set1_OLD_12ds_gepsamp-n_neighbors_log2cpm1p.h5ad"
+    suggestions = _build_simutme_path_suggestions(wrong, limit=5)
+
+    assert len(suggestions) >= 2
+    assert any(str(parent / "simu_gep_Mixed_Test_set1_10Aug_segment_gepsamp-n_neighbors_log2cpm1p.h5ad") in s for s in suggestions)
+    assert any(str(parent / "simu_gep_Mixed_Test_set2_gepsamp-n_neighbors_log2cpm1p.h5ad") in s for s in suggestions)

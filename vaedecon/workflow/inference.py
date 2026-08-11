@@ -34,6 +34,89 @@ def _infer_result_set_name(data_file_path: str | Path) -> str:
     return stem or "test_set"
 
 
+def _build_simutme_path_suggestions(requested_path: str | Path, limit: int = 5) -> list[str]:
+    """Suggest nearby SimuTME-style files/dirs when the configured path is missing.
+
+    Helps catch post-regression mismatches such as ``11ds`` vs ``12ds`` or
+    ``n_base30`` vs ``n_base100`` in generated dataset folder names.
+    """
+    requested = Path(str(requested_path))
+    suggestions: list[str] = []
+
+    parent = requested.parent
+    if parent.exists() and parent.is_dir():
+        try:
+            for child in sorted(parent.iterdir()):
+                if child.is_dir():
+                    continue
+                if child.suffix.lower() in {".h5ad", ".csv"}:
+                    suggestions.append(str(child))
+                    if len(suggestions) >= limit:
+                        break
+        except OSError:
+            pass
+    if suggestions:
+        return suggestions[:limit]
+
+    ancestor = parent
+    visited: set[Path] = set()
+    while ancestor != ancestor.parent and len(suggestions) < limit:
+        if ancestor in visited:
+            break
+        visited.add(ancestor)
+        if ancestor.exists() and ancestor.is_dir():
+            try:
+                for child in sorted(ancestor.iterdir()):
+                    if child.is_dir() or child.suffix.lower() in {".h5ad", ".csv"}:
+                        suggestions.append(str(child))
+                        if len(suggestions) >= limit:
+                            break
+            except OSError:
+                pass
+        if len(suggestions) >= limit:
+            break
+        ancestor = ancestor.parent
+
+    return suggestions[:limit]
+
+
+def _validate_input_file_path(
+    requested_path: str | Path,
+    context: str = "test set",
+) -> Path:
+    """Validate a VAEDecon input file path exists and return it as a Path.
+
+    Raises ``FileNotFoundError`` with a diagnostic message including nearby
+    candidate files/dirs if the configured path is missing.
+    """
+    path = Path(str(requested_path))
+    if path.exists() and path.is_file():
+        return path
+
+    suggestions = _build_simutme_path_suggestions(path)
+    msg_lines = [
+        f"Configured {context} file does not exist:",
+        f"  requested: {path}",
+    ]
+    if not path.is_absolute():
+        try:
+            resolved = path.resolve()
+            msg_lines.append(f"  resolved (cwd): {resolved}")
+        except Exception:
+            pass
+    if suggestions:
+        msg_lines.append("Nearby candidate files/dirs you may have intended:")
+        for s in suggestions:
+            msg_lines.append(f"    - {s}")
+    else:
+        msg_lines.append(
+            "No nearby .h5ad/.csv candidates were found. Double-check the configured "
+            "path and confirm SimuTME dataset generation finished successfully before "
+            "running VAEDecon inference."
+        )
+    raise FileNotFoundError("\n".join(msg_lines))
+
+
 def _configured_test_sets(config: VAEDeconConfig) -> Dict[str, TestSetConfig]:
     """Return configured test sets from the loaded config."""
     return dict(getattr(config.data, "test_sets", {}) or {})
@@ -232,6 +315,7 @@ class VAEDeconPredictor:
         check_dir(Path(output_dir))
 
         logger.info(f"Processing data from: {data_file_path}")
+        data_file_path = str(_validate_input_file_path(data_file_path, context="test set data file"))
         result_set_name = _infer_result_set_name(data_file_path)
         logger.info(f"Inference result subfolder: {result_set_name}")
 
@@ -334,10 +418,34 @@ class VAEDeconPredictor:
             sample2cell_id_file_path = self.config.data.test_set_sample2cell_id_file_path
         if sct_gep_file_path is None or sct_gep_file_path == '':
             sct_gep_file_path = self.config.data.sct_gep_file_path
+        validated_sample2cell: Optional[str] = None
+        if sample2cell_id_file_path and str(sample2cell_id_file_path).strip() != '':
+            try:
+                validated_sample2cell = str(_validate_input_file_path(
+                    sample2cell_id_file_path,
+                    context="sample-to-cell mapping file",
+                ))
+            except FileNotFoundError as exc:
+                logger.warning(
+                    "Optional sample-to-cell mapping file missing; skipping any "
+                    "visualizations that depend on it. Details: %s", exc
+                )
+        validated_sct_gep: Optional[str] = None
+        if sct_gep_file_path and str(sct_gep_file_path).strip() != '':
+            try:
+                validated_sct_gep = str(_validate_input_file_path(
+                    sct_gep_file_path,
+                    context="SCT GEP reference file",
+                ))
+            except FileNotFoundError as exc:
+                logger.warning(
+                    "Optional SCT GEP reference file missing; skipping any "
+                    "visualizations that depend on it. Details: %s", exc
+                )
         self._generate_visualizations(
             results=results,
-            sample2cell_id_file_path=sample2cell_id_file_path,
-            sct_gep_file_path=sct_gep_file_path,
+            sample2cell_id_file_path=validated_sample2cell,
+            sct_gep_file_path=validated_sct_gep,
         )
 
         return results
