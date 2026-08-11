@@ -117,6 +117,54 @@ def _validate_input_file_path(
     raise FileNotFoundError("\n".join(msg_lines))
 
 
+def _resolve_model_artifact_path(
+    model_dir: str | Path,
+    configured_path: Optional[str | Path],
+    default_file_name: str,
+) -> Optional[Path]:
+    """Resolve a trained-model artifact path from config or model_dir."""
+    base_dir = Path(str(model_dir))
+    if configured_path is not None and str(configured_path).strip() != "":
+        configured = Path(str(configured_path))
+        if configured.exists():
+            return configured
+        candidate = base_dir / configured.name
+        if candidate.exists():
+            return candidate
+
+    default_candidate = base_dir / default_file_name
+    if default_candidate.exists():
+        return default_candidate
+    return None
+
+
+def _validate_required_model_artifact_path(
+    model_dir: str | Path,
+    configured_path: Optional[str | Path],
+    default_file_name: str,
+    label: str,
+) -> Path:
+    """Resolve a required trained-model artifact path or raise a clear error."""
+    resolved = _resolve_model_artifact_path(
+        model_dir=model_dir,
+        configured_path=configured_path,
+        default_file_name=default_file_name,
+    )
+    if resolved is not None:
+        return resolved
+
+    base_dir = Path(str(model_dir))
+    msg_lines = [
+        f"Required trained-model artifact is missing for inference: {label}",
+        f"  model_dir: {base_dir}",
+        f"  configured path: {configured_path}",
+        f"  expected default file: {base_dir / default_file_name}",
+        "Inference needs the exact training-time model artifacts saved under final_model/.",
+        "Re-run training metadata export or point the config at an existing trained-model artifact.",
+    ]
+    raise FileNotFoundError("\n".join(msg_lines))
+
+
 def _configured_test_sets(config: VAEDeconConfig) -> Dict[str, TestSetConfig]:
     """Return configured test sets from the loaded config."""
     return dict(getattr(config.data, "test_sets", {}) or {})
@@ -275,8 +323,42 @@ class VAEDeconPredictor:
 
         logger.info(f"Using device: {self.device}")
 
+        self._hydrate_model_config_paths()
+
         # Load the trained model
         self._load_model()
+
+    def _hydrate_model_config_paths(self):
+        """Backfill trained-model artifact paths from model_dir for inference."""
+        model_dir = Path(str(self.model_dir))
+        if getattr(self.config.model, "model_dir", None) in (None, ""):
+            self.config.model.model_dir = model_dir
+
+        input_gene_list_fp = _resolve_model_artifact_path(
+            model_dir=model_dir,
+            configured_path=getattr(self.config.model, "input_gene_list_fp", None),
+            default_file_name="input_gene_list.txt",
+        )
+        if input_gene_list_fp is not None:
+            self.config.model.input_gene_list_fp = input_gene_list_fp
+
+        cell_type_fp = _resolve_model_artifact_path(
+            model_dir=model_dir,
+            configured_path=getattr(self.config.model, "cell_type_fp", None),
+            default_file_name="cell_type_list.txt",
+        )
+        if cell_type_fp is not None:
+            self.config.model.cell_type_fp = cell_type_fp
+
+        gene_mean_std_fp = getattr(self.config.model, "gene_mean_std_fp", None)
+        if gene_mean_std_fp is not None and str(gene_mean_std_fp).strip() != "":
+            resolved_gene_mean_std_fp = _resolve_model_artifact_path(
+                model_dir=model_dir,
+                configured_path=gene_mean_std_fp,
+                default_file_name=Path(str(gene_mean_std_fp)).name,
+            )
+            if resolved_gene_mean_std_fp is not None:
+                self.config.model.gene_mean_std_fp = resolved_gene_mean_std_fp
 
     def _load_model(self):
         """Load the trained model"""
@@ -360,6 +442,12 @@ class VAEDeconPredictor:
             os.path.dirname(data_file_path),
             f'processed_{dataset_type}'
         )
+        input_gene_list_fp = _validate_required_model_artifact_path(
+            model_dir=self.model_dir,
+            configured_path=getattr(self.config.model, "input_gene_list_fp", None),
+            default_file_name="input_gene_list.txt",
+            label="input gene list",
+        )
 
         return GEPDatasetConfig(
             file_paths=[data_file_path],
@@ -379,7 +467,7 @@ class VAEDeconPredictor:
             pooled_sc_sample_size=self.config.data.pooled_sc_sample_size,
             pooled_sc_seed=self.config.data.pooled_sc_seed,
             processed_data_dir=processed_data_dir,
-            gene_list_file=Path(self.config.model.input_gene_list_fp),
+            gene_list_file=input_gene_list_fp,
         )
 
     def predict_and_visualize(

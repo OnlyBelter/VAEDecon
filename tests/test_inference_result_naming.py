@@ -7,6 +7,8 @@ from vaedecon.workflow.inference import _infer_result_set_name
 from vaedecon.workflow.inference import _merge_aligned_cell_prop_long_table
 from vaedecon.workflow.inference import _validate_input_file_path
 from vaedecon.workflow.inference import _build_simutme_path_suggestions
+from vaedecon.workflow.inference import _resolve_model_artifact_path
+from vaedecon.workflow.inference import _validate_required_model_artifact_path
 
 
 def test_infer_result_set_name_uses_full_h5ad_stem():
@@ -84,3 +86,35 @@ def test_build_simutme_path_suggestions_lists_nearby_candidates(tmp_path: Path):
     assert len(suggestions) >= 2
     assert any(str(parent / "simu_gep_Mixed_Test_set1_10Aug_segment_gepsamp-n_neighbors_log2cpm1p.h5ad") in s for s in suggestions)
     assert any(str(parent / "simu_gep_Mixed_Test_set2_gepsamp-n_neighbors_log2cpm1p.h5ad") in s for s in suggestions)
+
+
+def test_resolve_model_artifact_path_falls_back_to_default_file_in_model_dir(tmp_path: Path):
+    model_dir = tmp_path / "final_model"
+    model_dir.mkdir()
+    expected = model_dir / "input_gene_list.txt"
+    expected.write_text("GAPDH\nACTB\n")
+
+    resolved = _resolve_model_artifact_path(
+        model_dir=model_dir,
+        configured_path=None,
+        default_file_name="input_gene_list.txt",
+    )
+
+    assert resolved == expected
+
+
+def test_validate_required_model_artifact_path_raises_clear_error_when_missing(tmp_path: Path):
+    model_dir = tmp_path / "final_model"
+    model_dir.mkdir()
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        _validate_required_model_artifact_path(
+            model_dir=model_dir,
+            configured_path=None,
+            default_file_name="input_gene_list.txt",
+            label="input gene list",
+        )
+
+    message = str(exc_info.value)
+    assert "input gene list" in message
+    assert str(model_dir / "input_gene_list.txt") in message
