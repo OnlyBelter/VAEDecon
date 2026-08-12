@@ -107,6 +107,171 @@ def load_gene_list(file_path: Path) -> list[str]:
     # gene_list = [gene.strip() for gene in gene_list]
     return gene_list
 
+
+def _load_bulk_sample_ids_from_file(file_path: Union[str, Path]) -> list[str]:
+    """Load bulk sample IDs from a training expression file without full preprocessing."""
+    path = Path(file_path)
+    if str(path).endswith(".h5ad"):
+        h5ad_obj = ReadH5AD(path)
+        return h5ad_obj.get_h5ad().obs_names.to_list()
+    if str(path).endswith(".csv"):
+        df = pd.read_csv(path, index_col=0)
+        return df.index.astype(str).tolist()
+    raise ValueError(f"Unrecognized training set file format: {path}")
+
+
+def _load_cached_aligned_sct_geps(
+    sct_gep_fp: Path,
+    selected_cell_ids: list[str],
+    target_gene_list: list[str],
+    cache_sct_query_results: bool = True,
+    sct_query_cache_file_path: Optional[Union[str, Path]] = None,
+) -> pd.DataFrame:
+    """Load matched SCT cells and align them to the requested bulk gene order."""
+    if not selected_cell_ids:
+        return pd.DataFrame(columns=target_gene_list)
+
+    cache_fp = Path(sct_query_cache_file_path) if sct_query_cache_file_path else Path(
+        str(sct_gep_fp) + ".query_cache.pkl"
+    )
+
+    cached_df = pd.DataFrame()
+    if cache_sct_query_results and cache_fp.exists():
+        try:
+            cache_obj = pd.read_pickle(cache_fp)
+            if (
+                isinstance(cache_obj, dict)
+                and cache_obj.get("source_path") == str(sct_gep_fp)
+                and cache_obj.get("source_mtime_ns") == sct_gep_fp.stat().st_mtime_ns
+                and isinstance(cache_obj.get("df"), pd.DataFrame)
+            ):
+                cached_df = cache_obj["df"]
+        except Exception as e:
+            logger.warning(f"Failed to read SCT query cache {cache_fp}: {e}")
+
+    cached_index = set(cached_df.index.tolist())
+    missing_ids = [cid for cid in selected_cell_ids if cid not in cached_index]
+    if missing_ids:
+        sct_loader = ReadH5AD(sct_gep_fp, backed="r")
+        fetched_df = sct_loader.get_df(obs_names=missing_ids)
+        if not fetched_df.empty:
+            cached_df = pd.concat([cached_df, fetched_df], axis=0)
+            cached_df = cached_df[~cached_df.index.duplicated(keep="last")]
+
+            if cache_sct_query_results:
+                try:
+                    cache_fp.parent.mkdir(parents=True, exist_ok=True)
+                    pd.to_pickle(
+                        {
+                            "source_path": str(sct_gep_fp),
+                            "source_mtime_ns": sct_gep_fp.stat().st_mtime_ns,
+                            "df": cached_df,
+                        },
+                        cache_fp,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to write SCT query cache {cache_fp}: {e}")
+
+    present_ids = [cid for cid in selected_cell_ids if cid in set(cached_df.index.tolist())]
+    if cache_sct_query_results:
+        sct_geps_df_raw = cached_df.loc[present_ids, :]
+    else:
+        sct_loader = ReadH5AD(sct_gep_fp, backed="r")
+        sct_geps_df_raw = sct_loader.get_df(obs_names=present_ids)
+
+    if sct_geps_df_raw.empty:
+        return pd.DataFrame(columns=target_gene_list)
+
+    sct_exp_processor = ReadExp(sct_geps_df_raw, exp_type="log_space")
+    sct_exp_processor.align_with_gene_list(gene_list=target_gene_list, fill_not_exist=True)
+    return sct_exp_processor.get_exp()
+
+
+def build_matched_sct_gep_training_targets(
+    sct_gep_dataset_file_path: Union[str, Path],
+    sample2cell_id_file_path: Union[str, Path],
+    bulk_sample_ids: list[str],
+    target_gene_list: list[str],
+    cell_types: list[str],
+    cache_sct_query_results: bool = True,
+    sct_query_cache_file_path: Optional[Union[str, Path]] = None,
+) -> Dict[str, Any]:
+    """Build dense matched sctGEP targets aligned to bulk sample order."""
+    sct_gep_fp = Path(sct_gep_dataset_file_path)
+    sample2cell_fp = Path(sample2cell_id_file_path)
+
+    if not sct_gep_fp.exists():
+        raise FileNotFoundError(f"SCT GEP dataset file not found: {sct_gep_fp}")
+    if not sample2cell_fp.exists():
+        raise FileNotFoundError(f"Sample to cell ID mapping file not found: {sample2cell_fp}")
+
+    sample2cell_df_all = pd.read_csv(sample2cell_fp, index_col=0)
+    if sample2cell_df_all.empty:
+        return {
+            "sample_ids": bulk_sample_ids,
+            "gene_list": target_gene_list,
+            "cell_types": cell_types,
+            "true_sct_gep": np.zeros((len(bulk_sample_ids), len(target_gene_list), len(cell_types)), dtype=np.float32),
+            "true_sct_gep_present_mask": np.zeros((len(bulk_sample_ids), len(cell_types)), dtype=bool),
+            "selected_sample2cell_id": pd.DataFrame(columns=["cell_type", "selected_cell_id"]),
+            "aligned_sct_geps_df": pd.DataFrame(columns=target_gene_list),
+        }
+
+    filtered_mapping_df = sample2cell_df_all.loc[
+        sample2cell_df_all.index.isin(bulk_sample_ids),
+        ["cell_type", "selected_cell_id"],
+    ].copy()
+    filtered_mapping_df["selected_cell_id"] = filtered_mapping_df["selected_cell_id"].astype(str)
+    filtered_mapping_df = (
+        filtered_mapping_df
+        .reset_index()
+        .drop_duplicates(subset=["index", "cell_type"], keep="first")
+        .rename(columns={"index": "sample_id"})
+        .set_index("sample_id")
+    )
+
+    unique_sct_cell_ids = list(dict.fromkeys(filtered_mapping_df["selected_cell_id"].tolist()))
+    aligned_sct_geps_df = _load_cached_aligned_sct_geps(
+        sct_gep_fp=sct_gep_fp,
+        selected_cell_ids=unique_sct_cell_ids,
+        target_gene_list=target_gene_list,
+        cache_sct_query_results=cache_sct_query_results,
+        sct_query_cache_file_path=sct_query_cache_file_path,
+    )
+
+    n_samples = len(bulk_sample_ids)
+    n_genes = len(target_gene_list)
+    n_cell_types = len(cell_types)
+    true_sct_gep = np.zeros((n_samples, n_genes, n_cell_types), dtype=np.float32)
+    true_sct_gep_present_mask = np.zeros((n_samples, n_cell_types), dtype=bool)
+    cell_type_to_idx = {cell_type: idx for idx, cell_type in enumerate(cell_types)}
+
+    for sample_idx, sample_id in enumerate(bulk_sample_ids):
+        if sample_id not in filtered_mapping_df.index:
+            continue
+        sample_rows = filtered_mapping_df.loc[[sample_id], :]
+        for _, row in sample_rows.iterrows():
+            cell_type = str(row["cell_type"])
+            selected_cell_id = str(row["selected_cell_id"])
+            cell_type_idx = cell_type_to_idx.get(cell_type)
+            if cell_type_idx is None or selected_cell_id not in aligned_sct_geps_df.index:
+                continue
+            true_sct_gep[sample_idx, :, cell_type_idx] = aligned_sct_geps_df.loc[selected_cell_id, :].to_numpy(
+                dtype=np.float32,
+                copy=False,
+            )
+            true_sct_gep_present_mask[sample_idx, cell_type_idx] = True
+
+    return {
+        "sample_ids": bulk_sample_ids,
+        "gene_list": target_gene_list,
+        "cell_types": cell_types,
+        "true_sct_gep": true_sct_gep,
+        "true_sct_gep_present_mask": true_sct_gep_present_mask,
+        "selected_sample2cell_id": filtered_mapping_df,
+        "aligned_sct_geps_df": aligned_sct_geps_df,
+    }
+
 # =============================================================================
 # 1) Cache Manager
 # =============================================================================
@@ -127,6 +292,10 @@ class GEPCacheManager:
         # Define canonical cache file paths once
         self.data_path = self.cache_dir / ("data.npz" if self.compress else "data.npy")
         self.labels_path = self.cache_dir / ("labels.npz" if self.compress else "labels.npy")
+        self.true_sct_gep_path = self.cache_dir / ("true_sct_gep.npz" if self.compress else "true_sct_gep.npy")
+        self.true_sct_gep_present_mask_path = self.cache_dir / (
+            "true_sct_gep_present_mask.npz" if self.compress else "true_sct_gep_present_mask.npy"
+        )
         self.gene_list_path = self.cache_dir / "gene_list.txt"
         self.cell_types_path = self.cache_dir / "cell_types.txt"
         self.sample_ids_path = self.cache_dir / "sample_ids.txt"
@@ -184,6 +353,15 @@ class GEPCacheManager:
             if labels_array is not None:
                 np.save(self.labels_path, labels_array)
 
+    def save_optional_array(self, array_path: Path, array: Optional[np.ndarray], key: str) -> None:
+        """Save an optional array using the same compression policy as the main cache."""
+        if array is None:
+            return
+        if self.compress:
+            np.savez_compressed(array_path, **{key: array})
+        else:
+            np.save(array_path, array)
+
     def load_data(self, use_memmap: bool) -> np.ndarray:
         """
         Load data array.
@@ -215,6 +393,28 @@ class GEPCacheManager:
         if use_memmap:
             return np.load(self.labels_path, mmap_mode="r", allow_pickle=False)
         return np.load(self.labels_path, allow_pickle=False).astype(np.float32, copy=False)
+
+    def load_optional_array(
+        self,
+        array_path: Path,
+        key: str,
+        use_memmap: bool,
+        dtype: Optional[np.dtype] = None,
+    ) -> np.ndarray:
+        """Load an optional cached array or return an empty array when absent."""
+        if not array_path.exists():
+            return np.array([], dtype=dtype or np.float32)
+
+        if self.compress:
+            arr = np.load(array_path, allow_pickle=False)[key]
+        elif use_memmap:
+            arr = np.load(array_path, mmap_mode="r", allow_pickle=False)
+        else:
+            arr = np.load(array_path, allow_pickle=False)
+
+        if dtype is not None and arr.dtype != dtype:
+            arr = arr.astype(dtype, copy=False)
+        return arr
 
     # -------------------------------------------------------------------------
     # Metadata save/load
@@ -525,6 +725,8 @@ class GEPDataset(Dataset):
         # Lazy-loaded arrays
         self._data: Optional[np.ndarray] = None
         self._labels: Optional[np.ndarray] = None
+        self._true_sct_gep: Optional[np.ndarray] = None
+        self._true_sct_gep_present_mask: Optional[np.ndarray] = None
 
         # Metadata
         self.gene_list: List[str] = []
@@ -572,6 +774,30 @@ class GEPDataset(Dataset):
             if self._labels.size > 0 and self._labels.dtype != np.float32:
                 self._labels = self._labels.astype(np.float32, copy=False)
         return self._labels
+
+    @property
+    def true_sct_gep(self) -> np.ndarray:
+        """Lazy loading of matched true sctGEP targets."""
+        if self._true_sct_gep is None:
+            self._true_sct_gep = self.cache.load_optional_array(
+                array_path=self.cache.true_sct_gep_path,
+                key="true_sct_gep",
+                use_memmap=self.use_memmap,
+                dtype=np.float32,
+            )
+        return self._true_sct_gep
+
+    @property
+    def true_sct_gep_present_mask(self) -> np.ndarray:
+        """Lazy loading of matched true-sctGEP presence masks."""
+        if self._true_sct_gep_present_mask is None:
+            self._true_sct_gep_present_mask = self.cache.load_optional_array(
+                array_path=self.cache.true_sct_gep_present_mask_path,
+                key="true_sct_gep_present_mask",
+                use_memmap=self.use_memmap,
+                dtype=bool,
+            )
+        return self._true_sct_gep_present_mask
 
     # -------------------------------------------------------------------------
     # Internal cache metadata loader
@@ -621,8 +847,34 @@ class GEPDataset(Dataset):
         if not cell_prop_df.empty:
             labels_array = cell_prop_df.loc[gep_data_df.index].values.astype(np.float32, copy=False)
 
+        true_sct_gep_array: Optional[np.ndarray] = None
+        true_sct_gep_present_mask_array: Optional[np.ndarray] = None
+        if self.config.training_target_sets:
+            if cell_prop_df.empty:
+                raise ValueError(
+                    "training_target_sets requires cell-fraction labels so matched "
+                    "sctGEP targets can align with training cell types."
+                )
+            true_sct_gep_array, true_sct_gep_present_mask_array = self._build_true_sct_gep_targets(
+                sample_ids=gep_data_df.index.astype(str).tolist(),
+                gene_list=gep_data_df.columns.astype(str).tolist(),
+                cell_types=cell_prop_df.columns.astype(str).tolist(),
+            )
+            if self.apply_scaling and true_sct_gep_array is not None:
+                true_sct_gep_array = true_sct_gep_array / float(self.scaling_value)
+
         # Save arrays + metadata
         self.cache.save_arrays(data_array, labels_array)
+        self.cache.save_optional_array(
+            array_path=self.cache.true_sct_gep_path,
+            array=true_sct_gep_array,
+            key="true_sct_gep",
+        )
+        self.cache.save_optional_array(
+            array_path=self.cache.true_sct_gep_present_mask_path,
+            array=true_sct_gep_present_mask_array,
+            key="true_sct_gep_present_mask",
+        )
         self.cache.save_metadata(
             gene_list=gep_data_df.columns.to_list(),
             sample_ids=gep_data_df.index.to_list(),
@@ -642,12 +894,80 @@ class GEPDataset(Dataset):
 
         # Cleanup
         del gep_data_df, cell_prop_df, data_array, labels_array
+        if true_sct_gep_array is not None:
+            del true_sct_gep_array
+        if true_sct_gep_present_mask_array is not None:
+            del true_sct_gep_present_mask_array
         gc.collect()
 
         log_message(
             f"Preprocessing complete: {self._n_samples} samples, "
             f"{self._n_genes} genes"
         )
+
+    def _build_true_sct_gep_targets(
+        self,
+        sample_ids: list[str],
+        gene_list: list[str],
+        cell_types: list[str],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Build dataset-aligned matched sctGEP targets for configured training bulk sets."""
+        n_samples = len(sample_ids)
+        n_genes = len(gene_list)
+        n_cell_types = len(cell_types)
+        true_sct_gep = np.zeros((n_samples, n_genes, n_cell_types), dtype=np.float32)
+        true_sct_gep_present_mask = np.zeros((n_samples, n_cell_types), dtype=bool)
+
+        sample_id_to_positions: Dict[str, list[int]] = {}
+        for row_idx, sample_id in enumerate(sample_ids):
+            sample_id_to_positions.setdefault(str(sample_id), []).append(row_idx)
+
+        for _, target_cfg in self.config.training_target_sets.items():
+            bulk_sample_ids = [str(sample_id) for sample_id in _load_bulk_sample_ids_from_file(
+                target_cfg.training_set_file_path
+            )]
+            if not bulk_sample_ids:
+                continue
+
+            row_positions: list[int] = []
+            missing_sample_ids: list[str] = []
+            duplicate_sample_ids: list[str] = []
+            for bulk_sample_id in bulk_sample_ids:
+                positions = sample_id_to_positions.get(bulk_sample_id, [])
+                if len(positions) == 1:
+                    row_positions.append(positions[0])
+                elif len(positions) == 0:
+                    missing_sample_ids.append(bulk_sample_id)
+                else:
+                    duplicate_sample_ids.append(bulk_sample_id)
+
+            if missing_sample_ids:
+                preview = ", ".join(missing_sample_ids[:5])
+                raise ValueError(
+                    "Could not align matched sctGEP targets because some training bulk "
+                    f"samples are missing from the processed dataset: {preview}"
+                )
+            if duplicate_sample_ids:
+                preview = ", ".join(duplicate_sample_ids[:5])
+                raise ValueError(
+                    "Could not align matched sctGEP targets because some processed sample "
+                    f"IDs are duplicated: {preview}"
+                )
+
+            matched_targets = build_matched_sct_gep_training_targets(
+                sct_gep_dataset_file_path=target_cfg.training_sct_gep_file_path,
+                sample2cell_id_file_path=target_cfg.training_set_sample2cell_id_file_path,
+                bulk_sample_ids=bulk_sample_ids,
+                target_gene_list=gene_list,
+                cell_types=cell_types,
+            )
+
+            true_sct_gep[np.asarray(row_positions), :, :] = matched_targets["true_sct_gep"]
+            true_sct_gep_present_mask[np.asarray(row_positions), :] = matched_targets[
+                "true_sct_gep_present_mask"
+            ]
+
+        return true_sct_gep, true_sct_gep_present_mask
 
     # -------------------------------------------------------------------------
     # PyTorch Dataset interface
@@ -670,8 +990,22 @@ class GEPDataset(Dataset):
             y = torch.as_tensor(self.labels[index], dtype=torch.float32)
         else:
             y = torch.empty(0, dtype=torch.float32)
+        if self.true_sct_gep.size > 0:
+            true_sct_gep = torch.as_tensor(self.true_sct_gep[index], dtype=torch.float32)
+            true_sct_gep_present_mask = torch.as_tensor(
+                self.true_sct_gep_present_mask[index],
+                dtype=torch.bool,
+            )
+        else:
+            true_sct_gep = torch.empty(0, dtype=torch.float32)
+            true_sct_gep_present_mask = torch.empty(0, dtype=torch.bool)
 
-        return DatasetOutput(data=x, labels=y)
+        return DatasetOutput(
+            data=x,
+            labels=y,
+            true_sct_gep=true_sct_gep,
+            true_sct_gep_present_mask=true_sct_gep_present_mask,
+        )
 
     # -------------------------------------------------------------------------
     # Convenience methods
@@ -683,7 +1017,21 @@ class GEPDataset(Dataset):
             y = torch.as_tensor(self.labels[indices], dtype=torch.float32)
         else:
             y = torch.empty(0, dtype=torch.float32)
-        return {"data": x, "labels": y}
+        if self.true_sct_gep.size > 0:
+            true_sct_gep = torch.as_tensor(self.true_sct_gep[indices], dtype=torch.float32)
+            true_sct_gep_present_mask = torch.as_tensor(
+                self.true_sct_gep_present_mask[indices],
+                dtype=torch.bool,
+            )
+        else:
+            true_sct_gep = torch.empty(0, dtype=torch.float32)
+            true_sct_gep_present_mask = torch.empty(0, dtype=torch.bool)
+        return {
+            "data": x,
+            "labels": y,
+            "true_sct_gep": true_sct_gep,
+            "true_sct_gep_present_mask": true_sct_gep_present_mask,
+        }
 
     def save_gene_list(self, file_path: Union[str, Path]) -> None:
         """Save gene list to file."""
@@ -734,6 +1082,12 @@ class GEPDataset(Dataset):
 
         if self._labels is not None and self._labels.size > 0:
             usage["labels_mb"] = float(self._labels.nbytes / (1024 ** 2))
+        if self._true_sct_gep is not None and self._true_sct_gep.size > 0:
+            usage["true_sct_gep_mb"] = float(self._true_sct_gep.nbytes / (1024 ** 2))
+        if self._true_sct_gep_present_mask is not None and self._true_sct_gep_present_mask.size > 0:
+            usage["true_sct_gep_present_mask_mb"] = float(
+                self._true_sct_gep_present_mask.nbytes / (1024 ** 2)
+            )
 
         usage["total_mb"] = float(sum(usage.values()))
         return usage
@@ -746,6 +1100,8 @@ class GEPDataset(Dataset):
         """
         self._data = None
         self._labels = None
+        self._true_sct_gep = None
+        self._true_sct_gep_present_mask = None
         gc.collect()
         log_message("Data references unloaded from memory.")
 
@@ -778,19 +1134,6 @@ def find_sct_gep_of_bulk_sample(
         - dict[cell_type -> DataFrame] if result_dir is None
         - None if saving files to result_dir
     """
-    # Convert paths for consistency
-    sct_gep_fp = Path(sct_gep_dataset_file_path)
-    sample2cell_fp = Path(sample2cell_id_file_path)
-
-    # --- 1) Input validation ---
-    if not sct_gep_fp.exists():
-        logger.error(f"SCT GEP dataset file not found: {sct_gep_fp}")
-        raise FileNotFoundError(f"SCT GEP dataset file not found: {sct_gep_fp}")
-
-    if not sample2cell_fp.exists():
-        logger.error(f"Sample to cell ID mapping file not found: {sample2cell_fp}")
-        raise FileNotFoundError(f"Sample to cell ID mapping file not found: {sample2cell_fp}")
-
     all_bulk_sample_ids = bulk_dataset.get_sample_ids()
     target_gene_list = bulk_dataset.get_gene_list()  # bulk gene space
 
@@ -815,15 +1158,16 @@ def find_sct_gep_of_bulk_sample(
     query_bulk_ids = [all_bulk_sample_ids[i] for i in selected_idx]
     logger.info(f"Selected bulk sample IDs: {query_bulk_ids}")
 
-    # --- 3) Mapping load/filter ---
-    try:
-        sample2cell_df_all = pd.read_csv(sample2cell_fp, index_col=0)
-    except Exception as e:
-        logger.error(f"Error reading mapping file {sample2cell_fp}: {e}")
-        raise
-
-    mask = sample2cell_df_all.index.isin(query_bulk_ids)
-    filtered_mapping_df = sample2cell_df_all.loc[mask, ["cell_type", "selected_cell_id"]].copy()
+    matched_targets = build_matched_sct_gep_training_targets(
+        sct_gep_dataset_file_path=sct_gep_dataset_file_path,
+        sample2cell_id_file_path=sample2cell_id_file_path,
+        bulk_sample_ids=query_bulk_ids,
+        target_gene_list=target_gene_list,
+        cell_types=cell_types,
+        cache_sct_query_results=cache_sct_query_results,
+        sct_query_cache_file_path=sct_query_cache_file_path,
+    )
+    filtered_mapping_df = matched_targets["selected_sample2cell_id"].copy()
 
     if filtered_mapping_df.empty:
         logger.warning("Selected bulk IDs have no valid mapping rows.")
@@ -841,73 +1185,10 @@ def find_sct_gep_of_bulk_sample(
         except Exception as e:
             logger.error(f"Error saving selected mapping: {e}")
 
-    unique_sct_cell_ids = filtered_mapping_df["selected_cell_id"].unique().tolist()
-    if not unique_sct_cell_ids:
-        logger.warning("No unique SCT cell IDs found after filtering.")
-        return {} if not result_dir else None
-
-    # --- 4) Load + process SCT GEPs ---
-    logger.info(f"Loading GEPs for {len(unique_sct_cell_ids)} unique SCT cell IDs...")
-    try:
-        cache_fp = Path(sct_query_cache_file_path) if sct_query_cache_file_path else Path(
-            str(sct_gep_fp) + ".query_cache.pkl"
-        )
-
-        cached_df = pd.DataFrame()
-        if cache_sct_query_results and cache_fp.exists():
-            try:
-                cache_obj = pd.read_pickle(cache_fp)
-                if (
-                    isinstance(cache_obj, dict)
-                    and cache_obj.get("source_path") == str(sct_gep_fp)
-                    and cache_obj.get("source_mtime_ns") == sct_gep_fp.stat().st_mtime_ns
-                    and isinstance(cache_obj.get("df"), pd.DataFrame)
-                ):
-                    cached_df = cache_obj["df"]
-            except Exception as e:
-                logger.warning(f"Failed to read SCT query cache {cache_fp}: {e}")
-
-        missing_ids = [cid for cid in unique_sct_cell_ids if cid not in set(cached_df.index)]
-        if missing_ids:
-            sct_loader = ReadH5AD(sct_gep_fp, backed="r")
-            fetched_df = sct_loader.get_df(obs_names=missing_ids)
-            if not fetched_df.empty:
-                cached_df = pd.concat([cached_df, fetched_df], axis=0)
-                cached_df = cached_df[~cached_df.index.duplicated(keep="last")]
-
-                if cache_sct_query_results:
-                    try:
-                        cache_fp.parent.mkdir(parents=True, exist_ok=True)
-                        pd.to_pickle(
-                            {
-                                "source_path": str(sct_gep_fp),
-                                "source_mtime_ns": sct_gep_fp.stat().st_mtime_ns,
-                                "df": cached_df,
-                            },
-                            cache_fp,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to write SCT query cache {cache_fp}: {e}")
-
-        if cache_sct_query_results:
-            present_ids = [cid for cid in unique_sct_cell_ids if cid in set(cached_df.index)]
-            sct_geps_df_raw = cached_df.loc[present_ids, :]
-        else:
-            sct_loader = ReadH5AD(sct_gep_fp, backed="r")
-            sct_geps_df_raw = sct_loader.get_df(obs_names=unique_sct_cell_ids)
-    except Exception as e:
-        logger.error(f"Error loading SCT GEPs: {e}")
-        raise
-
-    if sct_geps_df_raw.empty:
+    processed_sct_geps_df = matched_targets["aligned_sct_geps_df"].copy()
+    if processed_sct_geps_df.empty:
         logger.warning("No SCT GEP data loaded for selected cell IDs.")
         return {} if not result_dir else None
-
-    logger.info(f"Loaded SCT GEP shape: {sct_geps_df_raw.shape}")
-
-    sct_exp_processor = ReadExp(sct_geps_df_raw, exp_type="log_space")
-    sct_exp_processor.align_with_gene_list(gene_list=target_gene_list, fill_not_exist=True)
-    processed_sct_geps_df = sct_exp_processor.get_exp()
     logger.info(f"Processed SCT GEP shape: {processed_sct_geps_df.shape}")
 
     # --- 5) Group by cell type and save/return ---

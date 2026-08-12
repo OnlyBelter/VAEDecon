@@ -54,6 +54,7 @@ class LossTerms:
     repulsion: torch.Tensor
     cell_prop: torch.Tensor
     attractor: torch.Tensor = torch.tensor(0.0)
+    cell_type_sct_gep: torch.Tensor = torch.tensor(0.0)
     z_score_reciprocal: torch.Tensor = torch.tensor(0.0)  # Optional term for std regularization
     z_score_kl_loss: torch.Tensor = torch.tensor(0.0)  # New KL term for empirical z-score to N(0,1)
     low_mean_std_gene_loss: torch.Tensor = torch.tensor(0.0)  # Optional term to prevent collapse of low-mean/std genes
@@ -314,6 +315,17 @@ class VAE(BaseAE):
             y = y.to(device)
         else:
             y = None
+        true_sct_gep = inputs.get("true_sct_gep")
+        if torch.is_tensor(true_sct_gep) and true_sct_gep.numel() > 0:
+            true_sct_gep = true_sct_gep.to(device)
+        else:
+            true_sct_gep = None
+
+        true_sct_gep_present_mask = inputs.get("true_sct_gep_present_mask")
+        if torch.is_tensor(true_sct_gep_present_mask) and true_sct_gep_present_mask.numel() > 0:
+            true_sct_gep_present_mask = true_sct_gep_present_mask.to(device=device, dtype=torch.bool)
+        else:
+            true_sct_gep_present_mask = None
 
         # ================== Random Gene Masking ==================
         # Only apply masking during training, not validation/testing.
@@ -468,6 +480,8 @@ class VAE(BaseAE):
             mu_mean=mu_mean,
             device=device,
             recon_x_all_types_cpm=recon_x_all_types_cpm,
+            true_sct_gep=true_sct_gep,
+            true_sct_gep_present_mask=true_sct_gep_present_mask,
         )
 
         return ModelOutput(
@@ -484,6 +498,7 @@ class VAE(BaseAE):
             z_score_kl_loss=loss_terms.z_score_kl_loss,
             low_mean_std_gene_loss=loss_terms.low_mean_std_gene_loss,
             cross_sample_gene_var_loss=loss_terms.cross_sample_gene_var_loss,
+            cell_type_sct_gep_loss=loss_terms.cell_type_sct_gep,
             mu=mu_mean,
             mu_deconv=mu_types,
             log_var=log_var_types,
@@ -512,6 +527,8 @@ class VAE(BaseAE):
         mu_mean: torch.Tensor,
         device: torch.device,
         recon_x_all_types_cpm: Optional[torch.Tensor] = None,
+        true_sct_gep: Optional[torch.Tensor] = None,
+        true_sct_gep_present_mask: Optional[torch.Tensor] = None,
     ) -> LossTerms:
         """
         Compute all objective terms and aggregate total loss.
@@ -616,6 +633,33 @@ class VAE(BaseAE):
         else:
             cross_var_loss_per_sample = torch.zeros((batch_size,), device=device)
 
+        cell_type_sct_gep_weight = float(getattr(lo, "cell_type_sct_gep_weight", 0.0) or 0.0)
+        if cell_type_sct_gep_weight > 0:
+            if recon_x_all_types_cpm is None:
+                raise ValueError(
+                    "recon_x_all_types_cpm is required when cell_type_sct_gep_weight > 0"
+                )
+            if true_sct_gep is None or true_sct_gep_present_mask is None:
+                raise ValueError(
+                    "Matched sctGEP supervision is enabled but the dataset batch does not "
+                    "include true_sct_gep and true_sct_gep_present_mask."
+                )
+            if not labels_available:
+                raise ValueError(
+                    "Matched sctGEP supervision requires true cell-proportion labels during training."
+                )
+            cell_type_sct_gep_loss = self._matched_sct_gep_supervision_loss(
+                recon_x_all_types_cpm=recon_x_all_types_cpm,
+                true_sct_gep=true_sct_gep,
+                true_sct_gep_present_mask=true_sct_gep_present_mask,
+                true_cell_prop=y,
+                cell_prop_threshold=float(
+                    getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
+                ),
+            )
+        else:
+            cell_type_sct_gep_loss = torch.zeros((batch_size,), device=device)
+
         # --- 3. KL Divergence (Cell Proportions - Dirichlet) ---
         kld_p, cell_prop_loss = self._cell_prop_dirichlet_loss(
             y=y,
@@ -666,6 +710,7 @@ class VAE(BaseAE):
             # + lo.gene_std_weight * gs_loss
             + lo.z_score_kl_weight * z_score_kl_loss
             + cross_sample_gene_var_weight * cross_var_loss_per_sample
+            + cell_type_sct_gep_weight * cell_type_sct_gep_loss
             # + z_score_reg_weight * (1 / mean_z_scores)
         ).mean()
 
@@ -679,6 +724,7 @@ class VAE(BaseAE):
             repulsion=repulsion_loss.mean(),
             cell_prop=cell_prop_loss.mean(),
             attractor=attractor_loss.mean(),
+            cell_type_sct_gep=cell_type_sct_gep_loss.mean(),
             hierarchical_code=hierarchical_code_loss.mean(),
             z_score_reciprocal=(1 / mean_z_scores).mean(),
             z_score_kl_loss=z_score_kl_loss.mean(),
@@ -755,6 +801,22 @@ class VAE(BaseAE):
 
         B = recon_x_all_types_log.shape[0]
         return scalar.expand(B)
+
+    def _matched_sct_gep_supervision_loss(
+        self,
+        recon_x_all_types_cpm: torch.Tensor,
+        true_sct_gep: torch.Tensor,
+        true_sct_gep_present_mask: torch.Tensor,
+        true_cell_prop: torch.Tensor,
+        cell_prop_threshold: float,
+    ) -> torch.Tensor:
+        """Masked log-MSE between inferred cell-type GEPs and matched true sctGEPs."""
+        recon_x_all_types_log = to_log_space(recon_x_all_types_cpm, self.scaling_factor)
+        active_cell_type_mask = true_sct_gep_present_mask & (true_cell_prop >= cell_prop_threshold)
+        active_gene_mask = active_cell_type_mask.unsqueeze(1).to(dtype=recon_x_all_types_log.dtype)
+        diff2 = (recon_x_all_types_log - true_sct_gep).pow(2) * active_gene_mask
+        denom = active_gene_mask.sum(dim=(1, 2)).clamp_min(1.0)
+        return diff2.sum(dim=(1, 2)) / denom
 
     def _z_score_kl_loss(self, recon_x_all_types_cpm: torch.Tensor) -> torch.Tensor:
         """

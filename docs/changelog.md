@@ -4,6 +4,45 @@ This changelog records notable user-facing changes in `VAEDecon`. It focuses
 on behavior, configuration, and workflow updates that affect training,
 inference, and evaluation.
 
+## August 12, 2026
+
+This update adds optional matched-`sctGEP` supervision during training and
+improves the release metadata around the new workflow.
+
+### Matched `sctGEP` supervision
+
+Training can now directly compare inferred cell-type-specific outputs against
+the matched ground-truth `sctGEP` used to generate each simulated bulk sample.
+
+- Added `data.training_target_sets` so each simulated bulk training set can be
+  paired with its matched `sample2cell_id` mapping file and SCT reference
+  dataset.
+- Added `data.training_sct_gep_cell_prop_threshold` to mask cell types whose
+  true training proportions are below the configured threshold.
+- Added `model.loss_coefficient.cell_type_sct_gep_weight` to enable the new
+  masked matched-`sctGEP` supervision loss during training.
+- Extended the training dataset cache to store dense matched `true_sct_gep`
+  targets and per-sample cell-type presence masks.
+- Reused the inference-style SCT matching workflow in shared dataset helpers so
+  training and inference resolve matched `sctGEP` references consistently.
+
+### Compatibility and configuration
+
+The new workflow is opt-in and preserves the existing training path by default.
+
+- Kept legacy training configs working when `training_target_sets` is absent
+  and `cell_type_sct_gep_weight` remains `0.0`.
+- Updated the example config to document the new training-target bundle and
+  threshold settings.
+- Removed a duplicate `hierarchical_code_weight` key from the example YAML so
+  it loads cleanly.
+
+### Tests
+
+- Added regression tests for training-target config validation, dense matched
+  `sctGEP` target construction, dataset masking for non-bulk rows, and masked
+  loss behavior.
+
 ## July 27, 2026
 
 This update adds activation-aware cell-proportion prediction so you can choose

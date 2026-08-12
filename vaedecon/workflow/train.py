@@ -198,6 +198,21 @@ class VAEDeconTrainer:
         training_sct_paths = [Path(fp) for fp in (self.config.data.sct_file_path or []) if fp and str(fp).strip() != ""]
         if training_sct_paths:
             return training_sct_paths
+        training_target_sct_paths = [
+            Path(cfg.training_sct_gep_file_path)
+            for cfg in (self.config.data.training_target_sets or {}).values()
+            if cfg.training_sct_gep_file_path and str(cfg.training_sct_gep_file_path).strip() != ""
+        ]
+        if training_target_sct_paths:
+            deduped_paths: list[Path] = []
+            seen: set[str] = set()
+            for path in training_target_sct_paths:
+                key = str(path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped_paths.append(path)
+            return deduped_paths
         top_level_fp = self.config.data.sct_gep_file_path
         if top_level_fp and str(top_level_fp).strip() != "":
             return [Path(top_level_fp)]
@@ -356,6 +371,34 @@ class VAEDeconTrainer:
         simu_paths = self.config.data.simu_bulk_file_path or []
         sct_paths  = self.config.data.sct_file_path or []
         training_file_paths = [p for p in simu_paths + sct_paths if p is not None]
+        matched_sct_gep_weight = float(
+            getattr(self.config.model.loss_coefficient, "cell_type_sct_gep_weight", 0.0) or 0.0
+        )
+        training_target_sets = {}
+        if matched_sct_gep_weight > 0:
+            training_target_sets = dict(self.config.data.training_target_sets or {})
+            if not training_target_sets:
+                raise ValueError(
+                    "loss_coefficient.cell_type_sct_gep_weight > 0 requires "
+                    "data.training_target_sets to define matched bulk/sample2cell/sct bundles."
+                )
+
+            configured_bulk_paths = {
+                str(Path(path).expanduser().resolve())
+                for path in simu_paths
+                if path is not None and str(path).strip() != ""
+            }
+            target_bulk_paths = {
+                str(Path(cfg.training_set_file_path).expanduser().resolve())
+                for cfg in training_target_sets.values()
+            }
+            missing_target_paths = configured_bulk_paths - target_bulk_paths
+            if missing_target_paths:
+                preview = ", ".join(sorted(missing_target_paths)[:3])
+                raise ValueError(
+                    "Each simulated bulk training set needs a matched entry in "
+                    f"data.training_target_sets when cell_type_sct_gep_weight > 0. Missing: {preview}"
+                )
 
         return GEPDatasetConfig(
             file_paths=training_file_paths,
@@ -374,6 +417,8 @@ class VAEDeconTrainer:
             pooled_sc_cell_subtype_col=self.config.data.pooled_sc_cell_subtype_col,
             pooled_sc_sample_size=self.config.data.pooled_sc_sample_size,
             pooled_sc_seed=self.config.data.pooled_sc_seed,
+            training_target_sets=training_target_sets,
+            training_sct_gep_cell_prop_threshold=self.config.data.training_sct_gep_cell_prop_threshold,
             processed_data_dir=self._processed_training_set_dir,
         )
 

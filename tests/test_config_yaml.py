@@ -110,6 +110,42 @@ def test_sct_gep_gene_mean_std_reference_accepts_training_sct_list():
     ]
 
 
+def test_sct_gep_gene_mean_std_reference_accepts_training_target_sets():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "training_target_sets": {
+                    "Train_set1": {
+                        "training_set_file_path": "./datasets/train_bulk_a.h5ad",
+                        "training_set_sample2cell_id_file_path": "./datasets/train_bulk_a_sample2cell.csv",
+                        "training_sct_gep_file_path": "./datasets/train_sct_a.h5ad",
+                    }
+                },
+            }
+        }
+    )
+    only = loaded.data.training_target_sets["Train_set1"]
+    assert str(only.training_sct_gep_file_path) == "./datasets/train_sct_a.h5ad"
+
+
+def test_training_target_sets_require_complete_bundle():
+    with pytest.raises(ValueError, match="training_target_sets entries must define"):
+        VAEDeconConfig.from_dict(
+            {
+                "data": {
+                    "gene_mean_std_source": "sct_gep",
+                    "training_target_sets": {
+                        "Train_set1": {
+                            "training_set_file_path": "./datasets/train_bulk_a.h5ad",
+                            "training_sct_gep_file_path": "./datasets/train_sct_a.h5ad",
+                        }
+                    },
+                }
+            }
+        )
+
+
 def test_sct_gep_gene_mean_std_reference_requires_any_reference_path():
     with pytest.raises(
         ValueError,

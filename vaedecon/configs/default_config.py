@@ -21,6 +21,7 @@ class LossCoefficient(BaseModel):
     gene_std_weight: float = 0.0
     gene_mean_std_weight: Optional[float] = None
     cross_sample_gene_var_weight: float = 0.0
+    cell_type_sct_gep_weight: float = 0.0
     z_score_reg_weight: float = 0.0
     z_score_kl_weight: float = 0.0  # Weight for KL divergence between empirical Z-score distribution and N(0,1)
     low_mean_std_weight: float = 1.0  # Weight for MSE regularization on low mean/std genes
@@ -38,6 +39,7 @@ class LossCoefficient(BaseModel):
         "gene_std_weight",
         "gene_mean_std_weight",
         "cross_sample_gene_var_weight",
+        "cell_type_sct_gep_weight",
         "z_score_reg_weight",
         "z_score_kl_weight",
         "low_mean_std_weight",
@@ -91,6 +93,32 @@ class TestSetConfig(BaseModel):
             raise ValueError("test_set_file_path must be set for each configured test set")
         return self
 
+
+class TrainingSetSCTTargetConfig(BaseModel):
+    """Per-training-set bundle for matched sctGEP supervision."""
+
+    training_set_file_path: str | Path = ""
+    training_set_sample2cell_id_file_path: str | Path = ""
+    training_sct_gep_file_path: str | Path = ""
+
+    @model_validator(mode="after")
+    def validate_required_training_target_files(self):
+        required_fields = {
+            "training_set_file_path": self.training_set_file_path,
+            "training_set_sample2cell_id_file_path": self.training_set_sample2cell_id_file_path,
+            "training_sct_gep_file_path": self.training_sct_gep_file_path,
+        }
+        missing = [
+            field_name for field_name, field_value in required_fields.items()
+            if not field_value or str(field_value).strip() == ""
+        ]
+        if missing:
+            raise ValueError(
+                "training_target_sets entries must define "
+                + ", ".join(missing)
+            )
+        return self
+
 # @dataclass
 class DataConfig(BaseConfig):
     """dataset configuration"""
@@ -105,6 +133,15 @@ class DataConfig(BaseConfig):
     test_set_sample2cell_id_file_path: str | Path = ''
     sct_gep_file_path: str | Path = ''  # Used for query sampled sctGEPs in test set
     test_sets: Dict[str, TestSetConfig] = Field(default_factory=dict)
+    training_target_sets: Dict[str, TrainingSetSCTTargetConfig] = Field(default_factory=dict)
+    training_sct_gep_cell_prop_threshold: float = Field(
+        default=0.005,
+        ge=0.0,
+        description=(
+            "Mask matched-sctGEP supervision for cell types whose true training "
+            "cell proportions are below this threshold."
+        ),
+    )
 
     gene_mean_std_source: Literal["sct_gep", "pooled_sc"] = Field(
         default="sct_gep",
@@ -183,9 +220,20 @@ class DataConfig(BaseConfig):
                 cfg.sct_gep_file_path and str(cfg.sct_gep_file_path).strip() != ""
                 for cfg in self.test_sets.values()
             )
-            if not (has_dedicated_sct or has_top_level_sct or has_training_sct or has_test_set_sct):
+            has_training_target_sct = any(
+                cfg.training_sct_gep_file_path and str(cfg.training_sct_gep_file_path).strip() != ""
+                for cfg in self.training_target_sets.values()
+            )
+            if not (
+                has_dedicated_sct
+                or has_top_level_sct
+                or has_training_sct
+                or has_test_set_sct
+                or has_training_target_sct
+            ):
                 raise ValueError(
-                    "gene_mean_std_sct_gep_file_path, sct_gep_file_path, or sct_file_path "
+                    "gene_mean_std_sct_gep_file_path, sct_gep_file_path, sct_file_path, "
+                    "or training_target_sets[*].training_sct_gep_file_path "
                     "must be set when gene_mean_std_source='sct_gep'"
                 )
         return self
@@ -227,6 +275,17 @@ class DataConfig(BaseConfig):
                     )
                 },
             )
+        return self
+
+    @model_validator(mode="after")
+    def reconcile_training_target_sets(self):
+        normalized_training_target_sets: Dict[str, TrainingSetSCTTargetConfig] = {}
+        for name, cfg in self.training_target_sets.items():
+            clean_name = str(name).strip()
+            if not clean_name:
+                raise ValueError("Configured training target set names must be non-empty")
+            normalized_training_target_sets[clean_name] = cfg
+        object.__setattr__(self, "training_target_sets", normalized_training_target_sets)
         return self
 
     # Processing options
@@ -861,6 +920,7 @@ class ModelConfig(BaseModelConfig):
                 "gene_mean_weight": self.loss_coefficient.gene_mean_weight,
                 "gene_std_weight": self.loss_coefficient.gene_std_weight,
                 "cross_sample_gene_var_weight": self.loss_coefficient.cross_sample_gene_var_weight,
+                "cell_type_sct_gep_weight": self.loss_coefficient.cell_type_sct_gep_weight,
                 "z_score_kl_weight": self.loss_coefficient.z_score_kl_weight,
             }
         }

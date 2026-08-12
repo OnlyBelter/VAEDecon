@@ -17,6 +17,15 @@ data:
   # Training set, test set, and sct_gep_file (for finding true sampled GEPs).
   sct_file_path: [ './datasets/generated_sc_dataset_12ds_n_base100_all_subtypes/simu_bulk_exp_SCT_POS_N100_test_log2cpm1p.h5ad' ]
   simu_bulk_file_path: [ './datasets/simulated_bulk_cell_dataset_subtypes_all_range/segment_12ds_no_filtering_n_base100_median_gep/simu_bulk_exp_Mixed_N1K_segment_without_filtering_log2cpm1p.h5ad' ]
+  # Optional matched training targets for stage-1 masked sctGEP supervision.
+  # Each simulated bulk training set should be paired with its own sample2cell_id
+  # mapping CSV and matched SCT reference dataset.
+  training_target_sets:
+    Train_set1:
+      training_set_file_path: './datasets/simulated_bulk_cell_dataset_subtypes_all_range/segment_12ds_no_filtering_n_base100_median_gep/simu_bulk_exp_Mixed_N1K_segment_without_filtering_log2cpm1p.h5ad'
+      training_set_sample2cell_id_file_path: './datasets/simulated_bulk_cell_dataset_subtypes_all_range/segment_12ds_no_filtering_n_base100_median_gep/simu_bulk_exp_Mixed_N1K_segment_without_filtering_sampled_sc_cell_id.csv'
+      training_sct_gep_file_path: './datasets/generated_sc_dataset_12ds_n_base100_all_subtypes/simu_bulk_exp_SCT_POS_N100_test_log2cpm1p.h5ad'
+  training_sct_gep_cell_prop_threshold: 0.005
   # Optional multi-test-set layout for batch inference. The legacy single-test-set
   # fields above remain supported and also seed the first configured test set.
   test_sets:
@@ -106,7 +115,6 @@ model:
     beta: 2
     gamma: 0.005
     attractor_weight: 0.0  # weight for the attractor loss (default 0.0)
-    hierarchical_code_weight: 0.0
     # 'ave' means using the average mu and logvar across cell types, 'sep' means calculate kld for each cell type separately
     kld_type: 'ave'
     weighting_gene_by_exp: true
@@ -114,6 +122,7 @@ model:
     gene_mean_weight: 0
     gene_std_weight: 0
     cross_sample_gene_var_weight: 1.0  # Matches per-(gene, cell_type) cross-sample variance of recon GEPs to training-SCT targets.
+    cell_type_sct_gep_weight: 0.0  # Set > 0 to enable masked matched-sctGEP supervision during training.
     z_score_kl_weight: 0.1
     hierarchical_code_weight: 0.1
     low_mean_std_weight: 0  # weight for low mean/std genes to fit pre-calculated gene mean and std

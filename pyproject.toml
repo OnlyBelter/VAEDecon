@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "VAEDecon"
-version = "0.4.2"
+version = "0.4.3"
 description = "Gene expression deconvolution by single cell generative model"
 readme = "README.md"
 license = "MIT"
@@ -101,7 +101,7 @@ exclude = ["tests*", "docs*", "examples*", "configs*"]  # Exclude configs and ex
 
 # https://realpython.com/pypi-publish-python-package/#version-your-package
 [tool.bumpver]
-current_version = "0.1.0"
+current_version = "0.4.3"
 version_pattern = "MAJOR.MINOR.PATCH"
 commit_message = "bump version {old_version} -> {new_version}"
 commit = true
