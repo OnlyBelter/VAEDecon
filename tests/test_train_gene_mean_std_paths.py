@@ -209,8 +209,11 @@ def test_compute_training_sct_cross_sample_gene_var_roundtrip(tmp_path: Path, mo
             obs_rows.append(row)
 
     x = np.asarray(x_rows, dtype=np.float32)
-    obs = pd.DataFrame(obs_rows, index=[f"r{i}" for i in range(len(x_rows))])
-    adata = an.AnnData(X=x, obs=obs, var=pd.DataFrame(index=genes))
+    obs = pd.DataFrame(
+        obs_rows,
+        index=pd.Index([f"r{i}" for i in range(len(x_rows))], dtype=object),
+    )
+    adata = an.AnnData(X=x, obs=obs, var=pd.DataFrame(index=pd.Index(genes, dtype=object)))
     sct_fp = tmp_path / "sct.h5ad"
     adata.write_h5ad(sct_fp)
 
@@ -258,11 +261,14 @@ def test_compute_training_sct_cross_sample_gene_var_pools_multiple_sct_files(tmp
                 # converts them back to CPM via ReadExp(..., exp_type="log_space").to_tpm().
                 x_rows.append(np.log2(np.asarray(vec, dtype=np.float32) + 1.0))
                 obs_rows.append({c: 1 if c == ct else 0 for c in cell_types})
-        adata = an.AnnData(
-            X=np.asarray(x_rows, dtype=np.float32),
-            obs=pd.DataFrame(obs_rows, index=[f"{fp.stem}_{i}" for i in range(len(x_rows))]),
-            var=pd.DataFrame(index=genes),
-        )
+            adata = an.AnnData(
+                X=np.asarray(x_rows, dtype=np.float32),
+                obs=pd.DataFrame(
+                    obs_rows,
+                    index=pd.Index([f"{fp.stem}_{i}" for i in range(len(x_rows))], dtype=object),
+                ),
+                var=pd.DataFrame(index=pd.Index(genes, dtype=object)),
+            )
         adata.write_h5ad(fp)
 
     sct_fp_a = tmp_path / "sct_a.h5ad"

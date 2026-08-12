@@ -198,12 +198,27 @@ class DataConfig(BaseConfig):
 
     @model_validator(mode="after")
     def validate_gene_mean_std_source(self):
+        configured_fields = set(getattr(self, "model_fields_set", set()))
         if self.gene_mean_std_source == "pooled_sc":
             if not self.pooled_sc_h5ad_path or str(self.pooled_sc_h5ad_path).strip() == "":
                 raise ValueError("pooled_sc_h5ad_path must be set when gene_mean_std_source='pooled_sc'")
             if self.pooled_sc_sample_size <= 0:
                 raise ValueError("pooled_sc_sample_size must be > 0")
         else:
+            # Keep model-only / minimal configs backward compatible: when the user
+            # did not configure any gene-mean/std reference fields, defer this
+            # requirement until the data path is actually used by training/inference.
+            relevant_fields = {
+                "gene_mean_std_source",
+                "gene_mean_std_sct_gep_file_path",
+                "sct_gep_file_path",
+                "sct_file_path",
+                "test_sets",
+                "training_target_sets",
+            }
+            if not (configured_fields & relevant_fields):
+                return self
+
             has_dedicated_sct = bool(
                 self.gene_mean_std_sct_gep_file_path
                 and str(self.gene_mean_std_sct_gep_file_path).strip() != ""
@@ -231,11 +246,16 @@ class DataConfig(BaseConfig):
                 or has_test_set_sct
                 or has_training_target_sct
             ):
-                raise ValueError(
-                    "gene_mean_std_sct_gep_file_path, sct_gep_file_path, sct_file_path, "
-                    "or training_target_sets[*].training_sct_gep_file_path "
-                    "must be set when gene_mean_std_source='sct_gep'"
-                )
+                  if "training_target_sets" in configured_fields:
+                      raise ValueError(
+                          "gene_mean_std_sct_gep_file_path, sct_gep_file_path, sct_file_path, "
+                          "or training_target_sets[*].training_sct_gep_file_path "
+                          "must be set when gene_mean_std_source='sct_gep'"
+                      )
+                  raise ValueError(
+                      "gene_mean_std_sct_gep_file_path, sct_gep_file_path, or sct_file_path "
+                      "must be set when gene_mean_std_source='sct_gep'"
+                  )
         return self
 
     @model_validator(mode="after")

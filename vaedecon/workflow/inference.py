@@ -324,9 +324,18 @@ class VAEDeconPredictor:
         logger.info(f"Using device: {self.device}")
 
         self._hydrate_model_config_paths()
+        self.model = None
 
-        # Load the trained model
-        self._load_model()
+        # Allow config-only inspection helpers to work even when a checkpoint
+        # has not been materialized in model_dir yet.
+        if any(Path(str(self.model_dir)).glob("*.ckpt")):
+            self._load_model()
+        else:
+            logger.warning(
+                "No checkpoint file was found under %s during predictor initialization. "
+                "Model loading will be deferred until prediction is requested.",
+                self.model_dir,
+            )
 
     def _hydrate_model_config_paths(self):
         """Backfill trained-model artifact paths from model_dir for inference."""
@@ -362,12 +371,22 @@ class VAEDeconPredictor:
 
     def _load_model(self):
         """Load the trained model"""
+        checkpoint_files = list(Path(str(self.model_dir)).glob("*.ckpt"))
+        if not checkpoint_files:
+            raise FileNotFoundError(
+                f"No .ckpt checkpoint was found under model_dir: {self.model_dir}"
+            )
         logger.info(f"Loading model from: {self.model_dir}")
         self.model = load_trained_model(model_dir=self.model_dir)
         self.model = self.model.to(self.device)
         self.model.eval()
 
         logger.info("Model loaded successfully!")
+
+    def _ensure_model_loaded(self):
+        """Load the trained model on demand before running prediction."""
+        if self.model is None:
+            self._load_model()
 
     def predict(
             self,
@@ -404,12 +423,14 @@ class VAEDeconPredictor:
         gep_dataset_config = self._build_gepdataset_config(
             data_file_path=data_file_path,
             dataset_type=dataset_type,
+            require_model_artifacts=True,
         )
         dataset = GEPDataset(config=gep_dataset_config)
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
 
         logger.info("Running inference...")
+        self._ensure_model_loaded()
         val_batch_size = self.config.evaluation.val_batch_size
         results = evaluate_model(
             trained_model=self.model,
@@ -433,6 +454,7 @@ class VAEDeconPredictor:
         self,
         data_file_path: str | Path,
         dataset_type: str = 'test',
+        require_model_artifacts: bool = False,
     ) -> GEPDatasetConfig:
         """
         Build a config dict for GEPDataset from self.config.data
@@ -442,12 +464,24 @@ class VAEDeconPredictor:
             os.path.dirname(data_file_path),
             f'processed_{dataset_type}'
         )
-        input_gene_list_fp = _validate_required_model_artifact_path(
-            model_dir=self.model_dir,
-            configured_path=getattr(self.config.model, "input_gene_list_fp", None),
-            default_file_name="input_gene_list.txt",
-            label="input gene list",
-        )
+        if require_model_artifacts:
+            input_gene_list_fp = _validate_required_model_artifact_path(
+                model_dir=self.model_dir,
+                configured_path=getattr(self.config.model, "input_gene_list_fp", None),
+                default_file_name="input_gene_list.txt",
+                label="input gene list",
+            )
+        else:
+            input_gene_list_fp = _resolve_model_artifact_path(
+                model_dir=self.model_dir,
+                configured_path=getattr(self.config.model, "input_gene_list_fp", None),
+                default_file_name="input_gene_list.txt",
+            )
+
+        def _optional_path(path_value: Optional[str | Path]) -> Optional[Path]:
+            if path_value is None or str(path_value).strip() == "":
+                return None
+            return Path(str(path_value))
 
         return GEPDatasetConfig(
             file_paths=[data_file_path],
@@ -459,9 +493,9 @@ class VAEDeconPredictor:
             min_var=self.config.data.min_var,
             scaling_factor=self.config.data.scaling_factor,
             gene_mean_std_source=self.config.data.gene_mean_std_source,
-            gene_mean_std_sct_gep_file_path=self.config.data.gene_mean_std_sct_gep_file_path,
-            sct_gep_file_path=self.config.data.sct_gep_file_path,
-            pooled_sc_h5ad_path=self.config.data.pooled_sc_h5ad_path,
+            gene_mean_std_sct_gep_file_path=_optional_path(self.config.data.gene_mean_std_sct_gep_file_path),
+            sct_gep_file_path=_optional_path(self.config.data.sct_gep_file_path),
+            pooled_sc_h5ad_path=_optional_path(self.config.data.pooled_sc_h5ad_path),
             pooled_sc_cell_type_col=self.config.data.pooled_sc_cell_type_col,
             pooled_sc_cell_subtype_col=self.config.data.pooled_sc_cell_subtype_col,
             pooled_sc_sample_size=self.config.data.pooled_sc_sample_size,
