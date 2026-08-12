@@ -14,3 +14,4 @@ from .default_config import EvaluationConfig
 from .default_config import GEPDatasetConfig
 from .default_config import TestSetConfig
 from .default_config import TrainingSetSCTTargetConfig
+from .default_config import LossCoefficient
