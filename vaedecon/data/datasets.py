@@ -120,6 +120,14 @@ def _load_bulk_sample_ids_from_file(file_path: Union[str, Path]) -> list[str]:
     raise ValueError(f"Unrecognized training set file format: {path}")
 
 
+def _namespace_sample_ids(sample_ids: Sequence[Union[str, Path]], namespace: Optional[str]) -> list[str]:
+    """Add a stable namespace prefix to sample IDs for internal dataset alignment."""
+    if namespace is None or str(namespace).strip() == "":
+        return [str(sample_id) for sample_id in sample_ids]
+    prefix = str(namespace).strip()
+    return [f"{prefix}::{sample_id}" for sample_id in sample_ids]
+
+
 def _load_cached_aligned_sct_geps(
     sct_gep_fp: Path,
     selected_cell_ids: list[str],
@@ -195,10 +203,13 @@ def build_matched_sct_gep_training_targets(
     cell_types: list[str],
     cache_sct_query_results: bool = True,
     sct_query_cache_file_path: Optional[Union[str, Path]] = None,
+    sample_id_namespace: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build dense matched sctGEP targets aligned to bulk sample order."""
     sct_gep_fp = Path(sct_gep_dataset_file_path)
     sample2cell_fp = Path(sample2cell_id_file_path)
+    raw_bulk_sample_ids = [str(sample_id) for sample_id in bulk_sample_ids]
+    processed_bulk_sample_ids = _namespace_sample_ids(raw_bulk_sample_ids, sample_id_namespace)
 
     if not sct_gep_fp.exists():
         raise FileNotFoundError(f"SCT GEP dataset file not found: {sct_gep_fp}")
@@ -208,17 +219,17 @@ def build_matched_sct_gep_training_targets(
     sample2cell_df_all = pd.read_csv(sample2cell_fp, index_col=0)
     if sample2cell_df_all.empty:
         return {
-            "sample_ids": bulk_sample_ids,
+            "sample_ids": processed_bulk_sample_ids,
             "gene_list": target_gene_list,
             "cell_types": cell_types,
-            "true_sct_gep": np.zeros((len(bulk_sample_ids), len(target_gene_list), len(cell_types)), dtype=np.float32),
-            "true_sct_gep_present_mask": np.zeros((len(bulk_sample_ids), len(cell_types)), dtype=bool),
+            "true_sct_gep": np.zeros((len(processed_bulk_sample_ids), len(target_gene_list), len(cell_types)), dtype=np.float32),
+            "true_sct_gep_present_mask": np.zeros((len(processed_bulk_sample_ids), len(cell_types)), dtype=bool),
             "selected_sample2cell_id": pd.DataFrame(columns=["cell_type", "selected_cell_id"]),
             "aligned_sct_geps_df": pd.DataFrame(columns=target_gene_list),
         }
 
     filtered_mapping_df = sample2cell_df_all.loc[
-        sample2cell_df_all.index.isin(bulk_sample_ids),
+        sample2cell_df_all.index.astype(str).isin(raw_bulk_sample_ids),
         ["cell_type", "selected_cell_id"],
     ].copy()
     filtered_mapping_df["selected_cell_id"] = filtered_mapping_df["selected_cell_id"].astype(str)
@@ -239,14 +250,14 @@ def build_matched_sct_gep_training_targets(
         sct_query_cache_file_path=sct_query_cache_file_path,
     )
 
-    n_samples = len(bulk_sample_ids)
+    n_samples = len(processed_bulk_sample_ids)
     n_genes = len(target_gene_list)
     n_cell_types = len(cell_types)
     true_sct_gep = np.zeros((n_samples, n_genes, n_cell_types), dtype=np.float32)
     true_sct_gep_present_mask = np.zeros((n_samples, n_cell_types), dtype=bool)
     cell_type_to_idx = {cell_type: idx for idx, cell_type in enumerate(cell_types)}
 
-    for sample_idx, sample_id in enumerate(bulk_sample_ids):
+    for sample_idx, sample_id in enumerate(raw_bulk_sample_ids):
         if sample_id not in filtered_mapping_df.index:
             continue
         sample_rows = filtered_mapping_df.loc[[sample_id], :]
@@ -263,7 +274,7 @@ def build_matched_sct_gep_training_targets(
             true_sct_gep_present_mask[sample_idx, cell_type_idx] = True
 
     return {
-        "sample_ids": bulk_sample_ids,
+        "sample_ids": processed_bulk_sample_ids,
         "gene_list": target_gene_list,
         "cell_types": cell_types,
         "true_sct_gep": true_sct_gep,
@@ -486,6 +497,7 @@ class GEPPreprocessor:
         remove_low_var_genes: bool = False,
         min_var: float = 1.0,
         cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None,
+        sample_id_namespace_by_path: Optional[Dict[str, str]] = None,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         End-to-end preprocessing pipeline.
@@ -495,7 +507,10 @@ class GEPPreprocessor:
         """
         # Step 1: Load and merge data
         log_message("Step 1: Loading and merging data...")
-        gep_data_df, cell_prop_df = self._load_and_merge_data(file_paths)
+        gep_data_df, cell_prop_df = self._load_and_merge_data(
+            file_paths=file_paths,
+            sample_id_namespace_by_path=sample_id_namespace_by_path,
+        )
 
         # Step 2: Gene filtering
         log_message("Step 2: Gene filtering...")
@@ -517,7 +532,9 @@ class GEPPreprocessor:
         return gep_data_df, cell_prop_df
 
     def _load_and_merge_data(
-        self, file_paths: Sequence[Union[str, Path]]
+        self,
+        file_paths: Sequence[Union[str, Path]],
+        sample_id_namespace_by_path: Optional[Dict[str, str]] = None,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Load each file and merge into one dataframe.
@@ -533,6 +550,9 @@ class GEPPreprocessor:
         for path_like in file_paths:
             path_str = str(path_like)
             log_message(f"Reading data from {path_str}")
+            namespace = None
+            if sample_id_namespace_by_path:
+                namespace = sample_id_namespace_by_path.get(str(Path(path_like).expanduser().resolve()))
 
             if path_str.endswith(".h5ad"):
                 h5ad_obj = ReadH5AD(path_str)
@@ -547,6 +567,14 @@ class GEPPreprocessor:
 
             else:
                 raise ValueError(f"Unrecognized file format: {path_str}")
+
+            if namespace is not None:
+                namespaced_index = pd.Index(
+                    _namespace_sample_ids(gep_data_df.index.astype(str).tolist(), namespace),
+                    dtype=object,
+                )
+                gep_data_df.index = namespaced_index
+                cell_prop_df.index = namespaced_index
 
             log_message(f"Loaded data shape: {gep_data_df.shape}")
             all_data_dfs.append(gep_data_df)
@@ -821,12 +849,31 @@ class GEPDataset(Dataset):
             logger.error(f"Error loading cache metadata: {e}")
             return False
 
+    def _build_sample_id_namespace_by_path(self) -> Dict[str, str]:
+        """Build stable per-file sample-ID namespaces for training-time merged datasets."""
+        training_target_sets = dict(self.config.training_target_sets or {})
+        if not training_target_sets:
+            return {}
+
+        namespace_by_path: Dict[str, str] = {}
+        for target_set_name, target_cfg in training_target_sets.items():
+            resolved_path = str(Path(target_cfg.training_set_file_path).expanduser().resolve())
+            namespace_by_path[resolved_path] = str(target_set_name)
+
+        for path_like in self.config.file_paths:
+            resolved_path = str(Path(path_like).expanduser().resolve())
+            if resolved_path not in namespace_by_path:
+                namespace_by_path[resolved_path] = Path(path_like).stem
+
+        return namespace_by_path
+
     # -------------------------------------------------------------------------
     # Preprocess + cache
     # -------------------------------------------------------------------------
     def _preprocess_and_cache(self) -> None:
         """Run preprocessing pipeline and save outputs to cache."""
         preprocessor = GEPPreprocessor(chunk_size=self.chunk_size)
+        sample_id_namespace_by_path = self._build_sample_id_namespace_by_path()
 
         gep_data_df, cell_prop_df = preprocessor.run(
             file_paths=self.config.file_paths,
@@ -834,6 +881,7 @@ class GEPDataset(Dataset):
             remove_low_var_genes=self.config.remove_low_var_genes,
             min_var=self.config.min_var,
             cell_cell2ave_exp_file_path=self.config.cell_cell2ave_exp_file_path,
+            sample_id_namespace_by_path=sample_id_namespace_by_path,
         )
 
         # Convert to float32 numpy and apply optional scaling
@@ -922,11 +970,13 @@ class GEPDataset(Dataset):
         for row_idx, sample_id in enumerate(sample_ids):
             sample_id_to_positions.setdefault(str(sample_id), []).append(row_idx)
 
-        for _, target_cfg in self.config.training_target_sets.items():
-            bulk_sample_ids = [str(sample_id) for sample_id in _load_bulk_sample_ids_from_file(
-                target_cfg.training_set_file_path
-            )]
-            if not bulk_sample_ids:
+        for target_set_name, target_cfg in self.config.training_target_sets.items():
+            raw_bulk_sample_ids = _load_bulk_sample_ids_from_file(target_cfg.training_set_file_path)
+            bulk_sample_ids = _namespace_sample_ids(
+                raw_bulk_sample_ids,
+                namespace=str(target_set_name),
+            )
+            if not raw_bulk_sample_ids:
                 continue
 
             row_positions: list[int] = []
@@ -957,9 +1007,10 @@ class GEPDataset(Dataset):
             matched_targets = build_matched_sct_gep_training_targets(
                 sct_gep_dataset_file_path=target_cfg.training_sct_gep_file_path,
                 sample2cell_id_file_path=target_cfg.training_set_sample2cell_id_file_path,
-                bulk_sample_ids=bulk_sample_ids,
+                bulk_sample_ids=raw_bulk_sample_ids,
                 target_gene_list=gene_list,
                 cell_types=cell_types,
+                sample_id_namespace=str(target_set_name),
             )
 
             true_sct_gep[np.asarray(row_positions), :, :] = matched_targets["true_sct_gep"]
