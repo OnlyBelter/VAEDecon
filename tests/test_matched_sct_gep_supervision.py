@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import anndata as ad
 import numpy as np
@@ -282,3 +283,82 @@ def test_matched_sct_gep_loss_masks_low_prop_cell_types():
     )
 
     assert loss_with_active_error.item() > 0
+
+
+def test_loss_function_skips_matched_sct_gep_supervision_during_inference():
+    vae = VAE.__new__(VAE)
+    vae.training = False
+    vae.scaling_factor = 1.0
+    vae.data_config = SimpleNamespace(training_sct_gep_cell_prop_threshold=0.1)
+    vae.model_config = SimpleNamespace(
+        predict_cell_prop=False,
+        learn_gep_residual=False,
+        loss_coefficient=SimpleNamespace(
+            beta=1.0,
+            gamma=0.0,
+            attractor_weight=0.0,
+            z_score_reg_weight=0.0,
+            z_score_kl_weight=0.0,
+            low_mean_std_weight=0.0,
+            low_mean_threshold=2.0,
+            low_std_threshold=1.0,
+            cross_sample_gene_var_weight=0.0,
+            cell_type_sct_gep_weight=1.0,
+            kld_p=0.0,
+            cell_prop=0.0,
+            hierarchical_code_weight=0.0,
+        ),
+    )
+    vae.g_mean_non_log = torch.ones((2, 1), dtype=torch.float32)
+    vae.g_std_non_log = torch.ones((2, 1), dtype=torch.float32)
+    vae._reconstruction_loss = lambda x, recon_x_conv: torch.zeros((x.shape[0],), device=x.device)
+    vae._gene_statistics_loss = lambda recon_gene_mean, recon_gene_std, device: (
+        torch.tensor(0.0, device=device),
+        torch.tensor(0.0, device=device),
+    )
+    vae._cell_prop_dirichlet_loss = lambda y, dd_alpha, pred_cell_prop, batch_size, device: (
+        torch.zeros((batch_size,), device=device),
+        torch.zeros((batch_size,), device=device),
+    )
+    vae._latent_kld_loss = lambda mu_types, logvar_types, mu_prior, logvar_mean, mu_mean, device: (
+        torch.zeros((mu_types.shape[0],), device=device)
+    )
+    vae._repulsion_loss = lambda mu_types, gamma: torch.zeros((mu_types.shape[0],), device=mu_types.device)
+    vae._attractor_loss = lambda mu_types, attractor_weight: torch.zeros((mu_types.shape[0],), device=mu_types.device)
+    vae._hierarchical_code_loss = lambda mu_types, hierarchical_code_weight: (
+        torch.zeros((mu_types.shape[0],), device=mu_types.device)
+    )
+    vae._matched_sct_gep_supervision_loss = lambda **kwargs: (_ for _ in ()).throw(
+        AssertionError("inference should not call matched sctGEP supervision")
+    )
+
+    x = torch.zeros((2, 2), dtype=torch.float32)
+    mu_types = torch.zeros((2, 3, 1), dtype=torch.float32)
+    logvar_types = torch.zeros((2, 3, 1), dtype=torch.float32)
+    recon_gene_mean = torch.ones((2, 1), dtype=torch.float32)
+    recon_gene_std = torch.ones((2, 1), dtype=torch.float32)
+    recon_x_all_types_cpm = torch.ones((2, 2, 1), dtype=torch.float32)
+
+    loss_terms = vae.loss_function(
+        x=x,
+        y=None,
+        recon_x_conv=x,
+        mu_types=mu_types,
+        logvar_types=logvar_types,
+        pred_cell_prop=None,
+        dd_alpha=None,
+        mu_prior=torch.zeros((1, 3), dtype=torch.float32),
+        recon_gene_mean=recon_gene_mean,
+        recon_gene_std=recon_gene_std,
+        logvar_mean=torch.zeros((2, 3), dtype=torch.float32),
+        mu_mean=torch.zeros((2, 3), dtype=torch.float32),
+        device=x.device,
+        recon_x_all_types_cpm=recon_x_all_types_cpm,
+        true_sct_gep=None,
+        true_sct_gep_present_mask=None,
+    )
+
+    assert torch.allclose(
+        loss_terms.cell_type_sct_gep,
+        torch.tensor(0.0, dtype=torch.float32),
+    )

@@ -639,24 +639,33 @@ class VAE(BaseAE):
                 raise ValueError(
                     "recon_x_all_types_cpm is required when cell_type_sct_gep_weight > 0"
                 )
-            if true_sct_gep is None or true_sct_gep_present_mask is None:
-                raise ValueError(
-                    "Matched sctGEP supervision is enabled but the dataset batch does not "
-                    "include true_sct_gep and true_sct_gep_present_mask."
+            supervision_ready = (
+                true_sct_gep is not None
+                and true_sct_gep_present_mask is not None
+                and labels_available
+            )
+            if supervision_ready:
+                cell_type_sct_gep_loss = self._matched_sct_gep_supervision_loss(
+                    recon_x_all_types_cpm=recon_x_all_types_cpm,
+                    true_sct_gep=true_sct_gep,
+                    true_sct_gep_present_mask=true_sct_gep_present_mask,
+                    true_cell_prop=y,
+                    cell_prop_threshold=float(
+                        getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
+                    ),
                 )
-            if not labels_available:
+            elif self.training:
+                if true_sct_gep is None or true_sct_gep_present_mask is None:
+                    raise ValueError(
+                        "Matched sctGEP supervision is enabled but the dataset batch does not "
+                        "include true_sct_gep and true_sct_gep_present_mask."
+                    )
                 raise ValueError(
                     "Matched sctGEP supervision requires true cell-proportion labels during training."
                 )
-            cell_type_sct_gep_loss = self._matched_sct_gep_supervision_loss(
-                recon_x_all_types_cpm=recon_x_all_types_cpm,
-                true_sct_gep=true_sct_gep,
-                true_sct_gep_present_mask=true_sct_gep_present_mask,
-                true_cell_prop=y,
-                cell_prop_threshold=float(
-                    getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
-                ),
-            )
+            else:
+                # Inference/test batches do not carry training-only matched sctGEP targets.
+                cell_type_sct_gep_loss = torch.zeros((batch_size,), device=device)
         else:
             cell_type_sct_gep_loss = torch.zeros((batch_size,), device=device)
 
