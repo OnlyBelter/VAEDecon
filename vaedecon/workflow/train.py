@@ -368,7 +368,10 @@ class VAEDeconTrainer:
         """
 
         # All training set files
-        simu_paths = self.config.data.simu_bulk_file_path or []
+        simu_paths = [
+            path for path in (self.config.data.simu_bulk_file_path or [])
+            if path is not None and str(path).strip() != ""
+        ]
         sct_paths  = self.config.data.sct_file_path or []
         training_file_paths = [p for p in simu_paths + sct_paths if p is not None]
         matched_sct_gep_weight = float(
@@ -383,22 +386,60 @@ class VAEDeconTrainer:
                     "data.training_target_sets to define matched bulk/sample2cell/sct bundles."
                 )
 
-            configured_bulk_paths = {
-                str(Path(path).expanduser().resolve())
-                for path in simu_paths
-                if path is not None and str(path).strip() != ""
-            }
-            target_bulk_paths = {
-                str(Path(cfg.training_set_file_path).expanduser().resolve())
-                for cfg in training_target_sets.values()
-            }
-            missing_target_paths = configured_bulk_paths - target_bulk_paths
-            if missing_target_paths:
-                preview = ", ".join(sorted(missing_target_paths)[:3])
-                raise ValueError(
-                    "Each simulated bulk training set needs a matched entry in "
-                    f"data.training_target_sets when cell_type_sct_gep_weight > 0. Missing: {preview}"
+            target_bulk_paths: dict[str, str] = {}
+            duplicate_target_bulk_paths: dict[str, list[str]] = {}
+            derived_simu_paths: list[str | Path] = []
+            for set_name, cfg in training_target_sets.items():
+                raw_path = cfg.training_set_file_path
+                resolved_path = str(Path(raw_path).expanduser().resolve())
+                if resolved_path in target_bulk_paths:
+                    duplicate_target_bulk_paths.setdefault(resolved_path, [target_bulk_paths[resolved_path]]).append(
+                        set_name
+                    )
+                    continue
+                target_bulk_paths[resolved_path] = set_name
+                derived_simu_paths.append(raw_path)
+
+            if duplicate_target_bulk_paths:
+                preview = ", ".join(
+                    f"{Path(path)} ({', '.join(set_names)})"
+                    for path, set_names in list(sorted(duplicate_target_bulk_paths.items()))[:3]
                 )
+                raise ValueError(
+                    "data.training_target_sets must not reuse the same training_set_file_path "
+                    f"across multiple entries. Duplicates: {preview}"
+                )
+
+            if not simu_paths:
+                simu_paths = derived_simu_paths
+                training_file_paths = [p for p in simu_paths + sct_paths if p is not None]
+            else:
+                configured_bulk_paths = {
+                    str(Path(path).expanduser().resolve()): str(path)
+                    for path in simu_paths
+                }
+                missing_target_paths = set(configured_bulk_paths) - set(target_bulk_paths)
+                if missing_target_paths:
+                    preview = ", ".join(
+                        configured_bulk_paths[path]
+                        for path in sorted(missing_target_paths)[:3]
+                    )
+                    raise ValueError(
+                        "Each simulated bulk training set needs a matched entry in "
+                        f"data.training_target_sets when cell_type_sct_gep_weight > 0. Missing: {preview}"
+                    )
+                extra_target_paths = set(target_bulk_paths) - set(configured_bulk_paths)
+                if extra_target_paths:
+                    preview = ", ".join(
+                        f"{target_bulk_paths[path]} -> {Path(path)}"
+                        for path in sorted(extra_target_paths)[:3]
+                    )
+                    raise ValueError(
+                        "data.training_target_sets contains bulk files that are not present in "
+                        "data.simu_bulk_file_path when cell_type_sct_gep_weight > 0. "
+                        f"Remove or disable the unused target set entries, or add their bulk "
+                        f"files to data.simu_bulk_file_path. Extra: {preview}"
+                    )
 
         return GEPDatasetConfig(
             file_paths=training_file_paths,

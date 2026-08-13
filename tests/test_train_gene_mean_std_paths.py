@@ -133,6 +133,114 @@ def test_trainer_cross_sample_gene_var_output_path_naming(tmp_path: Path):
     )
 
 
+def test_trainer_rejects_unused_training_target_sets_early(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "gene_mean_std_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+                "simu_bulk_file_path": [
+                    "./datasets/segment_bulk.h5ad",
+                ],
+                "training_target_sets": {
+                    "Train_set1": {
+                        "training_set_file_path": "./datasets/random_bulk.h5ad",
+                        "training_set_sample2cell_id_file_path": "./datasets/random_sample2cell.csv",
+                        "training_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+                    },
+                    "Train_set4": {
+                        "training_set_file_path": "./datasets/segment_bulk.h5ad",
+                        "training_set_sample2cell_id_file_path": "./datasets/segment_sample2cell.csv",
+                        "training_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+                    },
+                },
+            },
+            "model": {
+                "model_dir": tmp_path / "final_model",
+                "loss_coefficient": {"cell_type_sct_gep_weight": 1.0},
+            },
+        }
+    )
+
+    trainer = VAEDeconTrainer(config=config)
+
+    with pytest.raises(
+        ValueError,
+        match="data.training_target_sets contains bulk files that are not present in data.simu_bulk_file_path",
+    ):
+        trainer._build_gepdataset_config()
+
+
+def test_trainer_uses_training_target_set_bulk_paths_when_simu_paths_missing(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "gene_mean_std_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+                "training_target_sets": {
+                    "Train_set1": {
+                        "training_set_file_path": "./datasets/random_bulk.h5ad",
+                        "training_set_sample2cell_id_file_path": "./datasets/random_sample2cell.csv",
+                        "training_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+                    },
+                    "Train_set4": {
+                        "training_set_file_path": "./datasets/segment_bulk.h5ad",
+                        "training_set_sample2cell_id_file_path": "./datasets/segment_sample2cell.csv",
+                        "training_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+                    },
+                },
+            },
+            "model": {
+                "model_dir": tmp_path / "final_model",
+                "loss_coefficient": {"cell_type_sct_gep_weight": 1.0},
+            },
+        }
+    )
+
+    trainer = VAEDeconTrainer(config=config)
+    dataset_config = trainer._build_gepdataset_config()
+
+    assert [str(path) for path in dataset_config.file_paths] == [
+        "./datasets/random_bulk.h5ad",
+        "./datasets/segment_bulk.h5ad",
+    ]
+
+
+def test_trainer_rejects_duplicate_training_target_set_bulk_paths(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "gene_mean_std_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+                "training_target_sets": {
+                    "Train_set1": {
+                        "training_set_file_path": "./datasets/shared_bulk.h5ad",
+                        "training_set_sample2cell_id_file_path": "./datasets/shared_sample2cell_a.csv",
+                        "training_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+                    },
+                    "Train_set2": {
+                        "training_set_file_path": "./datasets/shared_bulk.h5ad",
+                        "training_set_sample2cell_id_file_path": "./datasets/shared_sample2cell_b.csv",
+                        "training_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+                    },
+                },
+            },
+            "model": {
+                "model_dir": tmp_path / "final_model",
+                "loss_coefficient": {"cell_type_sct_gep_weight": 1.0},
+            },
+        }
+    )
+
+    trainer = VAEDeconTrainer(config=config)
+
+    with pytest.raises(
+        ValueError,
+        match="data.training_target_sets must not reuse the same training_set_file_path",
+    ):
+        trainer._build_gepdataset_config()
+
+
 def test_inference_builds_dataset_config_with_sct_gene_mean_std_refs(tmp_path: Path):
     test_set_fp = tmp_path / "test_set.h5ad"
     test_set_fp.write_text("not-a-real-h5ad")
