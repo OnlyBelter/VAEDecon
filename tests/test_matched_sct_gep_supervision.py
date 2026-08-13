@@ -346,6 +346,7 @@ def test_loss_function_skips_matched_sct_gep_supervision_during_inference():
         mu_types=mu_types,
         logvar_types=logvar_types,
         pred_cell_prop=None,
+        existence_logits=None,
         dd_alpha=None,
         mu_prior=torch.zeros((1, 3), dtype=torch.float32),
         recon_gene_mean=recon_gene_mean,

@@ -225,3 +225,17 @@ def test_softmax_cell_prop_does_not_require_cancer_cell_type_name():
         }
     )
     assert loaded.model.cell_prop_activation_function == "softmax"
+
+
+def test_cell_type_existence_requires_predict_cell_prop():
+    with pytest.raises(ValueError, match="cell_type_existence_weight"):
+        VAEDeconConfig.from_dict(
+            {
+                "model": {
+                    "predict_cell_prop": False,
+                    "loss_coefficient": {
+                        "cell_type_existence_weight": 0.1,
+                    },
+                }
+            }
+        )

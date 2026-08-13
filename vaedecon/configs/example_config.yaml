@@ -25,6 +25,10 @@ data:
       training_set_file_path: './datasets/simulated_bulk_cell_dataset_subtypes_all_range/segment_12ds_no_filtering_n_base100_median_gep/simu_bulk_exp_Mixed_N1K_segment_without_filtering_log2cpm1p.h5ad'
       training_set_sample2cell_id_file_path: './datasets/simulated_bulk_cell_dataset_subtypes_all_range/segment_12ds_no_filtering_n_base100_median_gep/simu_bulk_exp_Mixed_N1K_segment_without_filtering_sampled_sc_cell_id.csv'
       training_sct_gep_file_path: './datasets/generated_sc_dataset_12ds_n_base100_all_subtypes/simu_bulk_exp_SCT_POS_N100_test_log2cpm1p.h5ad'
+  # Current implementation reuses this one value for two training-time decisions:
+  # (1) masking matched-sctGEP supervision when a cell type is too small to supervise stably,
+  # and (2) thresholding cell-type existence for the latent shift. These concepts are related,
+  # but not identical to the simulation floor.
   training_sct_gep_cell_prop_threshold: 0.005
   # Optional multi-test-set layout for batch inference. The legacy single-test-set
   # fields above remain supported and also seed the first configured test set.
@@ -109,6 +113,7 @@ model:
   predict_cell_prop: false  # Set to true to learn Dirichlet concentration parameters and output their mean as cell fractions.
   cell_prop_activation_function: 'softplus'  # 'softplus' keeps the Dirichlet workflow; 'sigmoid' predicts non-cancer cell types and fills cancer as the remainder; 'softmax' predicts all cell types directly.
   cancer_cell_type_name: 'Cancer Cells'  # Required when cell_prop_activation_function is 'sigmoid'.
+  cell_type_existence_shift_scale: 0.0  # Set > 0 to shift each cell-type mu by a centered soft existence score derived from predicted cell proportions.
   loss_coefficient:
     kld_p: 0.0  # Only valid for 'softplus'; keep 0 for 'sigmoid' and 'softmax'.
     cell_prop: 0  # Set > 0 to supervise known training fractions for any enabled cell-proportion activation mode.
@@ -123,6 +128,7 @@ model:
     gene_std_weight: 0
     cross_sample_gene_var_weight: 1.0  # Matches per-(gene, cell_type) cross-sample variance of recon GEPs to training-SCT targets.
     cell_type_sct_gep_weight: 0.0  # Set > 0 to enable masked matched-sctGEP supervision during training.
+    cell_type_existence_weight: 0.0  # Set > 0 to supervise thresholded cell-type existence derived from predicted cell proportions.
     z_score_kl_weight: 0.1
     hierarchical_code_weight: 0.1
     low_mean_std_weight: 0  # weight for low mean/std genes to fit pre-calculated gene mean and std

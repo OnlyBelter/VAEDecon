@@ -55,6 +55,7 @@ class LossTerms:
     cell_prop: torch.Tensor
     attractor: torch.Tensor = torch.tensor(0.0)
     cell_type_sct_gep: torch.Tensor = torch.tensor(0.0)
+    cell_type_existence: torch.Tensor = torch.tensor(0.0)
     z_score_reciprocal: torch.Tensor = torch.tensor(0.0)  # Optional term for std regularization
     z_score_kl_loss: torch.Tensor = torch.tensor(0.0)  # New KL term for empirical z-score to N(0,1)
     low_mean_std_gene_loss: torch.Tensor = torch.tensor(0.0)  # Optional term to prevent collapse of low-mean/std genes
@@ -385,6 +386,12 @@ class VAE(BaseAE):
             dd_alpha = torch.mean(torch.stack(dd_alpha_list, dim=0), dim=0) if dd_alpha_list else None
 
         n_cell_types = mu_types.shape[2]
+        existence_logits, _, mu_types = self._apply_cell_type_existence_shift(
+            mu_types=mu_types,
+            pred_cell_prop=cell_prop,
+            device=device,
+        )
+        mu_mean = mu_types.mean(dim=-1)
 
         # 4. Reconstruction (Batch Decoding Optimization)
         # -------------------------------------------------------
@@ -472,6 +479,7 @@ class VAE(BaseAE):
             mu_types=mu_types,
             logvar_types=log_var_types,
             pred_cell_prop=cell_prop,
+            existence_logits=existence_logits,
             dd_alpha=dd_alpha,
             mu_prior=mu_prior,
             recon_gene_mean=recon_gene_mean,
@@ -499,6 +507,7 @@ class VAE(BaseAE):
             low_mean_std_gene_loss=loss_terms.low_mean_std_gene_loss,
             cross_sample_gene_var_loss=loss_terms.cross_sample_gene_var_loss,
             cell_type_sct_gep_loss=loss_terms.cell_type_sct_gep,
+            cell_type_existence_loss=loss_terms.cell_type_existence,
             mu=mu_mean,
             mu_deconv=mu_types,
             log_var=log_var_types,
@@ -519,6 +528,7 @@ class VAE(BaseAE):
         mu_types: torch.Tensor,
         logvar_types: torch.Tensor,
         pred_cell_prop: Optional[torch.Tensor],
+        existence_logits: Optional[torch.Tensor],
         dd_alpha: Optional[torch.Tensor],
         mu_prior: Optional[torch.Tensor],
         recon_gene_mean: torch.Tensor,
@@ -669,6 +679,33 @@ class VAE(BaseAE):
         else:
             cell_type_sct_gep_loss = torch.zeros((batch_size,), device=device)
 
+        cell_type_existence_weight = float(getattr(lo, "cell_type_existence_weight", 0.0) or 0.0)
+        if cell_type_existence_weight > 0:
+            if not self.model_config.predict_cell_prop:
+                raise ValueError(
+                    "cell_type_existence_weight > 0 requires predict_cell_prop=True."
+                )
+            if existence_logits is None or pred_cell_prop is None:
+                raise ValueError(
+                    "Cell-type existence supervision requires predicted cell proportions."
+                )
+            if labels_available:
+                cell_type_existence_loss = self._cell_type_existence_loss(
+                    existence_logits=existence_logits,
+                    true_cell_prop=y,
+                    cell_prop_threshold=float(
+                        getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
+                    ),
+                )
+            elif self.training:
+                raise ValueError(
+                    "Cell-type existence supervision requires true cell-proportion labels during training."
+                )
+            else:
+                cell_type_existence_loss = torch.zeros((batch_size,), device=device)
+        else:
+            cell_type_existence_loss = torch.zeros((batch_size,), device=device)
+
         # --- 3. KL Divergence (Cell Proportions - Dirichlet) ---
         kld_p, cell_prop_loss = self._cell_prop_dirichlet_loss(
             y=y,
@@ -720,6 +757,7 @@ class VAE(BaseAE):
             + lo.z_score_kl_weight * z_score_kl_loss
             + cross_sample_gene_var_weight * cross_var_loss_per_sample
             + cell_type_sct_gep_weight * cell_type_sct_gep_loss
+            + cell_type_existence_weight * cell_type_existence_loss
             # + z_score_reg_weight * (1 / mean_z_scores)
         ).mean()
 
@@ -734,6 +772,7 @@ class VAE(BaseAE):
             cell_prop=cell_prop_loss.mean(),
             attractor=attractor_loss.mean(),
             cell_type_sct_gep=cell_type_sct_gep_loss.mean(),
+            cell_type_existence=cell_type_existence_loss.mean(),
             hierarchical_code=hierarchical_code_loss.mean(),
             z_score_reciprocal=(1 / mean_z_scores).mean(),
             z_score_kl_loss=z_score_kl_loss.mean(),
@@ -826,6 +865,48 @@ class VAE(BaseAE):
         diff2 = (recon_x_all_types_log - true_sct_gep).pow(2) * active_gene_mask
         denom = active_gene_mask.sum(dim=(1, 2)).clamp_min(1.0)
         return diff2.sum(dim=(1, 2)) / denom
+
+    def _apply_cell_type_existence_shift(
+        self,
+        mu_types: torch.Tensor,
+        pred_cell_prop: Optional[torch.Tensor],
+        device: torch.device,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], torch.Tensor]:
+        """Shift cell-type latent means using a soft existence score from predicted proportions."""
+        if pred_cell_prop is None or not self.model_config.predict_cell_prop:
+            return None, None, mu_types
+
+        threshold = float(
+            getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
+        )
+        denom = max(threshold, 1e-2)
+        existence_logits = (pred_cell_prop - threshold) / denom
+        existence_probs = torch.sigmoid(existence_logits)
+
+        shift_scale = float(getattr(self.model_config, "cell_type_existence_shift_scale", 0.0) or 0.0)
+        if shift_scale == 0.0:
+            return existence_logits, existence_probs, mu_types
+
+        shift = shift_scale * (existence_probs - 0.5)
+        mu_types_shifted = mu_types + shift.unsqueeze(1).to(device=device, dtype=mu_types.dtype)
+        return existence_logits, existence_probs, mu_types_shifted
+
+    def _cell_type_existence_loss(
+        self,
+        existence_logits: torch.Tensor,
+        true_cell_prop: torch.Tensor,
+        cell_prop_threshold: float,
+    ) -> torch.Tensor:
+        """Supervise thresholded cell-type existence using true cell proportions."""
+        if true_cell_prop.ndim == 3:
+            true_cell_prop = true_cell_prop.squeeze(-1)
+        exist_target = (true_cell_prop >= cell_prop_threshold).to(dtype=existence_logits.dtype)
+        loss_mat = F.binary_cross_entropy_with_logits(
+            existence_logits,
+            exist_target,
+            reduction="none",
+        )
+        return loss_mat.mean(dim=-1)
 
     def _z_score_kl_loss(self, recon_x_all_types_cpm: torch.Tensor) -> torch.Tensor:
         """

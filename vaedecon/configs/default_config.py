@@ -22,6 +22,7 @@ class LossCoefficient(BaseModel):
     gene_mean_std_weight: Optional[float] = None
     cross_sample_gene_var_weight: float = 0.0
     cell_type_sct_gep_weight: float = 0.0
+    cell_type_existence_weight: float = 0.0
     z_score_reg_weight: float = 0.0
     z_score_kl_weight: float = 0.0  # Weight for KL divergence between empirical Z-score distribution and N(0,1)
     low_mean_std_weight: float = 1.0  # Weight for MSE regularization on low mean/std genes
@@ -40,6 +41,7 @@ class LossCoefficient(BaseModel):
         "gene_mean_std_weight",
         "cross_sample_gene_var_weight",
         "cell_type_sct_gep_weight",
+        "cell_type_existence_weight",
         "z_score_reg_weight",
         "z_score_kl_weight",
         "low_mean_std_weight",
@@ -677,6 +679,15 @@ class ModelConfig(BaseModelConfig):
         description="Exact cell type label used for the cancer cell type when "
                     "cell_prop_activation_function='sigmoid'."
     )
+    cell_type_existence_shift_scale: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Scale of the centered latent shift derived from predicted cell-type "
+            "existence probabilities. Set > 0 to enable the existence-conditioned "
+            "mu shift when predict_cell_prop=True."
+        ),
+    )
 
 
     # Mask fraction for input dropout
@@ -825,6 +836,7 @@ class ModelConfig(BaseModelConfig):
         """Ensure cell proportion prediction settings are consistent."""
         kld_p_weight = self.loss_coefficient.kld_p
         cell_prop_weight = self.loss_coefficient.cell_prop
+        existence_weight = self.loss_coefficient.cell_type_existence_weight
         activation_function = self.cell_prop_activation_function
 
         if kld_p_weight < 0:
@@ -849,6 +861,20 @@ class ModelConfig(BaseModelConfig):
                 f"loss_coefficient['cell_prop'] = {cell_prop_weight} > 0 "
                 f"but predict_cell_prop=False. "
                 f"Either set predict_cell_prop=True or set cell_prop to 0."
+            )
+
+        if existence_weight > 0 and not self.predict_cell_prop:
+            raise ValueError(
+                f"loss_coefficient['cell_type_existence_weight'] = {existence_weight} > 0 "
+                f"but predict_cell_prop=False. "
+                f"Either set predict_cell_prop=True or set cell_type_existence_weight to 0."
+            )
+
+        if self.cell_type_existence_shift_scale > 0 and not self.predict_cell_prop:
+            raise ValueError(
+                f"cell_type_existence_shift_scale = {self.cell_type_existence_shift_scale} > 0 "
+                f"but predict_cell_prop=False. "
+                f"Either set predict_cell_prop=True or set cell_type_existence_shift_scale to 0."
             )
 
         if activation_function == "sigmoid":
@@ -941,6 +967,7 @@ class ModelConfig(BaseModelConfig):
                 "gene_std_weight": self.loss_coefficient.gene_std_weight,
                 "cross_sample_gene_var_weight": self.loss_coefficient.cross_sample_gene_var_weight,
                 "cell_type_sct_gep_weight": self.loss_coefficient.cell_type_sct_gep_weight,
+                "cell_type_existence_weight": self.loss_coefficient.cell_type_existence_weight,
                 "z_score_kl_weight": self.loss_coefficient.z_score_kl_weight,
             }
         }

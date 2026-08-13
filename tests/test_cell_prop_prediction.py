@@ -19,9 +19,11 @@ from vaedecon.workflow.workflow import evaluate_model
 def _build_dummy_vae(
     cell_prop_weight: float = 2.0,
     kld_p_weight: float = 0.0,
+    cell_type_existence_weight: float = 0.0,
     training: bool = True,
     activation_function: str = "softplus",
     cancer_cell_type_index: int | None = None,
+    existence_shift_scale: float = 0.0,
 ):
     class DummyVAE:
         pass
@@ -40,13 +42,16 @@ def _build_dummy_vae(
             low_std_threshold=0.0,
             kld_p=kld_p_weight,
             cell_prop=cell_prop_weight,
+            cell_type_existence_weight=cell_type_existence_weight,
             gene_mean_weight=0.0,
             gene_std_weight=0.0,
         ),
         learn_gep_residual=False,
         predict_cell_prop=True,
         cell_prop_activation_function=activation_function,
+        cell_type_existence_shift_scale=existence_shift_scale,
     )
+    dummy.data_config = SimpleNamespace(training_sct_gep_cell_prop_threshold=0.1)
     dummy.cell_prop_activation_function = activation_function
     dummy.cancer_cell_type_index = cancer_cell_type_index
     dummy.training = training
@@ -83,6 +88,10 @@ def _build_dummy_vae(
     dummy._hierarchical_code_loss = lambda **kwargs: torch.zeros(
         kwargs["mu_types"].shape[0], device=kwargs["mu_types"].device
     )
+    dummy._cell_type_existence_loss = lambda **kwargs: VAE._cell_type_existence_loss(
+        dummy,
+        **kwargs,
+    )
     return dummy
 
 
@@ -114,6 +123,7 @@ def test_loss_function_includes_weighted_kld_p_and_supervised_cell_prop_term():
         mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
         logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
         pred_cell_prop=dirichlet_mean(dd_alpha),
+        existence_logits=None,
         dd_alpha=dd_alpha,
         mu_prior=torch.zeros((2, 1), dtype=torch.float32),
         recon_gene_mean=torch.ones((3, 2), dtype=torch.float32),
@@ -151,6 +161,7 @@ def test_loss_function_requires_labels_for_supervised_training():
             mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
             logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
             pred_cell_prop=torch.ones((2, 2), dtype=torch.float32) / 2,
+            existence_logits=None,
             dd_alpha=torch.ones((2, 2), dtype=torch.float32),
             mu_prior=torch.zeros((2, 1), dtype=torch.float32),
             recon_gene_mean=torch.ones((3, 2), dtype=torch.float32),
@@ -286,6 +297,67 @@ def test_softmax_cell_prop_loss_supervises_all_cell_type_columns():
 
     assert torch.allclose(kld_p, torch.zeros_like(kld_p))
     assert torch.allclose(cell_prop_loss, expected_loss)
+
+
+def test_apply_cell_type_existence_shift_uses_centered_soft_threshold():
+    dummy = _build_dummy_vae(
+        cell_prop_weight=0.0,
+        training=False,
+        activation_function="softmax",
+        existence_shift_scale=0.2,
+    )
+    mu_types = torch.zeros((1, 2, 3), dtype=torch.float32)
+    pred_cell_prop = torch.tensor([[0.01, 0.10, 0.60]], dtype=torch.float32)
+
+    existence_logits, existence_probs, mu_types_shifted = VAE._apply_cell_type_existence_shift(
+        dummy,
+        mu_types=mu_types,
+        pred_cell_prop=pred_cell_prop,
+        device=torch.device("cpu"),
+    )
+
+    assert existence_logits.shape == pred_cell_prop.shape
+    assert existence_probs.shape == pred_cell_prop.shape
+    assert torch.all(existence_probs > 0)
+    assert torch.all(existence_probs < 1)
+    assert torch.allclose(mu_types_shifted[0, :, 0], mu_types_shifted[0, :, 0][0].expand(2))
+    assert mu_types_shifted[0, 0, 0].item() < 0.0
+    assert mu_types_shifted[0, 0, 2].item() > 0.0
+
+
+def test_loss_function_skips_cell_type_existence_supervision_during_inference():
+    dummy = _build_dummy_vae(
+        cell_prop_weight=0.0,
+        cell_type_existence_weight=1.0,
+        training=False,
+        activation_function="softmax",
+    )
+    x = torch.zeros((2, 3), dtype=torch.float32)
+    existence_logits = torch.tensor([[1.0, -1.0], [0.5, -0.5]], dtype=torch.float32)
+
+    loss_terms = VAE.loss_function(
+        dummy,
+        x=x,
+        y=None,
+        recon_x_conv=torch.zeros_like(x),
+        mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
+        logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
+        pred_cell_prop=torch.tensor([[0.7, 0.3], [0.4, 0.6]], dtype=torch.float32),
+        existence_logits=existence_logits,
+        dd_alpha=None,
+        mu_prior=torch.zeros((2, 1), dtype=torch.float32),
+        recon_gene_mean=torch.ones((3, 2), dtype=torch.float32),
+        recon_gene_std=torch.ones((3, 2), dtype=torch.float32),
+        logvar_mean=torch.zeros((2, 1), dtype=torch.float32),
+        mu_mean=torch.zeros((2, 1), dtype=torch.float32),
+        device=torch.device("cpu"),
+        recon_x_all_types_cpm=torch.ones((2, 3, 2), dtype=torch.float32),
+    )
+
+    assert torch.allclose(
+        loss_terms.cell_type_existence,
+        torch.tensor(0.0, dtype=torch.float32),
+    )
 
 
 class _DummyPredictionDataset(torch.utils.data.Dataset):

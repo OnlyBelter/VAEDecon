@@ -334,6 +334,27 @@ where:
 - `G` = number of genes in training gene order,
 - `C` = number of cell types.
 
+### `true_sct_gep` value space
+
+The cached `true_sct_gep` tensor stores the matched SCT expression values after
+gene alignment in the same log-expression convention used by the training
+dataset. Concretely:
+
+- the matched SCT rows are loaded as log-space expression from the SCT
+  `.h5ad`;
+- if dataset-level constant scaling is enabled, `true_sct_gep` is divided by
+  the same scaling factor as the bulk inputs.
+
+So the cached tensor is:
+
+- `log2(expression + 1)` when `scaling_by_constant=False`;
+- `log2(expression + 1) / scaling_factor` when
+  `scaling_by_constant=True`.
+
+This matters for the supervision loss: the matched target tensor is already in
+the same scaled log space as the converted prediction, so the loss compares
+like with like and does **not** re-transform `true_sct_gep` a second time.
+
 ### Why cache?
 
 This follows existing project constraints:
@@ -351,7 +372,7 @@ DatasetOutput(
     data=x,
     labels=y,
     true_sct_gep=true_sct_gep_i,              # (G, C)
-    true_sct_gep_mask=true_sct_gep_mask_i,    # (C,)
+    true_sct_gep_present_mask=true_sct_gep_present_mask_i,    # (C,)
 )
 ```
 
@@ -397,6 +418,27 @@ This ensures stage 1 only supervises cell types that are both:
 - available in the matched target set,
 - and abundant enough by ground-truth fraction.
 
+### Implemented masking rule
+
+The implemented helper follows exactly this logic:
+
+```python
+active_cell_type_mask = true_sct_gep_present_mask & (
+    true_cell_prop >= cell_prop_threshold
+)
+```
+
+and then broadcasts that `(B, C)` mask across genes:
+
+```python
+active_gene_mask = active_cell_type_mask.unsqueeze(1)
+```
+
+So the threshold-based masking is a **hard sample-by-cell-type mask**, not a
+soft weighting term. Once a cell type is below threshold for a sample, all gene
+dimensions for that sample-cell-type pair are excluded from this supervision
+term.
+
 ## 6. New stage-1 masked sctGEP supervision loss
 
 Add a new loss term to `vaedecon/models/vae/vae_model.py`.
@@ -407,24 +449,84 @@ Use:
 
 - predicted `recon_x_all_types_cpm`: `(B, G, C)`
 - batch `true_sct_gep`: `(B, G, C)`
-- batch `true_sct_gep_mask`: `(B, C)`
+- batch `true_sct_gep_present_mask`: `(B, C)`
 - batch true cell fractions `y`: `(B, C)`
 
 ### Loss definition
 
-Stage 1 uses a simple masked log-space MSE:
+Stage 1 uses a simple masked log-space MSE. Let:
+
+- $\hat{X}_{b,g,c}^{\mathrm{cpm}}$ be the reconstructed cell-type-specific GEP
+  in non-log CPM space;
+- $\hat{X}_{b,g,c}^{\mathrm{log}}$ be the same prediction converted back to the
+  scaled log space used for training;
+- $X_{b,g,c}^{\mathrm{true}}$ be the cached matched `true_sct_gep` target in
+  that same scaled log space;
+- $P_{b,c}^{\mathrm{true}}$ be the true cell proportion;
+- $\tau$ be `training_sct_gep_cell_prop_threshold`;
+- $M_{b,c}^{\mathrm{present}}$ be `true_sct_gep_present_mask`.
+
+The hard cell-type mask is:
+
+$$
+M_{b,c}
+=
+M_{b,c}^{\mathrm{present}}
+\cdot
+\mathbf{1}\left\{P_{b,c}^{\mathrm{true}} \ge \tau\right\}.
+$$
+
+This mask is then broadcast across genes:
+
+$$
+\widetilde{M}_{b,g,c} = M_{b,c}.
+$$
+
+The prediction is converted to the same scaled log space as the target:
+
+$$
+\hat{X}_{b,g,c}^{\mathrm{log}}
+=
+\frac{\log_2\left(\hat{X}_{b,g,c}^{\mathrm{cpm}} + 1\right)}{s},
+$$
+
+where $s$ is the scaling factor used by the dataset pipeline, or $1$ if
+constant scaling is disabled.
+
+The per-sample stage-1 masked supervision loss is:
+
+$$
+\mathcal{L}_{b}^{\mathrm{sctGEP}}
+=
+\frac{
+\sum_{g,c}
+\widetilde{M}_{b,g,c}
+\left(
+\hat{X}_{b,g,c}^{\mathrm{log}} - X_{b,g,c}^{\mathrm{true}}
+\right)^2
+}{
+\max\left(1,\sum_{g,c}\widetilde{M}_{b,g,c}\right)
+}.
+$$
+
+In code, the implemented computation is:
 
 ```python
 pred_log = to_log_space(recon_x_all_types_cpm, scaling_factor)
-true_log = to_log_space(true_sct_gep, scaling_factor)
+mask_ct = (true_sct_gep_present_mask & (true_cell_prop >= threshold))
+mask = mask_ct.unsqueeze(1).to(pred_log.dtype)           # (B, 1, C)
 
-mask_ct = effective_mask.to(pred_log.dtype)              # (B, C)
-mask = mask_ct.unsqueeze(1).expand(-1, G, -1)            # (B, G, C)
-
-sq_err = (pred_log - true_log).pow(2) * mask
+sq_err = (pred_log - true_sct_gep).pow(2) * mask
 denom = mask.sum(dim=(1, 2)).clamp_min(1.0)
 cell_type_sct_gep_loss = sq_err.sum(dim=(1, 2)) / denom  # (B,)
 ```
+
+Two implementation notes are important:
+
+1. `true_sct_gep` is already in the scaled log space, so there is no
+   `true_log = to_log_space(true_sct_gep, scaling_factor)` step.
+2. The mask shape is `(B, 1, C)`, which broadcasts over genes automatically.
+   This is equivalent to expanding it to `(B, G, C)`.
 
 ### Loss registration
 
@@ -442,10 +544,22 @@ If any of the following are true:
 
 - `cell_type_sct_gep_weight == 0`
 - `true_sct_gep` is absent
-- `true_sct_gep_mask` is absent
+- `true_sct_gep_present_mask` is absent
 - labels are unavailable
 
 then return a zero vector `(B,)` for this term and keep current behavior.
+
+More precisely, in the implemented code the matched `sctGEP` loss runs only
+when all of the following are true:
+
+- `cell_type_sct_gep_weight > 0`;
+- `true_sct_gep` is present;
+- `true_sct_gep_present_mask` is present;
+- ground-truth cell proportions are available.
+
+During inference or prediction, if the training-only tensors are absent, this
+term is skipped and a zero vector is returned so prediction behavior remains
+unchanged.
 
 ## 7. File-level design changes
 
