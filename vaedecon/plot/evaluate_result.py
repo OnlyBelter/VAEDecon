@@ -1,5 +1,6 @@
 import os
 import html
+import json
 import pandas as pd
 import numpy as np
 from typing import Union
@@ -17,6 +18,7 @@ import umap
 
 from ..utility import (calculate_rmse, check_dir, get_corr, read_xy, read_df, get_ccc, to_numpy,
                        get_core_zone_of_pca, read_cancer_purity, cancer_types, non_log2log_cpm)
+from ..utility.read_file import ReadH5AD
 # from ..utility.read_file import find_sct_gep_of_bulk_sample
 from ..data import GEPDataset
 from .plot_nn import plot_corr_two_columns
@@ -605,6 +607,43 @@ def _compute_pairwise_ccc_matrix(
     return matrix
 
 
+def _compute_pairwise_cosine_similarity_matrix(
+    left_df: pd.DataFrame,
+    right_df: pd.DataFrame,
+    row_sample_ids: List[str],
+    col_sample_ids: List[str] | None = None,
+) -> pd.DataFrame:
+    if col_sample_ids is None:
+        col_sample_ids = row_sample_ids
+
+    common_genes = [gene for gene in left_df.index if gene in right_df.index]
+    if not common_genes:
+        raise ValueError("No common genes found when computing pairwise cosine-similarity matrix.")
+
+    left_df = left_df.loc[common_genes, row_sample_ids]
+    right_df = right_df.loc[common_genes, col_sample_ids]
+
+    matrix = pd.DataFrame(index=row_sample_ids, columns=col_sample_ids, dtype=float)
+    for row_sample_id in row_sample_ids:
+        left_values = left_df[row_sample_id].to_numpy(dtype=np.float32)
+        left_norm = float(np.linalg.norm(left_values))
+        for col_sample_id in col_sample_ids:
+            right_values = right_df[col_sample_id].to_numpy(dtype=np.float32)
+            right_norm = float(np.linalg.norm(right_values))
+            if left_norm == 0.0 or right_norm == 0.0:
+                similarity = 1.0
+            else:
+                similarity = float(
+                    np.clip(
+                        np.dot(left_values, right_values) / (left_norm * right_norm),
+                        -1.0,
+                        1.0,
+                    )
+                )
+            matrix.at[row_sample_id, col_sample_id] = similarity
+    return matrix
+
+
 def _draw_empty_similarity_heatmap(
     output_fp: str | Path,
     title: str,
@@ -633,10 +672,11 @@ def _draw_empty_similarity_heatmap(
     plt.close(fig)
 
 
-def _plot_pairwise_ccc_heatmap(
+def _plot_pairwise_similarity_heatmap(
     matrix_df: pd.DataFrame,
     output_fp: str | Path,
     title: str,
+    colorbar_label: str,
 ) -> None:
     n_rows = max(matrix_df.shape[0], 1)
     n_cols = max(matrix_df.shape[1], 1)
@@ -654,7 +694,7 @@ def _plot_pairwise_ccc_heatmap(
         vmin=vmin,
         vmax=vmax,
         square=True,
-        cbar_kws={"label": "CCC"},
+        cbar_kws={"label": colorbar_label},
     )
     ax.set_title(title, fontsize=9)
     ax.set_xlabel("")
@@ -665,10 +705,24 @@ def _plot_pairwise_ccc_heatmap(
     plt.close(fig)
 
 
-def _plot_pairwise_ccc_clustermap(
+def _plot_pairwise_ccc_heatmap(
     matrix_df: pd.DataFrame,
     output_fp: str | Path,
     title: str,
+) -> None:
+    _plot_pairwise_similarity_heatmap(
+        matrix_df=matrix_df,
+        output_fp=output_fp,
+        title=title,
+        colorbar_label="CCC",
+    )
+
+
+def _plot_pairwise_similarity_clustermap(
+    matrix_df: pd.DataFrame,
+    output_fp: str | Path,
+    title: str,
+    colorbar_label: str,
 ) -> None:
     if matrix_df.empty or min(matrix_df.shape) < 2:
         return
@@ -681,7 +735,7 @@ def _plot_pairwise_ccc_clustermap(
         cmap="vlag",
         vmin=vmin,
         vmax=vmax,
-        cbar_kws={"label": "CCC"},
+        cbar_kws={"label": colorbar_label},
     )
     cluster_grid.ax_heatmap.set_title(title, fontsize=9, pad=12)
     cluster_grid.ax_heatmap.set_xlabel("")
@@ -692,9 +746,51 @@ def _plot_pairwise_ccc_clustermap(
     plt.close(cluster_grid.figure)
 
 
+def _plot_pairwise_ccc_clustermap(
+    matrix_df: pd.DataFrame,
+    output_fp: str | Path,
+    title: str,
+) -> None:
+    _plot_pairwise_similarity_clustermap(
+        matrix_df=matrix_df,
+        output_fp=output_fp,
+        title=title,
+        colorbar_label="CCC",
+    )
+
+
+def _plot_pairwise_cosine_similarity_heatmap(
+    matrix_df: pd.DataFrame,
+    output_fp: str | Path,
+    title: str,
+) -> None:
+    _plot_pairwise_similarity_heatmap(
+        matrix_df=matrix_df,
+        output_fp=output_fp,
+        title=title,
+        colorbar_label="Cosine similarity",
+    )
+
+
+def _plot_pairwise_cosine_similarity_clustermap(
+    matrix_df: pd.DataFrame,
+    output_fp: str | Path,
+    title: str,
+) -> None:
+    _plot_pairwise_similarity_clustermap(
+        matrix_df=matrix_df,
+        output_fp=output_fp,
+        title=title,
+        colorbar_label="Cosine similarity",
+    )
+
+
 def _write_similarity_result_gallery(
     similarity_result_dir: str | Path,
     figure_format: str,
+    metric_tag: str = "ccc",
+    gallery_title: str = "Inter-sample CCC Gallery",
+    empty_message: str = "No CCC outputs found.",
 ) -> None:
     result_dir = Path(similarity_result_dir)
     matrix_names = ("true_vs_true", "recon_vs_recon", "true_vs_recon")
@@ -736,7 +832,7 @@ def _write_similarity_result_gallery(
         prefix, matched_matrix_name = _parse_prefix_and_matrix(stem)
         if matched_matrix_name is None or prefix is None:
             continue
-        cell_type = prefix.split("_ccc_true_prop_ge_")[0]
+        cell_type = prefix.split(f"_{metric_tag}_true_prop_ge_")[0]
         grouped_outputs.setdefault(cell_type, {}).setdefault(prefix, {}).setdefault(matched_matrix_name, {})
         if artifact_fp.suffix == ".csv":
             grouped_outputs[cell_type][prefix][matched_matrix_name]["csv"] = artifact_fp.name
@@ -765,7 +861,10 @@ def _write_similarity_result_gallery(
         multiple_prefixes = len(prefixes) > 1
         figure_links = []
         for prefix in prefixes:
-            threshold_tag = prefix.split("_ccc_true_prop_ge_", 1)[1] if "_ccc_true_prop_ge_" in prefix else ""
+            threshold_tag = (
+                prefix.split(f"_{metric_tag}_true_prop_ge_", 1)[1]
+                if f"_{metric_tag}_true_prop_ge_" in prefix else ""
+            )
             for matrix_name in matrix_names:
                 artifacts = grouped_outputs[cell_type][prefix].get(matrix_name)
                 if not artifacts:
@@ -789,7 +888,7 @@ def _write_similarity_result_gallery(
         "<html lang=\"en\">",
         "<head>",
         "<meta charset=\"utf-8\">",
-        "<title>Inter-sample CCC Gallery</title>",
+        f"<title>{html.escape(gallery_title)}</title>",
         "<style>",
         "html { scroll-behavior: smooth; }",
         "body { font-family: Arial, sans-serif; margin: 0; color: #222; background: #fff; }",
@@ -841,13 +940,13 @@ def _write_similarity_result_gallery(
         "</ul>",
         "</aside>",
         "<main class=\"content\" id=\"top\">",
-        "<h1>Inter-sample CCC Gallery</h1>",
+        f"<h1>{html.escape(gallery_title)}</h1>",
         "<p class=\"subtitle\">Grouped by cell type and comparison type.</p>",
         "<p class=\"usage-note\">Use the left panel to jump to a cell type. The right panel follows the current cell type and links to its figure sections.</p>",
     ])
 
     if not grouped_outputs:
-        html_parts.append("<p>No CCC outputs found.</p>")
+        html_parts.append(f"<p>{html.escape(empty_message)}</p>")
     else:
         for cell_type in sorted_cell_types:
             cell_type_anchor = _make_anchor_id(cell_type, prefix="cell-type")
@@ -860,7 +959,10 @@ def _write_similarity_result_gallery(
             html_parts.append("<a class=\"back-to-top\" href=\"#top\">Top</a>")
             html_parts.append("</div>")
             for prefix in sorted(grouped_outputs[cell_type]):
-                threshold_tag = prefix.split("_ccc_true_prop_ge_", 1)[1] if "_ccc_true_prop_ge_" in prefix else ""
+                threshold_tag = (
+                    prefix.split(f"_{metric_tag}_true_prop_ge_", 1)[1]
+                    if f"_{metric_tag}_true_prop_ge_" in prefix else ""
+                )
                 if threshold_tag:
                     html_parts.append(
                         f"<p class=\"muted\">threshold tag: {html.escape(threshold_tag)}</p>"
@@ -973,6 +1075,59 @@ def _write_similarity_result_gallery(
     (result_dir / "index.html").write_text("\n".join(html_parts), encoding="utf-8")
 
 
+def _infer_sct_cell_type_labels(obs_df: pd.DataFrame) -> pd.Series:
+    if obs_df is None or obs_df.empty:
+        raise ValueError("SCT dataset obs is empty; cannot infer sample cell types.")
+    numeric_obs_df = obs_df.select_dtypes(include=[np.number, bool])
+    if numeric_obs_df.empty:
+        raise ValueError("SCT dataset obs has no numeric cell-type columns to infer sample cell types.")
+    return numeric_obs_df.idxmax(axis=1).astype(str)
+
+
+def _load_top_hvg_genes_per_cell_type_from_sct_reference(
+    sct_gep_file_path: str | Path,
+    target_cell_types: List[str] | None = None,
+    n_top_genes: int = 3000,
+) -> Dict[str, List[str]]:
+    sct_gep = ReadH5AD(sct_gep_file_path)
+    exp_df = sct_gep.get_df(convert_to_tpm=False)
+    obs_df = sct_gep.get_cell_fraction()
+    obs_df = obs_df.loc[exp_df.index, :].copy()
+    if target_cell_types is not None:
+        valid_cell_type_columns = [cell_type for cell_type in target_cell_types if cell_type in obs_df.columns]
+        if valid_cell_type_columns:
+            obs_df = obs_df.loc[:, valid_cell_type_columns].copy()
+    cell_type_labels = _infer_sct_cell_type_labels(obs_df)
+
+    cell_type_to_hvg_genes: Dict[str, List[str]] = {}
+    for cell_type, sample_ids in cell_type_labels.groupby(cell_type_labels, sort=False).groups.items():
+        current_df = exp_df.loc[list(sample_ids)].copy()
+        if current_df.columns.has_duplicates:
+            current_df = current_df.loc[:, ~current_df.columns.duplicated()].copy()
+        gene_var = current_df.var(axis=0, ddof=0).fillna(0.0).sort_values(ascending=False, kind="mergesort")
+        cell_type_to_hvg_genes[str(cell_type)] = gene_var.index.astype(str).tolist()[: int(n_top_genes)]
+    return cell_type_to_hvg_genes
+
+
+def _write_hvg_similarity_metadata(
+    *,
+    metadata_fp: str | Path,
+    sct_gep_file_path: str | Path,
+    cell_type: str,
+    requested_n_top_hvgs: int,
+    aligned_hvg_genes: List[str],
+) -> None:
+    metadata = {
+        "metric": "hvg3000_cosine",
+        "sct_reference_dataset_file_path": str(sct_gep_file_path),
+        "cell_type": str(cell_type),
+        "requested_n_top_hvgs": int(requested_n_top_hvgs),
+        "aligned_n_hvgs": int(len(aligned_hvg_genes)),
+        "aligned_hvg_genes": [str(gene) for gene in aligned_hvg_genes],
+    }
+    Path(metadata_fp).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+
 def _save_selected_sample_similarity_outputs(
     *,
     cell_type: str,
@@ -1049,6 +1204,109 @@ def _save_selected_sample_similarity_outputs(
     _write_similarity_result_gallery(
         similarity_result_dir=similarity_result_dir,
         figure_format=figure_format,
+    )
+
+
+def _save_selected_sample_hvg_cosine_similarity_outputs(
+    *,
+    cell_type: str,
+    y_true: pd.DataFrame,
+    y_pred: pd.DataFrame,
+    sample_ids: List[str],
+    hvg_genes: List[str],
+    sct_gep_file_path: str | Path,
+    similarity_result_dir: str | Path,
+    threshold: float,
+    figure_format: str,
+    requested_n_top_hvgs: int = 3000,
+) -> None:
+    threshold_tag = _format_threshold_for_filename(threshold)
+    prefix = f"{cell_type}_hvg3000_cosine_true_prop_ge_{threshold_tag}"
+    aligned_hvg_genes = [
+        gene for gene in hvg_genes
+        if gene in y_true.index and gene in y_pred.index
+    ]
+    metadata_fp = Path(similarity_result_dir) / f"{prefix}_metadata.json"
+    _write_hvg_similarity_metadata(
+        metadata_fp=metadata_fp,
+        sct_gep_file_path=sct_gep_file_path,
+        cell_type=cell_type,
+        requested_n_top_hvgs=requested_n_top_hvgs,
+        aligned_hvg_genes=aligned_hvg_genes,
+    )
+
+    if not sample_ids or not aligned_hvg_genes:
+        for matrix_name, title in [
+            ("true_vs_true", f"{cell_type}: true vs true"),
+            ("recon_vs_recon", f"{cell_type}: reconstructed vs reconstructed"),
+            ("true_vs_recon", f"{cell_type}: true vs reconstructed"),
+        ]:
+            _draw_empty_similarity_heatmap(
+                output_fp=Path(similarity_result_dir) / f"{prefix}_{matrix_name}.{figure_format}",
+                title=title,
+                threshold=threshold,
+            )
+        _write_similarity_result_gallery(
+            similarity_result_dir=similarity_result_dir,
+            figure_format=figure_format,
+            metric_tag="hvg3000_cosine",
+            gallery_title="Inter-sample HVG3000 Cosine Similarity Gallery",
+            empty_message="No HVG3000 cosine outputs found.",
+        )
+        return
+
+    y_true = y_true.loc[aligned_hvg_genes, :]
+    y_pred = y_pred.loc[aligned_hvg_genes, :]
+    matrix_builders = {
+        "true_vs_true": (
+            _compute_pairwise_cosine_similarity_matrix(
+                left_df=y_true,
+                right_df=y_true,
+                row_sample_ids=sample_ids,
+                col_sample_ids=sample_ids,
+            ),
+            f"{cell_type}: true vs true",
+        ),
+        "recon_vs_recon": (
+            _compute_pairwise_cosine_similarity_matrix(
+                left_df=y_pred,
+                right_df=y_pred,
+                row_sample_ids=sample_ids,
+                col_sample_ids=sample_ids,
+            ),
+            f"{cell_type}: reconstructed vs reconstructed",
+        ),
+        "true_vs_recon": (
+            _compute_pairwise_cosine_similarity_matrix(
+                left_df=y_true,
+                right_df=y_pred,
+                row_sample_ids=sample_ids,
+                col_sample_ids=sample_ids,
+            ),
+            f"{cell_type}: true vs reconstructed",
+        ),
+    }
+    for matrix_name, (matrix_df, title) in matrix_builders.items():
+        csv_fp = Path(similarity_result_dir) / f"{prefix}_{matrix_name}.csv"
+        fig_fp = Path(similarity_result_dir) / f"{prefix}_{matrix_name}.{figure_format}"
+        clustermap_fp = Path(similarity_result_dir) / f"{prefix}_{matrix_name}_clustermap.{figure_format}"
+        matrix_df.to_csv(csv_fp, float_format="%.6f")
+        _plot_pairwise_cosine_similarity_heatmap(
+            matrix_df=matrix_df,
+            output_fp=fig_fp,
+            title=title,
+        )
+        _plot_pairwise_cosine_similarity_clustermap(
+            matrix_df=matrix_df,
+            output_fp=clustermap_fp,
+            title=title,
+        )
+    _write_similarity_result_gallery(
+        similarity_result_dir=similarity_result_dir,
+        figure_format=figure_format,
+        metric_tag="hvg3000_cosine",
+        gallery_title="Inter-sample HVG3000 Cosine Similarity Gallery",
+        empty_message="No HVG3000 cosine outputs found.",
     )
 
 
@@ -1500,6 +1758,7 @@ def plot_single_cell_gep(
     max_visualize_samples: int = 3,
     figure_format: str = 'svg',
     selected_sample2cell_id_file_path: str = None,
+    sct_gep_file_path: str | Path | None = None,
     return_metrics: bool = False,
     selected_true_cell_prop: pd.DataFrame | None = None,
     filtered_min_true_cell_prop: float = 0.005,
@@ -1508,12 +1767,21 @@ def plot_single_cell_gep(
     check_dir(Path(sc_gep_result_dir))
     similarity_result_dir = os.path.join(sc_gep_result_dir, "inter_sample_similarity_ccc")
     check_dir(Path(similarity_result_dir))
+    cosine_similarity_result_dir = os.path.join(sc_gep_result_dir, "inter_sample_similarity_hvg3000_cosine")
+    check_dir(Path(cosine_similarity_result_dir))
     recon_sc_gep = pred_a["recon_x_all_types"].detach().cpu().numpy()
     sample_ids = test_set.get_sample_ids()
     gene_list = test_set.get_gene_list()
 
     # cell ids may have duplicate records
     selected_sample2cell_id = pd.read_csv(selected_sample2cell_id_file_path, index_col=0)
+    cell_type_to_hvg_genes: Dict[str, List[str]] = {}
+    if sct_gep_file_path is not None and str(sct_gep_file_path).strip() != "":
+        cell_type_to_hvg_genes = _load_top_hvg_genes_per_cell_type_from_sct_reference(
+            sct_gep_file_path=sct_gep_file_path,
+            target_cell_types=cell_types,
+            n_top_genes=3000,
+        )
 
     metrics_all_cell_types: Dict[str, Dict[str, float]] = {}
     all_cell_type_plot_inputs = []
@@ -1592,6 +1860,24 @@ def plot_single_cell_gep(
             threshold=filtered_min_true_cell_prop,
             figure_format=figure_format,
         )
+        if sct_gep_file_path is not None and str(sct_gep_file_path).strip() != "":
+            _save_selected_sample_hvg_cosine_similarity_outputs(
+                cell_type=cell_type,
+                y_true=y,
+                y_pred=y_pred_df,
+                sample_ids=_filter_selected_samples_by_true_prop(
+                    selected_true_cell_prop=selected_true_cell_prop,
+                    cell_type=cell_type,
+                    sample_ids=query_ids,
+                    min_true_cell_prop=filtered_min_true_cell_prop,
+                ),
+                hvg_genes=cell_type_to_hvg_genes.get(cell_type, []),
+                sct_gep_file_path=sct_gep_file_path,
+                similarity_result_dir=cosine_similarity_result_dir,
+                threshold=filtered_min_true_cell_prop,
+                figure_format=figure_format,
+                requested_n_top_hvgs=3000,
+            )
 
     def _plot_all_cell_types_figure(
         filtered: bool,

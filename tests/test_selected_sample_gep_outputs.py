@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 import pytest
 
@@ -8,8 +9,13 @@ from vaedecon.plot.evaluate_result import (
     _build_selected_sample_color_map,
     _build_selected_sample_legend_label_map,
     _compute_pairwise_ccc_matrix,
+    _compute_pairwise_cosine_similarity_matrix,
+    _load_top_hvg_genes_per_cell_type_from_sct_reference,
     _plot_pairwise_ccc_clustermap,
     _plot_pairwise_ccc_heatmap,
+    _plot_pairwise_cosine_similarity_clustermap,
+    _plot_pairwise_cosine_similarity_heatmap,
+    _save_selected_sample_hvg_cosine_similarity_outputs,
     _save_selected_sample_similarity_outputs,
     _write_similarity_result_gallery,
     compare_y_y_pred_subplot,
@@ -137,6 +143,72 @@ def test_compute_pairwise_ccc_matrix_returns_expected_shape_and_labels():
     assert matrix.loc["s1", "s1"] == pytest.approx(1.0)
 
 
+def test_compute_pairwise_cosine_similarity_matrix_returns_expected_shape_and_labels():
+    y_true = pd.DataFrame(
+        {
+            "s1": [1.0, 0.0],
+            "s2": [0.0, 1.0],
+        },
+        index=["g1", "g2"],
+    )
+    y_pred = pd.DataFrame(
+        {
+            "s1": [1.0, 0.0],
+            "s2": [1.0, 1.0],
+        },
+        index=["g1", "g2"],
+    )
+
+    matrix = _compute_pairwise_cosine_similarity_matrix(
+        left_df=y_pred,
+        right_df=y_true,
+        row_sample_ids=["s1", "s2"],
+        col_sample_ids=["s1", "s2"],
+    )
+
+    assert list(matrix.index) == ["s1", "s2"]
+    assert list(matrix.columns) == ["s1", "s2"]
+    assert matrix.shape == (2, 2)
+    assert matrix.loc["s1", "s1"] == pytest.approx(1.0)
+    assert matrix.loc["s1", "s2"] == pytest.approx(0.0)
+    assert matrix.loc["s2", "s1"] == pytest.approx(2 ** -0.5)
+
+
+def test_load_top_hvg_genes_per_cell_type_from_sct_reference_uses_within_cell_type_variance(tmp_path):
+    anndata = pytest.importorskip("anndata")
+    import numpy as np
+
+    adata = anndata.AnnData(
+        X=np.asarray(
+            [
+                [0.0, 1.0, 2.0],
+                [10.0, 1.0, 2.0],
+                [2.0, 0.0, 1.0],
+                [2.0, 9.0, 1.0],
+            ],
+            dtype=np.float32,
+        ),
+        obs=pd.DataFrame(
+            {
+                "CT1": [1.0, 1.0, 0.0, 0.0],
+                "CT2": [0.0, 0.0, 1.0, 1.0],
+            },
+            index=["c1", "c2", "c3", "c4"],
+        ),
+        var=pd.DataFrame(index=["g1", "g2", "g3"]),
+    )
+    h5ad_fp = tmp_path / "toy_sct.h5ad"
+    adata.write_h5ad(h5ad_fp)
+
+    hvg_lookup = _load_top_hvg_genes_per_cell_type_from_sct_reference(
+        sct_gep_file_path=h5ad_fp,
+        n_top_genes=2,
+    )
+
+    assert hvg_lookup["CT1"][0] == "g1"
+    assert hvg_lookup["CT2"][0] == "g2"
+
+
 def test_save_selected_sample_similarity_outputs_writes_expected_matrix_types(tmp_path):
     y_true = pd.DataFrame(
         {
@@ -173,6 +245,70 @@ def test_save_selected_sample_similarity_outputs_writes_expected_matrix_types(tm
         index_col=0,
     )
     assert true_vs_recon.loc["s1", "s1"] == pytest.approx(1.0)
+
+
+def test_save_selected_sample_hvg_cosine_similarity_outputs_writes_expected_artifacts_and_metadata(
+    tmp_path, monkeypatch
+):
+    y_true = pd.DataFrame(
+        {
+            "s1": [1.0, 0.0, 2.0],
+            "s2": [0.0, 1.0, 2.0],
+        },
+        index=["g1", "g2", "g3"],
+    )
+    y_pred = pd.DataFrame(
+        {
+            "s1": [1.0, 0.0, 1.0],
+            "s2": [1.0, 1.0, 1.0],
+        },
+        index=["g1", "g2", "g3"],
+    )
+    called_outputs = {"heatmap": [], "clustermap": []}
+
+    def _fake_heatmap(matrix_df, output_fp, title):
+        called_outputs["heatmap"].append((matrix_df.copy(), output_fp, title))
+        output_fp.write_text("heatmap")
+
+    def _fake_clustermap(matrix_df, output_fp, title):
+        called_outputs["clustermap"].append((matrix_df.copy(), output_fp, title))
+        output_fp.write_text("clustermap")
+
+    monkeypatch.setattr("vaedecon.plot.evaluate_result._plot_pairwise_cosine_similarity_heatmap", _fake_heatmap)
+    monkeypatch.setattr("vaedecon.plot.evaluate_result._plot_pairwise_cosine_similarity_clustermap", _fake_clustermap)
+
+    _save_selected_sample_hvg_cosine_similarity_outputs(
+        cell_type="Cancer Cells",
+        y_true=y_true,
+        y_pred=y_pred,
+        sample_ids=["s1", "s2"],
+        hvg_genes=["g3", "g1"],
+        sct_gep_file_path="toy_sct.h5ad",
+        similarity_result_dir=tmp_path,
+        threshold=0.005,
+        figure_format="png",
+        requested_n_top_hvgs=3000,
+    )
+
+    expected_stem = "Cancer Cells_hvg3000_cosine_true_prop_ge_0p005"
+    assert len(called_outputs["heatmap"]) == 3
+    assert len(called_outputs["clustermap"]) == 3
+    assert (tmp_path / f"{expected_stem}_true_vs_true.csv").exists()
+    assert (tmp_path / f"{expected_stem}_true_vs_true.png").exists()
+    assert (tmp_path / f"{expected_stem}_true_vs_true_clustermap.png").exists()
+    assert (tmp_path / f"{expected_stem}_metadata.json").exists()
+    assert (tmp_path / "index.html").exists()
+
+    metadata = json.loads((tmp_path / f"{expected_stem}_metadata.json").read_text())
+    assert metadata["metric"] == "hvg3000_cosine"
+    assert metadata["sct_reference_dataset_file_path"] == "toy_sct.h5ad"
+    assert metadata["requested_n_top_hvgs"] == 3000
+    assert metadata["aligned_n_hvgs"] == 2
+    assert metadata["aligned_hvg_genes"] == ["g3", "g1"]
+
+    html_text = (tmp_path / "index.html").read_text()
+    assert "Inter-sample HVG3000 Cosine Similarity Gallery" in html_text
+    assert expected_stem in html_text
 
 
 def test_plot_pairwise_ccc_heatmap_uses_nonnegative_data_driven_bounds(tmp_path, monkeypatch):

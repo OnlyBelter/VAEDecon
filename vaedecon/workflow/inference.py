@@ -716,6 +716,7 @@ class VAEDeconPredictor:
                 n_samples=self.config.evaluation.n_samples,
                 max_visualize_samples=self.config.evaluation.visualize_n_sample,
                 selected_sample2cell_id_file_path=selected_sample2cell_id_fp,
+                sct_gep_file_path=sct_gep_file_path,
                 return_metrics=False,
                 selected_true_cell_prop=selected_true_cell_prop,
                 filtered_min_true_cell_prop=self.config.evaluation.cell_prop_threshold,
