@@ -13,8 +13,6 @@ from vaedecon.plot.evaluate_result import (
     _load_top_hvg_genes_per_cell_type_from_sct_reference,
     _plot_pairwise_ccc_clustermap,
     _plot_pairwise_ccc_heatmap,
-    _plot_pairwise_cosine_similarity_clustermap,
-    _plot_pairwise_cosine_similarity_heatmap,
     _save_selected_sample_hvg_cosine_similarity_outputs,
     _save_selected_sample_similarity_outputs,
     _write_similarity_result_gallery,
@@ -287,10 +285,10 @@ def test_save_selected_sample_hvg_cosine_similarity_outputs_writes_expected_arti
         similarity_result_dir=tmp_path,
         threshold=0.005,
         figure_format="png",
-        requested_n_top_hvgs=3000,
+        requested_n_top_hvgs=5000,
     )
 
-    expected_stem = "Cancer Cells_hvg3000_cosine_true_prop_ge_0p005"
+    expected_stem = "Cancer Cells_hvg5000_cosine_true_prop_ge_0p005"
     assert len(called_outputs["heatmap"]) == 3
     assert len(called_outputs["clustermap"]) == 3
     assert (tmp_path / f"{expected_stem}_true_vs_true.csv").exists()
@@ -300,14 +298,14 @@ def test_save_selected_sample_hvg_cosine_similarity_outputs_writes_expected_arti
     assert (tmp_path / "index.html").exists()
 
     metadata = json.loads((tmp_path / f"{expected_stem}_metadata.json").read_text())
-    assert metadata["metric"] == "hvg3000_cosine"
+    assert metadata["metric"] == "hvg5000_cosine"
     assert metadata["sct_reference_dataset_file_path"] == "toy_sct.h5ad"
-    assert metadata["requested_n_top_hvgs"] == 3000
+    assert metadata["requested_n_top_hvgs"] == 5000
     assert metadata["aligned_n_hvgs"] == 2
     assert metadata["aligned_hvg_genes"] == ["g3", "g1"]
 
     html_text = (tmp_path / "index.html").read_text()
-    assert "Inter-sample HVG3000 Cosine Similarity Gallery" in html_text
+    assert "Inter-sample HVG5000 Cosine Similarity Gallery" in html_text
     assert expected_stem in html_text
 
 

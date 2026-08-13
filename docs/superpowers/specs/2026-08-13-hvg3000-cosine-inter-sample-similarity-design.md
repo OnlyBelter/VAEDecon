@@ -1,4 +1,4 @@
-# Design: HVG3000 cosine inter-sample similarity for test-set scGEP outputs
+# Design: HVG5000 cosine inter-sample similarity for test-set scGEP outputs
 
 Last updated: 2026-08-13
 
@@ -11,14 +11,14 @@ Approved in chat, pending implementation.
 Add a second inter-sample similarity analysis for predicted test-set single-cell
 GEP outputs in VAEDecon. The new analysis should run alongside the existing CCC
 workflow and save results to a parallel folder that uses cosine similarity
-computed on the top 3000 highly variable genes (HVGs).
+computed on the top 5000 highly variable genes (HVGs).
 
 ## User requirements
 
 The user asked for the following behavior:
 
 1. Keep the existing CCC-based inter-sample similarity outputs unchanged.
-2. Add a new metric based on cosine similarity over the top 3000 HVGs.
+2. Add a new metric based on cosine similarity over the top 5000 HVGs.
 3. Save the new outputs in a parallel result folder by replacing the metric
    name in the directory and file naming.
 4. Mirror the general logic of the existing VAEDecon test-set result outputs.
@@ -42,12 +42,12 @@ they compare whether the reconstructed single-cell GEPs preserve the
 sample-to-sample structure of the true matched SCT references for each cell
 type.
 
-However, CCC is only one notion of similarity. The user also wants a gene-space
+however, CCC is only one notion of similarity. The user also wants a gene-space
 comparison that emphasizes high-variance structure, using cosine similarity on
-the top 3000 HVGs. This complements CCC rather than replacing it:
+the top 5000 HVGs. This complements CCC rather than replacing it:
 
 - CCC stays as the current full-gene agreement metric.
-- HVG3000 cosine adds a shape-oriented similarity metric on a focused gene set.
+- HVG5000 cosine adds a shape-oriented similarity metric on a focused gene set.
 
 ## Non-goals
 
@@ -62,7 +62,7 @@ the top 3000 HVGs. This complements CCC rather than replacing it:
 
 This feature is intentionally scoped to one fixed analysis mode:
 
-- gene source: top 3000 HVGs
+- gene source: top 5000 HVGs
 - HVG reference: current test-set SCT reference dataset
 - metric: cosine similarity
 
@@ -89,13 +89,13 @@ Each comparison currently produces:
 ## Proposed change
 
 Add a second, parallel workflow that computes cosine-similarity matrices on the
-top 3000 HVGs derived from the current test set's SCT reference dataset.
+top 5000 HVGs derived from the current test set's SCT reference dataset.
 
 ### Output directory
 
 Create and populate the folder:
 
-`<sc_gep_result_dir>/inter_sample_similarity_hvg3000_cosine`
+`<sc_gep_result_dir>/inter_sample_similarity_hvg5000_cosine`
 
 This folder is parallel to the existing:
 
@@ -103,7 +103,7 @@ This folder is parallel to the existing:
 
 ### HVG source
 
-For each test set, derive the top 3000 HVGs from that test set's SCT reference
+For each test set, derive the top 5000 HVGs from that test set's SCT reference
 dataset, meaning the same SCT reference already used as the ground truth source
 for the single-cell GEP comparison.
 
@@ -116,7 +116,7 @@ For a given test set and cell type:
 1. subset the test-set SCT reference dataset to that cell type only
 2. compute gene-wise variance across those samples
 3. rank genes by variance in descending order
-4. keep the top 3000 genes
+4. keep the top 5000 genes
 5. intersect those genes with the genes present in the true and reconstructed
    scGEP matrices for that same cell type
 
@@ -136,7 +136,7 @@ the CCC workflow:
 3. `true_vs_recon`
 
 Each matrix entry should be the cosine similarity between the corresponding two
-sample vectors after both are restricted to the shared top 3000 HVGs.
+sample vectors after both are restricted to the shared top 5000 HVGs.
 
 ### Similarity orientation
 
@@ -152,14 +152,14 @@ Mirror the current CCC naming pattern, replacing only the metric tag:
 - current example:
   `Cancer Cells_ccc_true_prop_ge_0p01_true_vs_true.csv`
 - new example:
-  `Cancer Cells_hvg3000_cosine_true_prop_ge_0p01_true_vs_true.csv`
+  `Cancer Cells_hvg5000_cosine_true_prop_ge_0p01_true_vs_true.csv`
 
 The same naming rule applies to the heatmap and clustermap image files.
 
 ### Gallery behavior
 
 Generate a dedicated gallery HTML file inside
-`inter_sample_similarity_hvg3000_cosine`, analogous to the existing CCC
+`inter_sample_similarity_hvg5000_cosine`, analogous to the existing CCC
 gallery. It should:
 
 - group outputs by cell type
@@ -167,7 +167,7 @@ gallery. It should:
 - link to CSV, heatmap, and clustermap artifacts
 - keep the layout parallel to the CCC gallery
 
-The title and parsing logic must use the new `hvg3000_cosine` metric tag rather
+The title and parsing logic must use the new `hvg5000_cosine` metric tag rather
 than hard-coding `ccc`.
 
 ### Metadata for reproducibility
@@ -191,8 +191,8 @@ the basis transparent and auditable.
 2. `plot_single_cell_gep()` continues to write the current per-cell-type true
    and reconstructed scGEP tables.
 3. The existing CCC workflow runs unchanged.
-4. A new HVG3000 cosine workflow runs in parallel:
-   - derive top 3000 HVGs from the test-set SCT reference dataset separately
+4. A new HVG5000 cosine workflow runs in parallel:
+   - derive top 5000 HVGs from the test-set SCT reference dataset separately
      for each cell type
    - intersect those HVGs with the genes available in both true and
      reconstructed per-cell-type matrices
@@ -224,9 +224,9 @@ add later.
 
 ## Edge cases
 
-### Fewer than 3000 available genes
+### Fewer than 5000 available genes
 
-If fewer than 3000 HVGs remain after intersecting the SCT-derived HVGs with the
+If fewer than 5000 HVGs remain after intersecting the SCT-derived HVGs with the
 available gene columns, use all remaining intersected genes instead of failing.
 
 ### No HVGs remain after intersection
@@ -263,7 +263,7 @@ Recommended implementation shape:
 
 Add regression tests that cover:
 
-1. new result directory and file naming for `hvg3000_cosine`
+1. new result directory and file naming for `hvg5000_cosine`
 2. cosine-matrix generation on a tiny toy example
 3. gallery generation for the new metric tag
 4. metadata output describing the HVG basis
@@ -274,9 +274,9 @@ Add regression tests that cover:
 This feature is complete when:
 
 1. test-set prediction still writes the existing CCC outputs
-2. a parallel folder `inter_sample_similarity_hvg3000_cosine` is created
+2. a parallel folder `inter_sample_similarity_hvg5000_cosine` is created
 3. each eligible cell type receives `true_vs_true`, `recon_vs_recon`, and
-   `true_vs_recon` cosine-similarity outputs on top 3000 SCT-derived HVGs
+   `true_vs_recon` cosine-similarity outputs on top 5000 SCT-derived HVGs
 4. the new folder includes CSVs, heatmaps, clustermaps, a browseable HTML
    gallery, and HVG metadata
 5. the saved outputs clearly record the gene basis used for each cell type so

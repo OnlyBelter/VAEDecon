@@ -1087,7 +1087,7 @@ def _infer_sct_cell_type_labels(obs_df: pd.DataFrame) -> pd.Series:
 def _load_top_hvg_genes_per_cell_type_from_sct_reference(
     sct_gep_file_path: str | Path,
     target_cell_types: List[str] | None = None,
-    n_top_genes: int = 3000,
+    n_top_genes: int = 5000,
 ) -> Dict[str, List[str]]:
     sct_gep = ReadH5AD(sct_gep_file_path)
     exp_df = sct_gep.get_df(convert_to_tpm=False)
@@ -1118,7 +1118,7 @@ def _write_hvg_similarity_metadata(
     aligned_hvg_genes: List[str],
 ) -> None:
     metadata = {
-        "metric": "hvg3000_cosine",
+        "metric": "hvg5000_cosine",
         "sct_reference_dataset_file_path": str(sct_gep_file_path),
         "cell_type": str(cell_type),
         "requested_n_top_hvgs": int(requested_n_top_hvgs),
@@ -1218,10 +1218,10 @@ def _save_selected_sample_hvg_cosine_similarity_outputs(
     similarity_result_dir: str | Path,
     threshold: float,
     figure_format: str,
-    requested_n_top_hvgs: int = 3000,
+    requested_n_top_hvgs: int = 5000,
 ) -> None:
     threshold_tag = _format_threshold_for_filename(threshold)
-    prefix = f"{cell_type}_hvg3000_cosine_true_prop_ge_{threshold_tag}"
+    prefix = f"{cell_type}_hvg5000_cosine_true_prop_ge_{threshold_tag}"
     aligned_hvg_genes = [
         gene for gene in hvg_genes
         if gene in y_true.index and gene in y_pred.index
@@ -1249,9 +1249,9 @@ def _save_selected_sample_hvg_cosine_similarity_outputs(
         _write_similarity_result_gallery(
             similarity_result_dir=similarity_result_dir,
             figure_format=figure_format,
-            metric_tag="hvg3000_cosine",
-            gallery_title="Inter-sample HVG3000 Cosine Similarity Gallery",
-            empty_message="No HVG3000 cosine outputs found.",
+            metric_tag="hvg5000_cosine",
+            gallery_title="Inter-sample HVG5000 Cosine Similarity Gallery",
+            empty_message="No HVG5000 cosine outputs found.",
         )
         return
 
@@ -1304,9 +1304,9 @@ def _save_selected_sample_hvg_cosine_similarity_outputs(
     _write_similarity_result_gallery(
         similarity_result_dir=similarity_result_dir,
         figure_format=figure_format,
-        metric_tag="hvg3000_cosine",
-        gallery_title="Inter-sample HVG3000 Cosine Similarity Gallery",
-        empty_message="No HVG3000 cosine outputs found.",
+        metric_tag="hvg5000_cosine",
+        gallery_title="Inter-sample HVG5000 Cosine Similarity Gallery",
+        empty_message="No HVG5000 cosine outputs found.",
     )
 
 
@@ -1767,7 +1767,7 @@ def plot_single_cell_gep(
     check_dir(Path(sc_gep_result_dir))
     similarity_result_dir = os.path.join(sc_gep_result_dir, "inter_sample_similarity_ccc")
     check_dir(Path(similarity_result_dir))
-    cosine_similarity_result_dir = os.path.join(sc_gep_result_dir, "inter_sample_similarity_hvg3000_cosine")
+    cosine_similarity_result_dir = os.path.join(sc_gep_result_dir, "inter_sample_similarity_hvg5000_cosine")
     check_dir(Path(cosine_similarity_result_dir))
     recon_sc_gep = pred_a["recon_x_all_types"].detach().cpu().numpy()
     sample_ids = test_set.get_sample_ids()
@@ -1780,7 +1780,7 @@ def plot_single_cell_gep(
         cell_type_to_hvg_genes = _load_top_hvg_genes_per_cell_type_from_sct_reference(
             sct_gep_file_path=sct_gep_file_path,
             target_cell_types=cell_types,
-            n_top_genes=3000,
+            n_top_genes=5000,
         )
 
     metrics_all_cell_types: Dict[str, Dict[str, float]] = {}
@@ -1876,7 +1876,7 @@ def plot_single_cell_gep(
                 similarity_result_dir=cosine_similarity_result_dir,
                 threshold=filtered_min_true_cell_prop,
                 figure_format=figure_format,
-                requested_n_top_hvgs=3000,
+                requested_n_top_hvgs=5000,
             )
 
     def _plot_all_cell_types_figure(
