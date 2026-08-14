@@ -56,6 +56,54 @@ class ModelOutput(OrderedDict):
         return tuple(super().__getitem__(k) for k in self.keys())
 
 
+class MLPBlock(torch.nn.Module):
+    """Reusable dense block used by the new cell-proportion pathway."""
+
+    def __init__(
+        self,
+        in_dim: int | None,
+        out_dim: int,
+        dropout: float = 0.1,
+        *,
+        lazy: bool = False,
+    ):
+        super().__init__()
+        linear = torch.nn.LazyLinear(out_dim) if lazy else torch.nn.Linear(in_dim, out_dim)
+        self.net = torch.nn.Sequential(
+            linear,
+            torch.nn.LayerNorm(out_dim, eps=EPS),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout) if dropout > 0 else torch.nn.Identity(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class StackedMLPHead(torch.nn.Module):
+    """Multi-layer dense head built from `MLPBlock`s."""
+
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dims: Sequence[int],
+        out_dim: int,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        layers: list[torch.nn.Module] = []
+        current_dim = in_dim
+        for hidden_dim in hidden_dims:
+            layers.append(MLPBlock(current_dim, hidden_dim, dropout=dropout))
+            current_dim = hidden_dim
+        self.backbone = torch.nn.Sequential(*layers) if layers else torch.nn.Identity()
+        self.out = torch.nn.Linear(current_dim, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.backbone(x)
+        return self.out(x)
+
+
 class CPU_Unpickler(pickle.Unpickler):
     def find_class(self, module, name):
         if module == "torch.storage" and name == "_load_from_bytes":

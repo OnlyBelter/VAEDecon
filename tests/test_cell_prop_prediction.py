@@ -13,6 +13,10 @@ from vaedecon.models.base import (
     remove_cancer_cell_type,
 )
 from vaedecon.models.vae.vae_model import VAE
+from vaedecon.trainers.base_trainer import (
+    _apply_aux_loss_schedules,
+    _resolve_linear_schedule_value,
+)
 from vaedecon.workflow.workflow import evaluate_model
 
 
@@ -24,6 +28,8 @@ def _build_dummy_vae(
     activation_function: str = "softplus",
     cancer_cell_type_index: int | None = None,
     existence_shift_scale: float = 0.0,
+    cell_prop_loss_type: str = "mse",
+    cell_prop_loss_kl_weight: float = 0.5,
 ):
     class DummyVAE:
         pass
@@ -50,6 +56,8 @@ def _build_dummy_vae(
         predict_cell_prop=True,
         cell_prop_activation_function=activation_function,
         cell_type_existence_shift_scale=existence_shift_scale,
+        cell_prop_loss_type=cell_prop_loss_type,
+        cell_prop_loss_kl_weight=cell_prop_loss_kl_weight,
     )
     dummy.data_config = SimpleNamespace(training_sct_gep_cell_prop_threshold=0.1)
     dummy.cell_prop_activation_function = activation_function
@@ -299,6 +307,91 @@ def test_softmax_cell_prop_loss_supervises_all_cell_type_columns():
     assert torch.allclose(cell_prop_loss, expected_loss)
 
 
+def test_softmax_cell_prop_loss_supports_l1_kl():
+    dummy = _build_dummy_vae(
+        cell_prop_weight=1.0,
+        training=True,
+        activation_function="softmax",
+        cell_prop_loss_type="l1_kl",
+        cell_prop_loss_kl_weight=0.5,
+    )
+    pred_cell_prop = torch.tensor(
+        [[0.25, 0.35, 0.40], [0.10, 0.60, 0.30]],
+        dtype=torch.float32,
+    )
+    y = torch.tensor(
+        [[0.20, 0.50, 0.30], [0.30, 0.40, 0.30]],
+        dtype=torch.float32,
+    )
+
+    _, cell_prop_loss = VAE._cell_prop_dirichlet_loss(
+        dummy,
+        y=y,
+        dd_alpha=None,
+        pred_cell_prop=pred_cell_prop,
+        batch_size=pred_cell_prop.shape[0],
+        device=torch.device("cpu"),
+    )
+
+    pred_safe = pred_cell_prop.clamp_min(1e-8)
+    target_safe = y.clamp_min(1e-8)
+    pred_safe = pred_safe / pred_safe.sum(dim=-1, keepdim=True)
+    target_safe = target_safe / target_safe.sum(dim=-1, keepdim=True)
+    expected_loss = torch.abs(pred_safe - target_safe).sum(dim=-1)
+    expected_loss = expected_loss + 0.5 * (
+        target_safe * (torch.log(target_safe) - torch.log(pred_safe))
+    ).sum(dim=-1)
+
+    assert torch.allclose(cell_prop_loss, expected_loss)
+
+
+def test_shared_feature_mean_fusion_averages_projected_features():
+    dummy = SimpleNamespace(
+        cell_prop_feature_projectors=torch.nn.ModuleList(
+            [torch.nn.Identity(), torch.nn.Identity()]
+        ),
+        cell_prop_fusion_strategy="shared_feature_mean",
+        cell_prop_fusion_gate=None,
+    )
+    features = [
+        torch.tensor([[1.0, 3.0], [2.0, 4.0]], dtype=torch.float32),
+        torch.tensor([[5.0, 7.0], [6.0, 8.0]], dtype=torch.float32),
+    ]
+
+    fused_feature, gate_weights = VAE._fuse_cell_prop_features(dummy, features)
+
+    expected = torch.stack(features, dim=1).mean(dim=1)
+    assert gate_weights is None
+    assert torch.allclose(fused_feature, expected)
+
+
+def test_shared_feature_gated_fusion_uses_gate_weights():
+    class _ConstantGate(torch.nn.Module):
+        def forward(self, x):
+            return torch.tensor([[0.0, 1.0]], dtype=x.dtype, device=x.device).expand(x.shape[0], -1)
+
+    dummy = SimpleNamespace(
+        cell_prop_feature_projectors=torch.nn.ModuleList(
+            [torch.nn.Identity(), torch.nn.Identity()]
+        ),
+        cell_prop_fusion_strategy="shared_feature_gated",
+        cell_prop_fusion_gate=_ConstantGate(),
+    )
+    features = [
+        torch.tensor([[1.0, 3.0]], dtype=torch.float32),
+        torch.tensor([[5.0, 7.0]], dtype=torch.float32),
+    ]
+
+    fused_feature, gate_weights = VAE._fuse_cell_prop_features(dummy, features)
+
+    expected_gate_weights = torch.softmax(torch.tensor([[0.0, 1.0]], dtype=torch.float32), dim=-1)
+    expected = (
+        torch.stack(features, dim=1) * expected_gate_weights.unsqueeze(-1)
+    ).sum(dim=1)
+    assert torch.allclose(gate_weights, expected_gate_weights)
+    assert torch.allclose(fused_feature, expected)
+
+
 def test_apply_cell_type_existence_shift_uses_centered_soft_threshold():
     dummy = _build_dummy_vae(
         cell_prop_weight=0.0,
@@ -358,6 +451,48 @@ def test_loss_function_skips_cell_type_existence_supervision_during_inference():
         loss_terms.cell_type_existence,
         torch.tensor(0.0, dtype=torch.float32),
     )
+
+
+def test_resolve_linear_schedule_value_interpolates_between_epochs():
+    schedule = SimpleNamespace(
+        start_epoch=10,
+        end_epoch=20,
+        start_value=0.0,
+        end_value=1.0,
+    )
+
+    assert _resolve_linear_schedule_value(schedule, epoch=5) == 0.0
+    assert _resolve_linear_schedule_value(schedule, epoch=10) == 0.0
+    assert _resolve_linear_schedule_value(schedule, epoch=15) == 0.5
+    assert _resolve_linear_schedule_value(schedule, epoch=25) == 1.0
+
+
+def test_apply_aux_loss_schedules_updates_live_model_config():
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(
+            loss_coefficient=SimpleNamespace(
+                cell_type_sct_gep_weight=0.0,
+                hierarchical_code_weight=0.0,
+                cell_type_existence_weight=0.0,
+            ),
+            cell_type_existence_shift_scale=0.0,
+        )
+    )
+    training_config = SimpleNamespace(
+        aux_loss_schedules={
+            "cell_type_sct_gep_weight": SimpleNamespace(
+                start_epoch=0, end_epoch=10, start_value=0.0, end_value=1.0
+            ),
+            "cell_type_existence_shift_scale": SimpleNamespace(
+                start_epoch=0, end_epoch=10, start_value=0.0, end_value=0.5
+            ),
+        }
+    )
+
+    _apply_aux_loss_schedules(model, training_config, epoch=5)
+
+    assert model.model_config.loss_coefficient.cell_type_sct_gep_weight == 0.5
+    assert model.model_config.cell_type_existence_shift_scale == 0.25
 
 
 class _DummyPredictionDataset(torch.utils.data.Dataset):

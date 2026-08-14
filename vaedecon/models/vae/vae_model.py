@@ -23,9 +23,13 @@ from ...models.base import (
     reparameterize_gaussian,
     dirichlet_mean,
     ModelOutput,
+    MLPBlock,
+    StackedMLPHead,
     BaseDecoder,
     BaseEncoder,
     EPS,
+    build_cell_prop_from_head_output,
+    get_cell_prop_head_output_dim,
     has_usable_labels,
     remove_cancer_cell_type,
     resolve_cancer_cell_type_index,
@@ -236,6 +240,66 @@ class VAE(BaseAE):
                 cell_types=self.cell_types,
                 cancer_cell_type_name=model_config.cancer_cell_type_name,
             )
+        self.cell_prop_fusion_strategy: Literal[
+            "legacy_output_average",
+            "shared_feature_mean",
+            "shared_feature_gated",
+        ] = getattr(model_config, "cell_prop_fusion_strategy", "legacy_output_average")
+        if self.cell_prop_fusion_strategy not in (
+            "legacy_output_average",
+            "shared_feature_mean",
+            "shared_feature_gated",
+        ):
+            raise ValueError(
+                f"Unsupported cell_prop_fusion_strategy: {self.cell_prop_fusion_strategy}"
+            )
+        self.cell_prop_fusion_dim = int(getattr(model_config, "cell_prop_fusion_dim", 256))
+        self.cell_prop_head_dropout_rate = float(
+            getattr(model_config, "cell_prop_head_dropout_rate", 0.1)
+        )
+        self.cell_prop_head_hidden_dims = list(
+            getattr(model_config, "cell_prop_head_hidden_dims", [512, 256])
+        )
+        self._use_shared_cell_prop_head = (
+            bool(model_config.predict_cell_prop)
+            and self.cell_prop_fusion_strategy != "legacy_output_average"
+        )
+        self.cell_prop_feature_projectors = nn.ModuleList()
+        self.cell_prop_fusion_gate = None
+        self.cell_prop_head = None
+        if self._use_shared_cell_prop_head:
+            head_output_dim = get_cell_prop_head_output_dim(
+                n_cell_types=n_cell_types,
+                activation_function=self.cell_prop_activation_function,
+            )
+            self.cell_prop_feature_projectors = nn.ModuleList(
+                [
+                    MLPBlock(
+                        in_dim=None,
+                        out_dim=self.cell_prop_fusion_dim,
+                        dropout=self.cell_prop_head_dropout_rate,
+                        lazy=True,
+                    )
+                    for _ in range(self.n_encoders)
+                ]
+            )
+            if self.cell_prop_fusion_strategy == "shared_feature_gated" and self.n_encoders > 1:
+                gate_input_dim = self.cell_prop_fusion_dim * self.n_encoders
+                self.cell_prop_fusion_gate = nn.Sequential(
+                    nn.Linear(gate_input_dim, self.cell_prop_fusion_dim),
+                    nn.LayerNorm(self.cell_prop_fusion_dim, eps=EPS),
+                    nn.GELU(),
+                    nn.Dropout(self.cell_prop_head_dropout_rate)
+                    if self.cell_prop_head_dropout_rate > 0
+                    else nn.Identity(),
+                    nn.Linear(self.cell_prop_fusion_dim, self.n_encoders),
+                )
+            self.cell_prop_head = StackedMLPHead(
+                in_dim=self.cell_prop_fusion_dim,
+                hidden_dims=self.cell_prop_head_hidden_dims,
+                out_dim=head_output_dim,
+                dropout=self.cell_prop_head_dropout_rate,
+            )
 
         # ---------------------------------------------------------------------
         # --- Gene Weights Calculation ---
@@ -294,6 +358,58 @@ class VAE(BaseAE):
         except Exception as e:
             logger.warning("Failed to save low-mean/low-std gene counts: %s", e)
 
+    def _fuse_cell_prop_features(
+        self,
+        feature_list: List[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Fuse encoder-side cell-proportion features before the shared head."""
+        if not feature_list:
+            raise ValueError("feature_list must contain at least one encoder feature tensor.")
+
+        projected_features = [
+            projector(feature)
+            for projector, feature in zip(self.cell_prop_feature_projectors, feature_list, strict=False)
+        ]
+        if len(projected_features) == 1:
+            return projected_features[0], None
+
+        stacked = torch.stack(projected_features, dim=1)
+        if self.cell_prop_fusion_strategy == "shared_feature_gated":
+            if self.cell_prop_fusion_gate is None:
+                raise ValueError("shared_feature_gated requires cell_prop_fusion_gate to be initialized.")
+            gate_input = torch.cat(projected_features, dim=-1)
+            gate_logits = self.cell_prop_fusion_gate(gate_input)
+            gate_weights = torch.softmax(gate_logits, dim=-1)
+            fused_feature = (stacked * gate_weights.unsqueeze(-1)).sum(dim=1)
+            return fused_feature, gate_weights
+
+        return stacked.mean(dim=1), None
+
+    def _predict_cell_prop_from_features(
+        self,
+        feature_list: List[Optional[torch.Tensor]],
+        eps: float = EPS,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Predict cell proportions from one or more encoder features."""
+        if not self.model_config.predict_cell_prop:
+            return None, None
+
+        available_features = [feature for feature in feature_list if feature is not None]
+        if not available_features:
+            raise ValueError(
+                "cell_prop_fusion_strategy requires encoders to expose cell_prop_feature."
+            )
+
+        fused_feature, _ = self._fuse_cell_prop_features(available_features)
+        head_output = self.cell_prop_head(fused_feature)
+        return build_cell_prop_from_head_output(
+            head_output=head_output,
+            activation_function=self.cell_prop_activation_function,
+            n_cell_types=self.model_config.n_cell_types,
+            eps=eps,
+            cancer_cell_type_index=self.cancer_cell_type_index,
+        )
+
     # =========================================================================
     # Forward
     # =========================================================================
@@ -350,6 +466,7 @@ class VAE(BaseAE):
         mu_list, logvar_list = [], []
         mu_mean_list, logvar_mean_list = [], []
         prop_list, dd_alpha_list = [], []
+        cell_prop_feature_list = []
 
         for encoder in self.encoders:
             out = encoder(x=x_input, y=y)
@@ -358,6 +475,7 @@ class VAE(BaseAE):
             mu_mean_list.append(out.mu_mean)                # (B, L)
             logvar_mean_list.append(out.logvar_mean)        # (B, L)
             prop_list.append(out.cell_prop)                 # (B, C)
+            cell_prop_feature_list.append(getattr(out, "cell_prop_feature", None))
 
             if self.model_config.predict_cell_prop and out.dd_alpha is not None:
                 # Dirichlet distribution parameters for cell type proportions.
@@ -369,8 +487,6 @@ class VAE(BaseAE):
             log_var_types = logvar_list[0]
             mu_mean = mu_mean_list[0]
             logvar_mean = logvar_mean_list[0]
-            cell_prop = prop_list[0]
-            dd_alpha = dd_alpha_list[0] if dd_alpha_list else None
         else:
             # If multiple encoders exist, fuse at posterior level by default.
             mu_types, log_var_types, mu_mean, logvar_mean = self._fuse_encoder_posteriors(
@@ -381,9 +497,21 @@ class VAE(BaseAE):
                 strategy=self.fusion_strategy,
             )
 
-            # Proportions: simple linear opinion pool (average) as baseline.
-            cell_prop = torch.mean(torch.stack(prop_list, dim=0), dim=0)
-            dd_alpha = torch.mean(torch.stack(dd_alpha_list, dim=0), dim=0) if dd_alpha_list else None
+        if self.model_config.predict_cell_prop:
+            if self._use_shared_cell_prop_head:
+                cell_prop, dd_alpha = self._predict_cell_prop_from_features(
+                    feature_list=cell_prop_feature_list,
+                )
+            elif self.n_encoders == 1:
+                cell_prop = prop_list[0]
+                dd_alpha = dd_alpha_list[0] if dd_alpha_list else None
+            else:
+                # Proportions: simple linear opinion pool (average) as baseline.
+                cell_prop = torch.mean(torch.stack(prop_list, dim=0), dim=0)
+                dd_alpha = torch.mean(torch.stack(dd_alpha_list, dim=0), dim=0) if dd_alpha_list else None
+        else:
+            cell_prop = prop_list[0] if self.n_encoders == 1 else torch.mean(torch.stack(prop_list, dim=0), dim=0)
+            dd_alpha = None
 
         n_cell_types = mu_types.shape[2]
         existence_logits, _, mu_types = self._apply_cell_type_existence_shift(
@@ -950,6 +1078,33 @@ class VAE(BaseAE):
         # Expand back to batch dimension (B,) for consistency with existing code
         return kl.expand(B)
 
+    def _cell_prop_supervision_loss(
+        self,
+        supervised_pred: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute the supervised cell-proportion loss per sample."""
+        loss_type = getattr(self.model_config, "cell_prop_loss_type", "mse")
+        if loss_type == "mse":
+            return F.mse_loss(
+                supervised_pred,
+                target,
+                reduction="none",
+            ).sum(dim=-1)
+
+        if loss_type != "l1_kl":
+            raise ValueError(f"Unsupported cell_prop_loss_type: {loss_type}")
+
+        kl_weight = float(getattr(self.model_config, "cell_prop_loss_kl_weight", 0.5) or 0.0)
+        pred_safe = supervised_pred.clamp_min(EPS)
+        target_safe = target.clamp_min(EPS)
+        pred_safe = pred_safe / pred_safe.sum(dim=-1, keepdim=True).clamp_min(EPS)
+        target_safe = target_safe / target_safe.sum(dim=-1, keepdim=True).clamp_min(EPS)
+
+        l1 = torch.abs(pred_safe - target_safe).sum(dim=-1)
+        kl = (target_safe * (torch.log(target_safe) - torch.log(pred_safe))).sum(dim=-1)
+        return l1 + kl_weight * kl
+
     def _cell_prop_dirichlet_loss(
         self,
         y: Optional[torch.Tensor],
@@ -991,11 +1146,10 @@ class VAE(BaseAE):
                 target = None
 
             if supervised_pred is not None and target is not None:
-                cell_prop_loss = F.mse_loss(
-                    supervised_pred,
-                    target,
-                    reduction="none",
-                ).sum(dim=-1)
+                  cell_prop_loss = self._cell_prop_supervision_loss(
+                      supervised_pred=supervised_pred,
+                      target=target,
+                  )
 
         return kld_p, cell_prop_loss
 

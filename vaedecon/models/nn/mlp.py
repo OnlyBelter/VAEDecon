@@ -168,6 +168,7 @@ class EncoderMLP(BaseEncoder):
         output['logvar_mean'] = logvar_all_types.mean(dim=-1)  # (B, L)
         output['logvar_all_types'] = logvar_all_types
         output['mu_all_types'] = mu_all_types
+        output['cell_prop_feature'] = out
         output['cell_prop'] = cell_prop
         if cell_prop is not None:
             output['cell_type_existed'] = (cell_prop >= 0.01).float()

@@ -16,7 +16,15 @@ It contains:
 
 # from vaedecon.configs.base_config import BaseModelConfig, BaseTrainerConfig, BaseConfig
 from .base_model import BaseAE, BaseEncoder, BaseDecoder
-from .base_utils import reparameterize_gaussian, reparameterize_dirichlet, dirichlet_mean, ModelOutput, set_seed
+from .base_utils import (
+    reparameterize_gaussian,
+    reparameterize_dirichlet,
+    dirichlet_mean,
+    ModelOutput,
+    MLPBlock,
+    StackedMLPHead,
+    set_seed,
+)
 from .base_utils import (
     build_cell_prop_from_head_output,
     get_cell_prop_head_output_dim,
@@ -41,6 +49,8 @@ __all__ = [
     "dirichlet_mean",
     "build_cell_prop_from_head_output",
     "ModelOutput",
+    "MLPBlock",
+    "StackedMLPHead",
     "set_seed",
     "has_usable_labels",
     "get_cell_prop_head_output_dim",

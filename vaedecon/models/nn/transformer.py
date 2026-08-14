@@ -180,6 +180,7 @@ class GeneTransformerEncoder(BaseEncoder):
         output['logvar_mean'] = logvar_mean
         output['logvar_all_types'] = logvar_all_types
         output['mu_all_types'] = mu_all_types
+        output['cell_prop_feature'] = global_out if self.predict_cell_prop else type_out.mean(dim=1)
         output['cell_prop'] = cell_prop
         if cell_prop is not None:
             output['cell_type_existed'] = (cell_prop >= 0.01).float()

@@ -206,6 +206,7 @@ class EncoderHybrid(BaseEncoder):
         output['mu_mean'] = mu_mean
         output['logvar_mean'] = logvar_mean
         output['dd_alpha'] = dd_alpha_final
+        output['cell_prop_feature'] = final_embedding
 
         if cell_prop_final is not None:  # Ensure cell_prop_final is populated before accessing
             output_cell_prop = cell_prop_final

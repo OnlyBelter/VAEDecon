@@ -293,6 +293,7 @@ class EncoderSGNN(BaseEncoder):
         output['logvar_all_types'] = logvar_all_types
         output['mu_mean'] = mu_mean
         output['logvar_mean'] = logvar_mean
+        output['cell_prop_feature'] = cell_embedding
         output['cell_type_existed'] = (cell_prop >= 0.01).float()
 
         return output

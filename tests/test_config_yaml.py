@@ -239,3 +239,44 @@ def test_cell_type_existence_requires_predict_cell_prop():
                 }
             }
         )
+
+
+def test_cell_prop_fusion_and_loss_config_loads():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "predict_cell_prop": True,
+                "cell_prop_activation_function": "softmax",
+                "cell_prop_fusion_strategy": "shared_feature_gated",
+                "cell_prop_fusion_dim": 128,
+                "cell_prop_head_hidden_dims": [256, 128],
+                "cell_prop_head_dropout_rate": 0.2,
+                "cell_prop_loss_type": "l1_kl",
+                "cell_prop_loss_kl_weight": 0.7,
+            }
+        }
+    )
+    assert loaded.model.cell_prop_fusion_strategy == "shared_feature_gated"
+    assert loaded.model.cell_prop_fusion_dim == 128
+    assert loaded.model.cell_prop_head_hidden_dims == [256, 128]
+    assert loaded.model.cell_prop_loss_type == "l1_kl"
+    assert loaded.model.cell_prop_loss_kl_weight == 0.7
+
+
+def test_aux_loss_schedules_reject_unknown_target():
+    with pytest.raises(ValueError, match="aux_loss_schedules contains unsupported targets"):
+        VAEDeconConfig.from_dict(
+            {
+                "training": {
+                    "aux_loss_schedules": {
+                        "unknown_weight": {
+                            "type": "linear",
+                            "start_epoch": 0,
+                            "end_epoch": 10,
+                            "start_value": 0.0,
+                            "end_value": 1.0,
+                        }
+                    }
+                }
+            }
+        )

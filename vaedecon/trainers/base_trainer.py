@@ -34,6 +34,42 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_linear_schedule_value(schedule: Any, epoch: int) -> float:
+    """Return the scheduled scalar value for a given epoch."""
+    start_epoch = int(getattr(schedule, "start_epoch", 0))
+    end_epoch = int(getattr(schedule, "end_epoch", start_epoch))
+    start_value = float(getattr(schedule, "start_value", 0.0))
+    end_value = float(getattr(schedule, "end_value", start_value))
+    if epoch <= start_epoch:
+        return start_value
+    if epoch >= end_epoch:
+        return end_value
+    if end_epoch == start_epoch:
+        return end_value
+    progress = float(epoch - start_epoch) / float(end_epoch - start_epoch)
+    return start_value + progress * (end_value - start_value)
+
+
+def _apply_aux_loss_schedules(model: BaseAE, training_config: TrainingConfig, epoch: int) -> None:
+    """Apply configured epoch-based auxiliary schedules to the live model config."""
+    schedules = getattr(training_config, "aux_loss_schedules", None) or {}
+    if not schedules:
+        return
+
+    loss_coefficient = model.model_config.loss_coefficient
+    target_map = {
+        "cell_type_sct_gep_weight": loss_coefficient,
+        "hierarchical_code_weight": loss_coefficient,
+        "cell_type_existence_weight": loss_coefficient,
+        "cell_type_existence_shift_scale": model.model_config,
+    }
+    for target_name, schedule in schedules.items():
+        target_obj = target_map.get(target_name)
+        if target_obj is None:
+            continue
+        setattr(target_obj, target_name, _resolve_linear_schedule_value(schedule, epoch))
+
+
 def get_dataloader(
     dataset: BaseDataset,
     batch_size: int,
@@ -305,6 +341,13 @@ class PLTrainer(L.LightningModule):
 
         # self.log("w_gene_mean", float(lo.gene_mean_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
         # self.log("w_gene_std", float(lo.gene_std_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
+
+    def on_train_epoch_start(self) -> None:
+        _apply_aux_loss_schedules(
+            model=self.model,
+            training_config=self.training_config,
+            epoch=int(self.current_epoch),
+        )
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Performs a single validation step."""

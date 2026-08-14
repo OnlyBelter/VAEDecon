@@ -121,6 +121,22 @@ class TrainingSetSCTTargetConfig(BaseModel):
             )
         return self
 
+
+class ScalarScheduleConfig(BaseModel):
+    """Linear scalar schedule for training-time coefficient updates."""
+
+    type: Literal["linear"] = "linear"
+    start_epoch: int = Field(default=0, ge=0)
+    end_epoch: int = Field(default=0, ge=0)
+    start_value: float = 0.0
+    end_value: float = 0.0
+
+    @model_validator(mode="after")
+    def validate_epoch_order(self):
+        if self.end_epoch < self.start_epoch:
+            raise ValueError("end_epoch must be >= start_epoch")
+        return self
+
 # @dataclass
 class DataConfig(BaseConfig):
     """dataset configuration"""
@@ -448,6 +464,29 @@ class TrainingConfig(BaseTrainerConfig):
         ],
         description="Metric keys from model output to show in the progress bar/logging loop.",
     )
+    aux_loss_schedules: Dict[str, ScalarScheduleConfig] = Field(
+        default_factory=dict,
+        description=(
+            "Optional epoch-based linear schedules for selected auxiliary "
+            "loss weights and related scalar controls."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_aux_schedule_targets(self):
+        valid_targets = {
+            "cell_type_sct_gep_weight",
+            "hierarchical_code_weight",
+            "cell_type_existence_weight",
+            "cell_type_existence_shift_scale",
+        }
+        invalid_targets = set(self.aux_loss_schedules.keys()) - valid_targets
+        if invalid_targets:
+            raise ValueError(
+                "aux_loss_schedules contains unsupported targets: "
+                + ", ".join(sorted(invalid_targets))
+            )
+        return self
 
 
 class ModelConfig(BaseModelConfig):
@@ -688,6 +727,42 @@ class ModelConfig(BaseModelConfig):
             "mu shift when predict_cell_prop=True."
         ),
     )
+    cell_prop_fusion_strategy: Literal[
+        "legacy_output_average",
+        "shared_feature_mean",
+        "shared_feature_gated",
+    ] = Field(
+        default="legacy_output_average",
+        description=(
+            "How to combine encoder information for cell-proportion prediction. "
+            "'legacy_output_average' keeps the existing post-activation averaging behavior; "
+            "'shared_feature_mean' and 'shared_feature_gated' use one shared head on fused encoder features."
+        ),
+    )
+    cell_prop_fusion_dim: int = Field(
+        default=256,
+        gt=0,
+        description="Shared fusion dimension used by the feature-based cell-proportion branch.",
+    )
+    cell_prop_head_hidden_dims: List[int] = Field(
+        default_factory=lambda: [512, 256],
+        description="Hidden dimensions for the shared cell-proportion head.",
+    )
+    cell_prop_head_dropout_rate: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="Dropout rate used in the shared cell-proportion head and feature projectors.",
+    )
+    cell_prop_loss_type: Literal["mse", "l1_kl"] = Field(
+        default="mse",
+        description="Supervised cell-proportion loss family.",
+    )
+    cell_prop_loss_kl_weight: float = Field(
+        default=0.5,
+        ge=0.0,
+        description="KL multiplier used when cell_prop_loss_type='l1_kl'.",
+    )
 
 
     # Mask fraction for input dropout
@@ -756,7 +831,7 @@ class ModelConfig(BaseModelConfig):
 
         return v
 
-    @field_validator('encoder_hidden_dims', 'decoder_hidden_dims')
+    @field_validator('encoder_hidden_dims', 'decoder_hidden_dims', 'cell_prop_head_hidden_dims')
     @classmethod
     def validate_hidden_dims(cls, v: List[int]) -> List[int]:
         """Ensure all hidden dimensions are positive."""
