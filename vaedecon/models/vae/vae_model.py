@@ -1084,12 +1084,35 @@ class VAE(BaseAE):
         target: torch.Tensor,
     ) -> torch.Tensor:
         """Compute the supervised cell-proportion loss per sample."""
+        weighting_mode = getattr(self.model_config, "cell_prop_loss_weighting", "none")
+        if weighting_mode == "none":
+            weight = torch.ones_like(target)
+        elif weighting_mode == "low_prop_inverse":
+            low_prop_epsilon = float(
+                getattr(self.model_config, "cell_prop_loss_low_prop_epsilon", 0.01)
+            )
+            weight_min, weight_max = getattr(
+                self.model_config,
+                "cell_prop_loss_weight_clamp",
+                (1.0, 5.0),
+            )
+            weight = 1.0 / (target + low_prop_epsilon)
+            weight = weight.clamp(min=weight_min, max=weight_max)
+            weight = weight / weight.mean(dim=-1, keepdim=True).clamp_min(EPS)
+        else:
+            raise ValueError(
+                f"Unsupported cell_prop_loss_weighting: {weighting_mode}"
+            )
+
         loss_type = getattr(self.model_config, "cell_prop_loss_type", "mse")
         if loss_type == "mse":
-            return F.mse_loss(
-                supervised_pred,
-                target,
-                reduction="none",
+            return (
+                F.mse_loss(
+                    supervised_pred,
+                    target,
+                    reduction="none",
+                )
+                * weight
             ).sum(dim=-1)
 
         if loss_type != "l1_kl":
@@ -1101,8 +1124,12 @@ class VAE(BaseAE):
         pred_safe = pred_safe / pred_safe.sum(dim=-1, keepdim=True).clamp_min(EPS)
         target_safe = target_safe / target_safe.sum(dim=-1, keepdim=True).clamp_min(EPS)
 
-        l1 = torch.abs(pred_safe - target_safe).sum(dim=-1)
-        kl = (target_safe * (torch.log(target_safe) - torch.log(pred_safe))).sum(dim=-1)
+        l1 = (weight * torch.abs(pred_safe - target_safe)).sum(dim=-1)
+        kl = (
+            weight
+            * target_safe
+            * (torch.log(target_safe) - torch.log(pred_safe))
+        ).sum(dim=-1)
         return l1 + kl_weight * kl
 
     def _cell_prop_dirichlet_loss(
@@ -1138,7 +1165,10 @@ class VAE(BaseAE):
             elif self.cell_prop_activation_function == "sigmoid" and pred_cell_prop is not None:
                 supervised_pred = remove_cancer_cell_type(pred_cell_prop, self.cancer_cell_type_index)
                 target = remove_cancer_cell_type(y, self.cancer_cell_type_index)
-            elif self.cell_prop_activation_function == "softmax" and pred_cell_prop is not None:
+            elif (
+                self.cell_prop_activation_function in {"softmax", "sigmoid_all_norm"}
+                and pred_cell_prop is not None
+            ):
                 supervised_pred = pred_cell_prop
                 target = y
             else:
@@ -1146,10 +1176,10 @@ class VAE(BaseAE):
                 target = None
 
             if supervised_pred is not None and target is not None:
-                  cell_prop_loss = self._cell_prop_supervision_loss(
-                      supervised_pred=supervised_pred,
-                      target=target,
-                  )
+                cell_prop_loss = self._cell_prop_supervision_loss(
+                    supervised_pred=supervised_pred,
+                    target=target,
+                )
 
         return kld_p, cell_prop_loss
 

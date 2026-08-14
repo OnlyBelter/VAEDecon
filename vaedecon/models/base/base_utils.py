@@ -266,13 +266,18 @@ def build_cell_prop_from_head_output(
         dd_alpha = F.softplus(head_output) + eps
         return dirichlet_mean(dd_alpha), dd_alpha
 
-    if activation_function == "softmax":
+    if activation_function in {"softmax", "sigmoid_all_norm"}:
         if head_output.shape[-1] != n_cell_types:
             raise ValueError(
-                f"Softmax cell proportion head output must have size {n_cell_types}, "
+                f"{activation_function} cell proportion head output must have size {n_cell_types}, "
                 f"got {head_output.shape[-1]}."
             )
-        return F.softmax(head_output, dim=-1), None
+        if activation_function == "softmax":
+            return F.softmax(head_output, dim=-1), None
+
+        sigmoid_prop = torch.sigmoid(head_output)
+        sigmoid_prop = sigmoid_prop / sigmoid_prop.sum(dim=-1, keepdim=True).clamp_min(eps)
+        return sigmoid_prop, None
 
     if activation_function != "sigmoid":
         raise ValueError(f"Unsupported cell proportion activation: {activation_function}")

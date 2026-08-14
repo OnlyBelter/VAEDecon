@@ -706,12 +706,14 @@ class ModelConfig(BaseModelConfig):
         default=False,
         description="Whether to predict cell type proportions"
     )
-    cell_prop_activation_function: Literal["softplus", "sigmoid", "softmax"] = Field(
+    cell_prop_activation_function: Literal["softplus", "sigmoid", "softmax", "sigmoid_all_norm"] = Field(
         default="softplus",
         description="Activation used for the cell proportion head. "
                     "'softplus' keeps the Dirichlet workflow; 'sigmoid' predicts only non-cancer "
                     "cell types and assigns the cancer proportion as the remainder; "
-                    "'softmax' predicts all cell types directly and normalizes them to sum to 1."
+                    "'softmax' predicts all cell types directly and normalizes them to sum to 1; "
+                    "'sigmoid_all_norm' applies sigmoid to all cell-type logits and then normalizes "
+                    "them to sum to 1."
     )
     cancer_cell_type_name: Optional[str] = Field(
         default=None,
@@ -762,6 +764,22 @@ class ModelConfig(BaseModelConfig):
         default=0.5,
         ge=0.0,
         description="KL multiplier used when cell_prop_loss_type='l1_kl'.",
+    )
+    cell_prop_loss_weighting: Literal["none", "low_prop_inverse"] = Field(
+        default="none",
+        description=(
+            "Optional weighting mode for supervised cell-proportion loss. "
+            "'low_prop_inverse' increases the relative contribution of low true proportions."
+        ),
+    )
+    cell_prop_loss_low_prop_epsilon: float = Field(
+        default=0.01,
+        gt=0.0,
+        description="Stabilizer used in low-proportion-aware loss weighting.",
+    )
+    cell_prop_loss_weight_clamp: Tuple[float, float] = Field(
+        default=(1.0, 5.0),
+        description="Clamp range for low-proportion-aware loss weights.",
     )
 
 
@@ -857,6 +875,17 @@ class ModelConfig(BaseModelConfig):
         """Ensure fusion dropout rates are in [0, 1]."""
         if any(rate < 0 or rate > 1 for rate in v):
             raise ValueError(f"Fusion dropout rates must be in [0, 1], got {v}")
+        return v
+
+    @field_validator('cell_prop_loss_weight_clamp')
+    @classmethod
+    def validate_cell_prop_loss_weight_clamp(cls, v: Tuple[float, float]) -> Tuple[float, float]:
+        """Ensure cell-proportion loss weight clamp bounds are valid."""
+        mn, mx = v
+        if mn <= 0 or mn > mx:
+            raise ValueError(
+                "cell_prop_loss_weight_clamp must satisfy 0 < min <= max"
+            )
         return v
 
     @field_validator('encoders')
@@ -968,15 +997,15 @@ class ModelConfig(BaseModelConfig):
                     "cell_prop_activation_function='sigmoid' because the sigmoid branch "
                     "does not define a Dirichlet posterior."
                 )
-        elif activation_function == "softmax":
+        elif activation_function in {"softmax", "sigmoid_all_norm"}:
             if not self.predict_cell_prop:
                 raise ValueError(
-                    "cell_prop_activation_function='softmax' requires predict_cell_prop=True."
+                    f"cell_prop_activation_function='{activation_function}' requires predict_cell_prop=True."
                 )
             if kld_p_weight > 0:
                 raise ValueError(
                     "loss_coefficient['kld_p'] must be 0 when "
-                    "cell_prop_activation_function='softmax' because the softmax branch "
+                    f"cell_prop_activation_function='{activation_function}' because this branch "
                     "does not define a Dirichlet posterior."
                 )
 

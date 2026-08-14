@@ -227,6 +227,55 @@ def test_softmax_cell_prop_does_not_require_cancer_cell_type_name():
     assert loaded.model.cell_prop_activation_function == "softmax"
 
 
+def test_sigmoid_all_norm_cell_prop_rejects_dirichlet_kld():
+    with pytest.raises(ValueError, match="loss_coefficient\\['kld_p'\\] must be 0"):
+        VAEDeconConfig.from_dict(
+            {
+                "model": {
+                    "predict_cell_prop": True,
+                    "cell_prop_activation_function": "sigmoid_all_norm",
+                    "loss_coefficient": {
+                        "kld_p": 0.1,
+                    },
+                }
+            }
+        )
+
+
+def test_sigmoid_all_norm_cell_prop_config_loads_without_cancer_cell_type_name():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "predict_cell_prop": True,
+                "cell_prop_activation_function": "sigmoid_all_norm",
+                "cell_prop_loss_type": "l1_kl",
+                "cell_prop_loss_kl_weight": 0.5,
+                "cell_prop_loss_weighting": "low_prop_inverse",
+                "cell_prop_loss_low_prop_epsilon": 0.02,
+                "cell_prop_loss_weight_clamp": [1.0, 4.0],
+                "loss_coefficient": {
+                    "kld_p": 0.0,
+                },
+            }
+        }
+    )
+    assert loaded.model.cell_prop_activation_function == "sigmoid_all_norm"
+    assert loaded.model.cell_prop_loss_weighting == "low_prop_inverse"
+    assert loaded.model.cell_prop_loss_low_prop_epsilon == 0.02
+    assert loaded.model.cell_prop_loss_weight_clamp == (1.0, 4.0)
+
+
+def test_cell_prop_loss_weight_clamp_requires_positive_ordered_bounds():
+    with pytest.raises(ValueError, match="cell_prop_loss_weight_clamp must satisfy 0 < min <= max"):
+        VAEDeconConfig.from_dict(
+            {
+                "model": {
+                    "cell_prop_loss_weight_clamp": [0.0, 4.0],
+                }
+            }
+        )
+
+
 def test_cell_type_existence_requires_predict_cell_prop():
     with pytest.raises(ValueError, match="cell_type_existence_weight"):
         VAEDeconConfig.from_dict(
