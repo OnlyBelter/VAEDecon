@@ -110,12 +110,17 @@ model:
   fusion_dropout_rate: [0.1, 0]
   encoders: ['EncoderResMLP']
   decoders: ['DecoderResMLP']
-  predict_cell_prop: false  # Set to true to learn Dirichlet concentration parameters and output their mean as cell fractions.
-  cell_prop_activation_function: 'softplus'  # 'softplus' keeps the Dirichlet workflow; 'sigmoid' predicts non-cancer cell types and fills cancer as the remainder; 'softmax' predicts all cell types directly.
+  predict_cell_prop: false  # Set to true to enable cell-proportion prediction and supervision.
+  cell_prop_activation_function: 'softplus'  # 'softplus' keeps the Dirichlet workflow; 'sigmoid' predicts non-cancer cell types and fills cancer as the remainder; 'softmax' predicts all cell types directly; 'sigmoid_all_norm' applies sigmoid to all cell types and then normalizes them to sum to 1.
   cancer_cell_type_name: 'Cancer Cells'  # Required when cell_prop_activation_function is 'sigmoid'.
   cell_type_existence_shift_scale: 0.0  # Set > 0 to shift each cell-type mu by a centered soft existence score derived from predicted cell proportions.
+  cell_prop_loss_type: 'mse'  # 'mse' or 'l1_kl' for supervised cell-proportion loss.
+  cell_prop_loss_kl_weight: 0.5  # KL multiplier used when cell_prop_loss_type is 'l1_kl'.
+  cell_prop_loss_weighting: 'none'  # 'none' or 'low_prop_inverse' to emphasize low true proportions.
+  cell_prop_loss_low_prop_epsilon: 0.01  # Stabilizer for low-proportion-aware weighting.
+  cell_prop_loss_weight_clamp: [1.0, 5.0]  # Clamp range for low-proportion-aware loss weights.
   loss_coefficient:
-    kld_p: 0.0  # Only valid for 'softplus'; keep 0 for 'sigmoid' and 'softmax'.
+    kld_p: 0.0  # Only valid for 'softplus'; keep 0 for 'sigmoid', 'softmax', and 'sigmoid_all_norm'.
     cell_prop: 0  # Set > 0 to supervise known training fractions for any enabled cell-proportion activation mode.
     beta: 2
     gamma: 0.005
