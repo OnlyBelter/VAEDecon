@@ -12,8 +12,13 @@ import torch
 
 from ..data import GEPDataset, find_sct_gep_of_bulk_sample
 from ..utility import check_dir
-from ..workflow import load_trained_model, evaluate_model
-from ..configs.default_config import VAEDeconConfig, GEPDatasetConfig, TestSetConfig
+from ..workflow import (
+    load_trained_model,
+    evaluate_model,
+    _apply_training_config_override,
+    _resolve_trained_checkpoint_path,
+)
+from ..configs.default_config import VAEDeconConfig, GEPDatasetConfig, TestSetConfig, TrainingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -400,6 +405,16 @@ class VAEDeconPredictor:
             )
         logger.info(f"Loading model from: {self.model_dir}")
         training_config_override = getattr(self.config, "training", None)
+        model_file_path = _resolve_trained_checkpoint_path(
+            model_dir=self.model_dir,
+            training_config=_apply_training_config_override(
+                saved_training_config=TrainingConfig.from_json_file(
+                    Path(str(self.model_dir)) / "training_config.json"
+                ),
+                training_config_override=training_config_override,
+            ),
+        )
+        logger.info("Loading checkpoint: %s", model_file_path)
         self.model = load_trained_model(
             model_dir=self.model_dir,
             training_config_override=training_config_override,

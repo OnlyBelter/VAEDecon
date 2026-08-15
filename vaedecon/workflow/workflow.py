@@ -324,7 +324,6 @@ def load_trained_model(
     pl = PLTrainer(model=model, training_config=training_config)
     pl.load_state_dict(state_dict, strict=True)
 
-    print('Model loaded from checkpoint:', model_file_path)
     pl.eval()
     pl.freeze()
     return pl.model
