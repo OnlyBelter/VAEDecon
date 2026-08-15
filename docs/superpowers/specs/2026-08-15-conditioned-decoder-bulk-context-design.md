@@ -154,8 +154,9 @@ $$
 q_c^{(s)} = \mathrm{Proj}\left([e_c \,\|\, h_{\text{bulk}}^{(s)}]\right)
 $$
 
-where `Proj` denotes the decoder-side conditioning MLP and `[\,\cdot\,\|\,\cdot\,]`
-denotes concatenation.
+where `Proj` denotes the decoder-side conditioning MLP, and
+`[e_c || h_bulk^(s)]` means concatenating the cell-type embedding and the
+bulk-context vector along the feature dimension.
 
 Then, for decoder block $\ell$, let the block input be
 $h_{\ell-1}^{(s,c)}$, with:
