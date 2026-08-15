@@ -399,7 +399,11 @@ class VAEDeconPredictor:
                 f"No .ckpt checkpoint was found under model_dir: {self.model_dir}"
             )
         logger.info(f"Loading model from: {self.model_dir}")
-        self.model = load_trained_model(model_dir=self.model_dir)
+        training_config_override = getattr(self.config, "training", None)
+        self.model = load_trained_model(
+            model_dir=self.model_dir,
+            training_config_override=training_config_override,
+        )
         self.model = self.model.to(self.device)
         self.model.eval()
 

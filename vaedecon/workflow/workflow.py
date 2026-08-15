@@ -238,7 +238,23 @@ def _resolve_trained_checkpoint_path(
     )
 
 
-def load_trained_model(model_dir: str) -> Union[AutoModel, BaseAE]:
+def _apply_training_config_override(
+    saved_training_config: TrainingConfig,
+    training_config_override: TrainingConfig | None,
+) -> TrainingConfig:
+    """Apply runtime overrides that should affect checkpoint selection."""
+    if training_config_override is None:
+        return saved_training_config
+    override_selection = getattr(training_config_override, "saved_model_selection", None)
+    if override_selection:
+        saved_training_config.saved_model_selection = override_selection
+    return saved_training_config
+
+
+def load_trained_model(
+    model_dir: str,
+    training_config_override: TrainingConfig | None = None,
+) -> Union[AutoModel, BaseAE]:
     """Loads the trained model from the specified directory."""
     checkpoint_files = list(Path(model_dir).glob("*.ckpt"))
     if not checkpoint_files:
@@ -251,6 +267,10 @@ def load_trained_model(model_dir: str) -> Union[AutoModel, BaseAE]:
     training_config_path = os.path.join(model_dir, "training_config.json")
     model_config = ModelConfig.from_json_file(model_config_path)
     training_config = TrainingConfig.from_json_file(training_config_path)
+    training_config = _apply_training_config_override(
+        saved_training_config=training_config,
+        training_config_override=training_config_override,
+    )
     data_config = DataConfig.from_json_file(data_config_path)
     model_file_path = _resolve_trained_checkpoint_path(
         model_dir=model_dir,

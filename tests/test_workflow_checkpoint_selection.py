@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from vaedecon.configs import TrainingConfig
+from vaedecon.workflow.workflow import _apply_training_config_override
 from vaedecon.workflow.workflow import _resolve_trained_checkpoint_path
 
 
@@ -17,6 +18,18 @@ def test_resolve_trained_checkpoint_path_returns_single_checkpoint(tmp_path: Pat
     )
 
     assert resolved == only_ckpt
+
+
+def test_apply_training_config_override_updates_saved_model_selection():
+    saved = TrainingConfig(saved_model_selection="best")
+    override = TrainingConfig(saved_model_selection="last")
+
+    resolved = _apply_training_config_override(
+        saved_training_config=saved,
+        training_config_override=override,
+    )
+
+    assert resolved.saved_model_selection == "last"
 
 
 def test_resolve_trained_checkpoint_path_uses_last_checkpoint_selection(tmp_path: Path):
