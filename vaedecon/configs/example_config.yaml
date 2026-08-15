@@ -50,6 +50,7 @@ training:
   batch_size: 1024
   num_epochs: 1000
   n_early_stopping_patience: 15
+  saved_model_selection: 'best'  # 'best' loads the lowest validation-loss checkpoint; 'last' loads the final completed epoch checkpoint.
   devices: 1
   device: 'auto'
   train_dataloader_num_workers: 0

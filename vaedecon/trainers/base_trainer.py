@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -600,6 +601,20 @@ class BaseTrainerL:
         except Exception as e:
             logger.warning(f"Failed to copy metrics.csv: {e}")
 
+    def _save_checkpoint_selection_metadata(
+        self,
+        *,
+        best_model_path: Optional[str],
+        last_model_path: str,
+    ) -> None:
+        metadata = {
+            "best_model_path": Path(best_model_path).name if best_model_path else "",
+            "last_model_path": Path(last_model_path).name,
+        }
+        metadata_path = Path(self.model_dir) / "checkpoint_paths.json"
+        with metadata_path.open("w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+
     def train(self) -> str:
         set_seed(self.training_config.seed)
         os.makedirs(self.model_dir, exist_ok=True)
@@ -649,6 +664,13 @@ class BaseTrainerL:
             model=self.pl_model,
             train_dataloaders=self.train_loader,
             val_dataloaders=self.eval_loader,
+        )
+
+        last_model_path = str(Path(self.model_dir) / "last_model.ckpt")
+        trainer.save_checkpoint(last_model_path)
+        self._save_checkpoint_selection_metadata(
+            best_model_path=getattr(ckpt, "best_model_path", ""),
+            last_model_path=last_model_path,
         )
 
         self.pl_model.model.save(

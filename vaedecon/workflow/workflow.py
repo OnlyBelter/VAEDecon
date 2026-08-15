@@ -1,3 +1,4 @@
+import json
 import os
 import numpy as np
 import pandas as pd
@@ -177,74 +178,128 @@ def save_metadata(dataset: GEPDataset, model_config: ModelConfig) -> None:
     dataset.save_cell_types(Path(model_config.cell_type_fp))
 
 
+def _resolve_trained_checkpoint_path(
+    model_dir: str | Path,
+    training_config: TrainingConfig,
+) -> Path:
+    """Resolve which checkpoint file should be loaded for inference."""
+    model_dir = Path(model_dir)
+    checkpoint_files = sorted(model_dir.glob("*.ckpt"))
+    if not checkpoint_files:
+        raise FileNotFoundError(f"No .ckpt checkpoint was found under model_dir: {model_dir}")
+    if len(checkpoint_files) == 1:
+        return checkpoint_files[0]
+
+    selection = getattr(training_config, "saved_model_selection", "best")
+    metadata_path = model_dir / "checkpoint_paths.json"
+    metadata: Dict[str, Any] = {}
+    if metadata_path.exists():
+        with metadata_path.open("r", encoding="utf-8") as f:
+            metadata = json.load(f)
+
+    if selection == "last":
+        last_model_path = model_dir / "last_model.ckpt"
+        metadata_last = metadata.get("last_model_path", "")
+        if metadata_last:
+            candidate = Path(metadata_last)
+            if not candidate.is_absolute():
+                candidate = model_dir / candidate
+            if candidate.exists():
+                return candidate
+        if last_model_path.exists():
+            return last_model_path
+        raise FileNotFoundError(
+            f"training.saved_model_selection='last' but last checkpoint was not found: {last_model_path}"
+        )
+
+    best_model_path = metadata.get("best_model_path", "")
+    if best_model_path:
+        best_candidate = Path(best_model_path)
+        if not best_candidate.is_absolute():
+            best_candidate = model_dir / best_candidate
+        if best_candidate.exists():
+            return best_candidate
+
+    best_candidates = sorted(model_dir.glob("best_model_epoch=*.ckpt"))
+    if len(best_candidates) == 1:
+        return best_candidates[0]
+
+    raise FileNotFoundError(
+        "Could not resolve the requested best checkpoint under "
+        f"{model_dir}. Found checkpoints: {[p.name for p in checkpoint_files]}"
+    )
+
+
 def load_trained_model(model_dir: str) -> Union[AutoModel, BaseAE]:
     """Loads the trained model from the specified directory."""
-    try:
-        # find the model file in the directory by .ckpt ending
-        model_file = [f for f in os.listdir(model_dir) if f.endswith('.ckpt')]
-        model_file_path = os.path.join(model_dir, model_file[0])
-        model_config_path = os.path.join(model_dir, "model_config.json")
-        data_config_path = os.path.join(model_dir, "data_config.json")
-        training_config_path = os.path.join(model_dir, "training_config.json")
-        model_config = ModelConfig.from_json_file(model_config_path)
-        training_config = TrainingConfig.from_json_file(training_config_path)
-        data_config = DataConfig.from_json_file(data_config_path)
-
-        base_dir = Path(model_dir)
-        if getattr(model_config, "input_gene_list_fp", None) is None or not Path(model_config.input_gene_list_fp).exists():
-            candidate = base_dir / "input_gene_list.txt"
-            if candidate.exists():
-                model_config.input_gene_list_fp = candidate
-        if getattr(model_config, "cell_type_fp", None) is None or not Path(model_config.cell_type_fp).exists():
-            candidate = base_dir / "cell_type_list.txt"
-            if candidate.exists():
-                model_config.cell_type_fp = candidate
-        if getattr(model_config, "gene_mean_std_fp", None) is not None and not Path(model_config.gene_mean_std_fp).exists():
-            candidate = base_dir / Path(model_config.gene_mean_std_fp).name
-            if candidate.exists():
-                model_config.gene_mean_std_fp = candidate
-        if getattr(data_config, "ppi_file_path", None) is not None and not Path(data_config.ppi_file_path).exists():
-            candidate = base_dir / Path(data_config.ppi_file_path).name
-            if candidate.exists():
-                data_config.ppi_file_path = candidate
-        if getattr(data_config, "pathway_file_path", None):
-            fixed_paths = []
-            for p in data_config.pathway_file_path:
-                pth = Path(p)
-                if pth.exists():
-                    fixed_paths.append(pth)
-                    continue
-                candidate = base_dir / pth.name
-                fixed_paths.append(candidate if candidate.exists() else pth)
-            data_config.pathway_file_path = fixed_paths
-
-        model = create_model(model_config=model_config,
-                             data_config=data_config,
-                             encoder_cls_name_list=model_config.encoders,
-                             decoder_cls=model_config.decoders,
-                             device="cpu")
-        checkpoint = torch.load(model_file_path, map_location="cpu")
-        state_dict = checkpoint.get("state_dict", checkpoint)
-
-        if any(k.startswith("model._orig_mod.") for k in state_dict.keys()):
-            fixed = {}
-            for k, v in state_dict.items():
-                while k.startswith("model._orig_mod."):
-                    k = "model." + k[len("model._orig_mod."):]
-                fixed[k] = v
-            state_dict = fixed
-
-        pl = PLTrainer(model=model, training_config=training_config)
-        pl.load_state_dict(state_dict, strict=True)
-
-        print('Model loaded from checkpoint:', model_file_path)
-        pl.eval()
-        pl.freeze()
-        return pl.model
-    except FileNotFoundError:
+    checkpoint_files = list(Path(model_dir).glob("*.ckpt"))
+    if not checkpoint_files:
         # if no .ckpt file found, load the model from the folder
         trained_model = AutoModel.load_from_folder(model_dir)
         return trained_model
+
+    model_config_path = os.path.join(model_dir, "model_config.json")
+    data_config_path = os.path.join(model_dir, "data_config.json")
+    training_config_path = os.path.join(model_dir, "training_config.json")
+    model_config = ModelConfig.from_json_file(model_config_path)
+    training_config = TrainingConfig.from_json_file(training_config_path)
+    data_config = DataConfig.from_json_file(data_config_path)
+    model_file_path = _resolve_trained_checkpoint_path(
+        model_dir=model_dir,
+        training_config=training_config,
+    )
+
+    base_dir = Path(model_dir)
+    if getattr(model_config, "input_gene_list_fp", None) is None or not Path(model_config.input_gene_list_fp).exists():
+        candidate = base_dir / "input_gene_list.txt"
+        if candidate.exists():
+            model_config.input_gene_list_fp = candidate
+    if getattr(model_config, "cell_type_fp", None) is None or not Path(model_config.cell_type_fp).exists():
+        candidate = base_dir / "cell_type_list.txt"
+        if candidate.exists():
+            model_config.cell_type_fp = candidate
+    if getattr(model_config, "gene_mean_std_fp", None) is not None and not Path(model_config.gene_mean_std_fp).exists():
+        candidate = base_dir / Path(model_config.gene_mean_std_fp).name
+        if candidate.exists():
+            model_config.gene_mean_std_fp = candidate
+    if getattr(data_config, "ppi_file_path", None) is not None and not Path(data_config.ppi_file_path).exists():
+        candidate = base_dir / Path(data_config.ppi_file_path).name
+        if candidate.exists():
+            data_config.ppi_file_path = candidate
+    if getattr(data_config, "pathway_file_path", None):
+        fixed_paths = []
+        for p in data_config.pathway_file_path:
+            pth = Path(p)
+            if pth.exists():
+                fixed_paths.append(pth)
+                continue
+            candidate = base_dir / pth.name
+            fixed_paths.append(candidate if candidate.exists() else pth)
+        data_config.pathway_file_path = fixed_paths
+
+    model = create_model(model_config=model_config,
+                         data_config=data_config,
+                         encoder_cls_name_list=model_config.encoders,
+                         decoder_cls=model_config.decoders,
+                         device="cpu")
+    checkpoint = torch.load(model_file_path, map_location="cpu")
+    state_dict = checkpoint.get("state_dict", checkpoint)
+
+    if any(k.startswith("model._orig_mod.") for k in state_dict.keys()):
+        fixed = {}
+        for k, v in state_dict.items():
+            while k.startswith("model._orig_mod."):
+                k = "model." + k[len("model._orig_mod."):]
+            fixed[k] = v
+        state_dict = fixed
+
+    pl = PLTrainer(model=model, training_config=training_config)
+    pl.load_state_dict(state_dict, strict=True)
+
+    print('Model loaded from checkpoint:', model_file_path)
+    pl.eval()
+    pl.freeze()
+    return pl.model
 
 
 def evaluate_model(

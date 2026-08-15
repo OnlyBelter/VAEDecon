@@ -285,6 +285,22 @@ def test_debug_overfit_training_config_loads():
     assert loaded.training.debug_overfit.num_epochs_override == 10000
 
 
+def test_training_saved_model_selection_config_loads():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "training": {
+                "saved_model_selection": "last",
+            }
+        }
+    )
+    assert loaded.training.saved_model_selection == "last"
+
+
+def test_training_saved_model_selection_defaults_to_best():
+    loaded = VAEDeconConfig.from_dict({})
+    assert loaded.training.saved_model_selection == "best"
+
+
 def test_cell_prop_loss_weight_clamp_requires_positive_ordered_bounds():
     with pytest.raises(ValueError, match="cell_prop_loss_weight_clamp must satisfy 0 < min <= max"):
         VAEDeconConfig.from_dict(

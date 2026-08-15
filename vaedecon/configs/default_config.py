@@ -477,6 +477,14 @@ class TrainingConfig(BaseTrainerConfig):
 
     # Early stopping
     n_early_stopping_patience: int = 15
+    saved_model_selection: Literal["best", "last"] = Field(
+        default="best",
+        description=(
+            "Which checkpoint prediction and inference should load by default "
+            "after training: the best monitored checkpoint or the last "
+            "completed epoch checkpoint."
+        ),
+    )
 
     # Device settings
     devices: int = 1
