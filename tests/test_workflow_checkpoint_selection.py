@@ -32,6 +32,17 @@ def test_resolve_trained_checkpoint_path_uses_last_checkpoint_selection(tmp_path
     assert resolved == last_ckpt
 
 
+def test_resolve_trained_checkpoint_path_rejects_best_only_checkpoint_for_last_selection(tmp_path: Path):
+    best_ckpt = tmp_path / "best_model_epoch=33.ckpt"
+    best_ckpt.write_bytes(b"best")
+
+    with pytest.raises(FileNotFoundError, match="saved_model_selection='last'"):
+        _resolve_trained_checkpoint_path(
+            model_dir=tmp_path,
+            training_config=TrainingConfig(saved_model_selection="last"),
+        )
+
+
 def test_resolve_trained_checkpoint_path_uses_metadata_for_best_checkpoint(tmp_path: Path):
     best_ckpt = tmp_path / "best_model_epoch=7.ckpt"
     best_ckpt.write_bytes(b"best")

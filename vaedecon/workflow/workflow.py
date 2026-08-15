@@ -185,12 +185,20 @@ def _resolve_trained_checkpoint_path(
     """Resolve which checkpoint file should be loaded for inference."""
     model_dir = Path(model_dir)
     checkpoint_files = sorted(model_dir.glob("*.ckpt"))
+    selection = getattr(training_config, "saved_model_selection", "best")
     if not checkpoint_files:
         raise FileNotFoundError(f"No .ckpt checkpoint was found under model_dir: {model_dir}")
     if len(checkpoint_files) == 1:
-        return checkpoint_files[0]
+        only_ckpt = checkpoint_files[0]
+        if selection == "last" and only_ckpt.name != "last_model.ckpt":
+            raise FileNotFoundError(
+                "training.saved_model_selection='last' but only one checkpoint was found "
+                f"and it is not last_model.ckpt: {only_ckpt}. This usually means the "
+                "model directory was created before last-checkpoint saving was added, "
+                "or training was skipped because an older checkpoint already existed."
+            )
+        return only_ckpt
 
-    selection = getattr(training_config, "saved_model_selection", "best")
     metadata_path = model_dir / "checkpoint_paths.json"
     metadata: Dict[str, Any] = {}
     if metadata_path.exists():
