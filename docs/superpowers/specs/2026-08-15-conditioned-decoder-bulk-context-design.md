@@ -147,13 +147,52 @@ The decoder will learn:
 1. a cell-type embedding table
 2. a conditioning MLP that maps `[e_c || h_bulk^(s)]` to FiLM parameters
 
-For each decoder block hidden state `h`, FiLM applies:
+First, the decoder forms one conditioning vector per flattened
+sample-cell-type pair:
 
 $$
-\mathrm{FiLM}(h) = (1 + \gamma) \odot h + \beta
+q_c^{(s)} = \mathrm{Proj}\left([e_c \,\|\, h_{\text{bulk}}^{(s)}]\right)
 $$
 
-where `gamma` and `beta` are learned functions of the conditioning vector.
+where `Proj` denotes the decoder-side conditioning MLP and `[\,\cdot\,\|\,\cdot\,]`
+denotes concatenation.
+
+Then, for decoder block $\ell$, let the block input be
+$h_{\ell-1}^{(s,c)}$, with:
+
+$$
+h_0^{(s,c)} = z_c^{(s)}
+$$
+
+The block first computes its usual pre-activation hidden state:
+
+$$
+\tilde{h}_{\ell}^{(s,c)} =
+\mathrm{LayerNorm}\left(W_{\ell} h_{\ell-1}^{(s,c)} + b_{\ell}\right)
+$$
+
+The FiLM parameters are produced from the conditioning vector:
+
+$$
+[\gamma_{\ell}^{(s,c)}, \beta_{\ell}^{(s,c)}] = g_{\ell}\left(q_c^{(s)}\right)
+$$
+
+FiLM then applies:
+
+$$
+\mathrm{FiLM}\left(\tilde{h}_{\ell}^{(s,c)}\right)
+=
+\left(1 + \gamma_{\ell}^{(s,c)}\right) \odot
+\tilde{h}_{\ell}^{(s,c)}
++ \beta_{\ell}^{(s,c)}
+$$
+
+The block output then continues through the block nonlinearity and dropout.
+
+Here, `h` is **not** literally the same tensor as `z`. `z_c^(s)` is the input
+to the first decoder block, while `h` denotes an internal decoder hidden state.
+So, in the first block, `z` is the starting input and `h` is the transformed
+hidden activation after the block's linear and normalization steps.
 
 Using `(1 + gamma)` instead of `gamma` directly keeps the initialization closer
 to an identity modulation.
