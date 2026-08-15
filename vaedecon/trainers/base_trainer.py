@@ -547,6 +547,9 @@ class BaseTrainerL:
         self.n_early_stopping_patience = n_early_stopping_patience
         self.debug_model = debug_model
         self.model_dir = result_dir
+        self.debug_overfit_config = getattr(self.training_config, "debug_overfit", None)
+        self.train_dataset_obj = train_dataset
+        self.eval_dataset_obj = eval_dataset
 
         self.train_loader = self._build_loader(train_dataset, is_train=True)
         self.eval_loader = self._build_loader(eval_dataset, is_train=False) if eval_dataset is not None else None
@@ -600,6 +603,16 @@ class BaseTrainerL:
     def train(self) -> str:
         set_seed(self.training_config.seed)
         os.makedirs(self.model_dir, exist_ok=True)
+        debug_cfg = self.debug_overfit_config
+        effective_max_epochs = self.training_config.num_epochs
+        effective_patience = self.n_early_stopping_patience
+        disable_early_stopping = False
+        if debug_cfg is not None and getattr(debug_cfg, "enabled", False):
+            effective_max_epochs = int(getattr(debug_cfg, "num_epochs_override", effective_max_epochs))
+            effective_patience = int(
+                getattr(debug_cfg, "n_early_stopping_patience_override", effective_patience)
+            )
+            disable_early_stopping = bool(getattr(debug_cfg, "disable_early_stopping", False))
 
         ckpt = ModelCheckpoint(
             dirpath=self.model_dir,
@@ -610,18 +623,23 @@ class BaseTrainerL:
         )
         early = EarlyStopping(
             monitor=self.monitor_metric,
-            patience=self.n_early_stopping_patience,
+            patience=effective_patience,
             mode="min",
             min_delta=0.001,
         )
         lr_monitor = LearningRateMonitor(logging_interval="epoch")
         csv_logger = CSVLogger(save_dir=self.model_dir, name="training_logs")
+        callbacks = [ckpt, lr_monitor]
+        if disable_early_stopping:
+            logger.info("Debug overfit mode: EarlyStopping callback disabled.")
+        else:
+            callbacks.append(early)
 
         trainer = L.Trainer(
-            max_epochs=self.training_config.num_epochs,
+            max_epochs=effective_max_epochs,
             accelerator="auto",
             devices=self.training_config.devices,
-            callbacks=[ckpt, lr_monitor, early],
+            callbacks=callbacks,
             logger=csv_logger,
             precision="16-mixed" if self.training_config.amp else 32,
             gradient_clip_val=getattr(self.training_config, 'gradient_clip_val', 1.0),
@@ -640,9 +658,76 @@ class BaseTrainerL:
         )
 
         self._copy_metrics_file(csv_logger)
+        self._save_debug_overfit_artifacts()
 
         logger.info(f"Training done. Model saved to: {self.model_dir}")
         return self.model_dir
+
+    def _get_dataset_sample_ids(self, dataset_obj) -> list[str]:
+        """Extract sample IDs from a dataset or Subset when available."""
+        if dataset_obj is None:
+            return []
+        if hasattr(dataset_obj, "dataset") and hasattr(dataset_obj, "indices"):
+            base_dataset = dataset_obj.dataset
+            base_sample_ids = (
+                base_dataset.get_sample_ids() if hasattr(base_dataset, "get_sample_ids") else []
+            )
+            return [str(base_sample_ids[idx]) for idx in dataset_obj.indices if idx < len(base_sample_ids)]
+        if hasattr(dataset_obj, "get_sample_ids"):
+            return [str(sample_id) for sample_id in dataset_obj.get_sample_ids()]
+        return []
+
+    def _save_debug_overfit_artifacts(self) -> None:
+        """Save post-train predictions on the debug overfit subset for inspection."""
+        debug_cfg = self.debug_overfit_config
+        if debug_cfg is None or not getattr(debug_cfg, "enabled", False):
+            return
+        # The full workflow can also run normal post-training prediction on
+        # generated debug test sets. Keep this lightweight trainer artifact only
+        # when explicitly requested.
+        if not getattr(debug_cfg, "save_post_train_predictions", True):
+            return
+
+        target_dataset = self.eval_dataset_obj if self.eval_dataset_obj is not None else self.train_dataset_obj
+        if target_dataset is None:
+            return
+
+        export_loader = self._build_loader(target_dataset, is_train=False)
+        sample_ids = self._get_dataset_sample_ids(target_dataset)
+        pred_cell_prop_batches = []
+        recon_x_conv_batches = []
+        recon_x_all_types_batches = []
+        label_batches = []
+
+        self.pl_model.eval()
+        device = self.pl_model.device
+        with torch.no_grad():
+            for batch in export_loader:
+                moved = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+                output = self.pl_model(moved)
+                if getattr(output, "pred_cell_prop", None) is not None:
+                    pred_cell_prop_batches.append(output.pred_cell_prop.detach().cpu())
+                if getattr(output, "recon_x_conv", None) is not None:
+                    recon_x_conv_batches.append(output.recon_x_conv.detach().cpu())
+                if getattr(output, "recon_x_all_types", None) is not None:
+                    recon_x_all_types_batches.append(output.recon_x_all_types.detach().cpu())
+                labels = batch.get("labels")
+                if torch.is_tensor(labels) and labels.numel() > 0:
+                    label_batches.append(labels.detach().cpu())
+
+        artifact = {
+            "sample_ids": sample_ids,
+            "pred_cell_prop": torch.cat(pred_cell_prop_batches, dim=0) if pred_cell_prop_batches else None,
+            "recon_x_conv": torch.cat(recon_x_conv_batches, dim=0) if recon_x_conv_batches else None,
+            "recon_x_all_types": (
+                torch.cat(recon_x_all_types_batches, dim=0) if recon_x_all_types_batches else None
+            ),
+            "labels": torch.cat(label_batches, dim=0) if label_batches else None,
+        }
+
+        artifact_path = Path(self.model_dir) / "debug_overfit_predictions.pt"
+        torch.save(artifact, artifact_path)
+        logger.info("Saved debug overfit prediction artifact to: %s", artifact_path)
 
     def predict(self) -> Dict[str, torch.Tensor]:
         if self.eval_loader is None:

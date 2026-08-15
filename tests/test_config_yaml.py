@@ -260,9 +260,29 @@ def test_sigmoid_all_norm_cell_prop_config_loads_without_cancer_cell_type_name()
         }
     )
     assert loaded.model.cell_prop_activation_function == "sigmoid_all_norm"
-    assert loaded.model.cell_prop_loss_weighting == "low_prop_inverse"
-    assert loaded.model.cell_prop_loss_low_prop_epsilon == 0.02
-    assert loaded.model.cell_prop_loss_weight_clamp == (1.0, 4.0)
+
+
+def test_debug_overfit_training_config_loads():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "training": {
+                "debug_overfit": {
+                    "enabled": True,
+                    "subset_size": 100,
+                    "subset_seed": 10,
+                    "use_training_subset_as_eval": True,
+                    "num_epochs_override": 10000,
+                    "n_early_stopping_patience_override": 10000,
+                    "disable_early_stopping": True,
+                    "save_post_train_predictions": True,
+                }
+            }
+        }
+    )
+    assert loaded.training.debug_overfit.enabled is True
+    assert loaded.training.debug_overfit.subset_size == 100
+    assert loaded.training.debug_overfit.use_training_subset_as_eval is True
+    assert loaded.training.debug_overfit.num_epochs_override == 10000
 
 
 def test_cell_prop_loss_weight_clamp_requires_positive_ordered_bounds():

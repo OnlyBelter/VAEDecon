@@ -6,11 +6,11 @@ import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List
 
 import pandas as pd
 import torch
-from torch.utils.data import random_split
+from torch.utils.data import Subset, random_split
 from ..data import GEPDataset
 from ..models.nn import EncoderMLP, DecoderMLP
 # from ..models.vae import VAEConfig
@@ -18,8 +18,16 @@ from ..trainers import BaseTrainerL
 from ..utility import set_output_dir, log_message, set_fig_style
 from ..utility import load_or_compute_gene_mean_std, load_lightning_metrics, compute_gene_mean_std_from_pooled_sc_h5ad
 from ..utility import compute_training_sct_cross_sample_gene_var
+from ..utility import create_h5ad_dataset
+from ..utility.read_file import ReadH5AD
 from .workflow import create_model, train_model, save_metadata
-from ..configs.default_config import VAEDeconConfig, TrainingConfig, ModelConfig, GEPDatasetConfig
+from ..configs.default_config import (
+    VAEDeconConfig,
+    TrainingConfig,
+    ModelConfig,
+    GEPDatasetConfig,
+    TestSetConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,13 +116,14 @@ class VAEDeconTrainer:
         """Load, preprocess, and split the training data"""
         logger.info("Loading and preparing data...")
 
-        # validate split ratios
-        total_split = self.config.training.train_split + self.config.training.val_split
-        if not abs(total_split - 1.0) < 1e-6:
-            raise ValueError(
-                f"train_split ({self.config.training.train_split}) + "
-                f"val_split ({self.config.training.val_split}) must sum to 1.0, got {total_split:.4f}."
-            )
+        debug_overfit_cfg = self.config.training.debug_overfit
+        if not debug_overfit_cfg.enabled:
+            total_split = self.config.training.train_split + self.config.training.val_split
+            if not abs(total_split - 1.0) < 1e-6:
+                raise ValueError(
+                    f"train_split ({self.config.training.train_split}) + "
+                    f"val_split ({self.config.training.val_split}) must sum to 1.0, got {total_split:.4f}."
+                )
 
         self._processed_training_set_dir = Path(self.config.data.data_dir) / (
             f'processed_training_sets_{self.config.training.naming_postfix}'
@@ -126,13 +135,20 @@ class VAEDeconTrainer:
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
 
-        # Split train/val sets
-        train_set, val_set = random_split(
-            dataset,
-            [self.config.training.train_split, self.config.training.val_split]
-        )
+        if debug_overfit_cfg.enabled:
+            train_set, val_set = self._build_debug_overfit_subsets(dataset)
+            logger.info(
+                "Debug overfit mode enabled: train subset size=%s, eval subset size=%s",
+                len(train_set),
+                len(val_set) if val_set is not None else 0,
+            )
+        else:
+            train_set, val_set = random_split(
+                dataset,
+                [self.config.training.train_split, self.config.training.val_split]
+            )
 
-        logger.info(f"Train set: {len(train_set)}, Val set: {len(val_set)}")
+            logger.info(f"Train set: {len(train_set)}, Val set: {len(val_set)}")
 
         # Update input_dim, gene_mean_std_fp, and build ModelConfig once
         # Build and cache ModelConfig here; _create_model reuses it
@@ -152,6 +168,216 @@ class VAEDeconTrainer:
             self.config.model.training_sct_cross_sample_gene_var_fp = cross_var_fp
 
         return dataset, train_set, val_set
+
+    def _build_debug_overfit_subsets(
+        self,
+        dataset: GEPDataset,
+    ) -> Tuple[Subset, Optional[Subset]]:
+        """Build reproducible debug overfit train/eval subsets from one dataset."""
+        debug_cfg = self.config.training.debug_overfit
+        n_samples = len(dataset)
+        subset_size = int(debug_cfg.subset_size)
+        if subset_size > n_samples:
+            raise ValueError(
+                f"debug_overfit.subset_size ({subset_size}) exceeds dataset size ({n_samples})."
+            )
+
+        generator = torch.Generator().manual_seed(int(debug_cfg.subset_seed))
+        selected_indices = torch.randperm(n_samples, generator=generator)[:subset_size].tolist()
+        selected_indices = sorted(int(idx) for idx in selected_indices)
+
+        train_subset = Subset(dataset, selected_indices)
+        eval_subset = train_subset if debug_cfg.use_training_subset_as_eval else None
+        self._save_debug_overfit_subset_manifest(dataset, selected_indices)
+        return train_subset, eval_subset
+
+    def _save_debug_overfit_subset_manifest(
+        self,
+        dataset: GEPDataset,
+        selected_indices: list[int],
+    ) -> Path:
+        """Save selected debug subset row indices and sample IDs for reproducibility."""
+        sample_ids = dataset.get_sample_ids() if hasattr(dataset, "get_sample_ids") else []
+        rows = []
+        for idx in selected_indices:
+            sample_id = sample_ids[idx] if idx < len(sample_ids) else str(idx)
+            rows.append(
+                {
+                    "debug_subset_row_index": int(idx),
+                    "sample_id": str(sample_id),
+                }
+            )
+
+        out_fp = Path(self.model_dir) / "debug_overfit_subset.csv"
+        pd.DataFrame(rows).to_csv(out_fp, index=False)
+        logger.info("Saved debug overfit subset manifest to: %s", out_fp)
+        return out_fp
+
+    @staticmethod
+    def _filter_rows_by_index_order(df: pd.DataFrame, ordered_index: list[str]) -> pd.DataFrame:
+        """Return rows in the requested order while preserving duplicated indices."""
+        selected_frames: list[pd.DataFrame] = []
+        index_str = df.index.astype(str)
+        for sample_id in ordered_index:
+            current = df.loc[index_str == str(sample_id), :].copy()
+            if not current.empty:
+                selected_frames.append(current)
+        if not selected_frames:
+            return df.iloc[0:0, :].copy()
+        return pd.concat(selected_frames, axis=0)
+
+    def _build_debug_overfit_selected_samples_by_target_set(
+        self,
+        dataset: GEPDataset,
+        train_set,
+    ) -> Dict[str, List[tuple[str, str]]]:
+        """Group selected debug subset samples by source training target set."""
+        if not isinstance(train_set, Subset):
+            raise ValueError(
+                "debug overfit prediction workflow requires the training subset "
+                "to be a torch.utils.data.Subset."
+            )
+
+        sample_ids = dataset.get_sample_ids()
+        grouped: Dict[str, List[tuple[str, str]]] = {}
+        for idx in train_set.indices:
+            sample_id = str(sample_ids[int(idx)])
+            if "::" not in sample_id:
+                continue
+            namespace, raw_sample_id = sample_id.split("::", 1)
+            grouped.setdefault(namespace, []).append((sample_id, raw_sample_id))
+        return grouped
+
+    def _prepare_debug_overfit_test_sets(
+        self,
+        dataset: GEPDataset,
+        train_set,
+    ) -> None:
+        """Materialize selected debug training samples as normal test-set bundles."""
+        debug_cfg = self.config.training.debug_overfit
+        if not debug_cfg.enabled or not debug_cfg.use_training_subset_as_eval:
+            return
+        training_target_sets = dict(self.config.data.training_target_sets or {})
+        if not training_target_sets:
+            logger.warning(
+                "Debug overfit post-training prediction was requested, but "
+                "data.training_target_sets is empty. Skipping debug test-set generation."
+            )
+            return
+
+        grouped_samples = self._build_debug_overfit_selected_samples_by_target_set(
+            dataset=dataset,
+            train_set=train_set,
+        )
+        if not grouped_samples:
+            logger.warning(
+                "No namespaced debug subset samples could be mapped back to "
+                "training_target_sets. Skipping debug test-set generation."
+            )
+            return
+
+        debug_input_dir = Path(self.result_dir) / "debug_overfit_test_sets"
+        debug_input_dir.mkdir(parents=True, exist_ok=True)
+        debug_cell_prop = dataset.get_cell_prop()
+        generated_test_sets: Dict[str, TestSetConfig] = {}
+        manifest_rows: list[dict[str, str]] = []
+
+        for target_set_name, selected_pairs in grouped_samples.items():
+            target_cfg = training_target_sets.get(target_set_name)
+            if target_cfg is None:
+                logger.warning(
+                    "Debug subset samples referenced namespace '%s', but no "
+                    "matching training_target_sets entry was found.",
+                    target_set_name,
+                )
+                continue
+
+            namespaced_ids = [pair[0] for pair in selected_pairs]
+            raw_sample_ids = [pair[1] for pair in selected_pairs]
+            bulk_source_path = Path(target_cfg.training_set_file_path)
+            subset_bulk_fp = debug_input_dir / f"{target_set_name}_debug_overfit_subset.h5ad"
+            subset_mapping_fp = debug_input_dir / f"{target_set_name}_debug_overfit_sample2cell.csv"
+
+            if bulk_source_path.suffix.lower() == ".h5ad":
+                bulk_reader = ReadH5AD(bulk_source_path)
+                bulk_adata = bulk_reader.get_h5ad()
+                available_ids = [sample_id for sample_id in raw_sample_ids if sample_id in bulk_adata.obs_names]
+                if not available_ids:
+                    logger.warning(
+                        "No selected debug samples from %s were found in %s.",
+                        target_set_name,
+                        bulk_source_path,
+                    )
+                    continue
+                bulk_subset = bulk_adata[available_ids, :].copy()
+                bulk_subset.write_h5ad(filename=subset_bulk_fp, compression="gzip")
+            elif bulk_source_path.suffix.lower() == ".csv":
+                bulk_exp_df = pd.read_csv(bulk_source_path, index_col=0)
+                filtered_bulk_exp = self._filter_rows_by_index_order(
+                    bulk_exp_df,
+                    raw_sample_ids,
+                )
+                filtered_bulk_exp_fp = debug_input_dir / f"{target_set_name}_debug_overfit_subset_bulk.csv"
+                filtered_bulk_exp.to_csv(filtered_bulk_exp_fp, float_format="%.6f")
+
+                filtered_cell_prop = debug_cell_prop.loc[namespaced_ids, :].copy()
+                filtered_cell_prop.index = raw_sample_ids
+                filtered_cell_prop_fp = debug_input_dir / f"{target_set_name}_debug_overfit_subset_cell_prop.csv"
+                filtered_cell_prop.to_csv(filtered_cell_prop_fp, float_format="%.6f")
+
+                create_h5ad_dataset(
+                    simulated_bulk_exp_file_path=str(filtered_bulk_exp_fp),
+                    cell_fraction_file_path=str(filtered_cell_prop_fp),
+                    dataset_info=f"debug overfit subset from {target_set_name}",
+                    result_file_path=str(subset_bulk_fp),
+                    gep_type="bulk",
+                )
+            else:
+                logger.warning(
+                    "Unsupported training_set_file_path suffix for debug test-set generation: %s",
+                    bulk_source_path,
+                )
+                continue
+
+            sample2cell_df = pd.read_csv(target_cfg.training_set_sample2cell_id_file_path, index_col=0)
+            filtered_mapping_df = self._filter_rows_by_index_order(sample2cell_df, raw_sample_ids)
+            filtered_mapping_df.to_csv(subset_mapping_fp)
+
+            debug_test_name = f"Debug_overfit_{target_set_name}"
+            generated_test_sets[debug_test_name] = TestSetConfig(
+                test_set_file_path=subset_bulk_fp,
+                test_set_sample2cell_id_file_path=subset_mapping_fp,
+                sct_gep_file_path=target_cfg.training_sct_gep_file_path,
+            )
+            for namespaced_id, raw_sample_id in selected_pairs:
+                manifest_rows.append(
+                    {
+                        "debug_test_name": debug_test_name,
+                        "target_set_name": target_set_name,
+                        "sample_id": namespaced_id,
+                        "raw_sample_id": raw_sample_id,
+                        "subset_bulk_file_path": str(subset_bulk_fp),
+                        "subset_sample2cell_id_file_path": str(subset_mapping_fp),
+                    }
+                )
+
+        if not generated_test_sets:
+            logger.warning("No debug overfit test sets were generated.")
+            return
+
+        self.config.data.test_sets = generated_test_sets
+        first_test = next(iter(generated_test_sets.values()))
+        self.config.data.test_set_file_path = first_test.test_set_file_path
+        self.config.data.test_set_sample2cell_id_file_path = first_test.test_set_sample2cell_id_file_path
+        self.config.data.sct_gep_file_path = first_test.sct_gep_file_path
+
+        manifest_fp = debug_input_dir / "debug_overfit_test_sets_manifest.csv"
+        pd.DataFrame(manifest_rows).to_csv(manifest_fp, index=False)
+        logger.info(
+            "Prepared %s debug overfit test set(s) for normal post-training prediction. Manifest: %s",
+            len(generated_test_sets),
+            manifest_fp,
+        )
 
     def _compute_gene_statistics(
         self,
@@ -360,6 +586,7 @@ class VAEDeconTrainer:
             gene_std_weight_start=self.config.training.gene_std_weight_start,
             gene_mean_weight_start=self.config.training.gene_mean_weight_start,
             prog_bar_metrics=self.config.training.prog_bar_metrics,
+            debug_overfit=self.config.training.debug_overfit,
         )
 
     def _build_gepdataset_config(self) -> GEPDatasetConfig:
@@ -487,6 +714,11 @@ class VAEDeconTrainer:
             result_dir=self.model_dir
         )
 
+        self._prepare_debug_overfit_test_sets(
+            dataset=dataset,
+            train_set=train_set,
+        )
+
         logger.info(f"Training completed! Model saved to: {self.model_dir}")
 
         return self.config
@@ -611,6 +843,8 @@ def train_vaedecon(
         final_config_path = model_dir / "config_final.yaml"
         trained_config.to_yaml(final_config_path)
         logger.info(f"Saved final config to {final_config_path}")
+        trained_config.to_yaml(model_dir / "config.yaml")
+        logger.info(f"Refreshed final config at {model_dir / 'config.yaml'}")
     except Exception as e:
         logger.warning(f"Could not save final config: {e}")
 

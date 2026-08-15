@@ -137,6 +137,61 @@ class ScalarScheduleConfig(BaseModel):
             raise ValueError("end_epoch must be >= start_epoch")
         return self
 
+
+class DebugOverfitConfig(BaseModel):
+    """Config-gated overfit mode for memorization/debugging runs."""
+
+    enabled: bool = False
+    subset_size: int = Field(
+        default=100,
+        ge=1,
+        description=(
+            "Number of training samples to draw for the reproducible debug "
+            "subset when debug overfit mode is enabled."
+        ),
+    )
+    subset_seed: int = Field(
+        default=123,
+        description="Random seed used to sample the debug overfit subset.",
+    )
+    use_training_subset_as_eval: bool = Field(
+        default=True,
+        description=(
+            "Whether to reuse the selected debug training subset as the eval/"
+            "test subset for overfit verification."
+        ),
+    )
+    num_epochs_override: int = Field(
+        default=10000,
+        ge=1,
+        description=(
+            "Effective max epoch budget used only when debug overfit mode is "
+            "enabled."
+        ),
+    )
+    n_early_stopping_patience_override: int = Field(
+        default=10000,
+        ge=1,
+        description=(
+            "Effective early-stopping patience used only when debug overfit "
+            "mode is enabled."
+        ),
+    )
+    disable_early_stopping: bool = Field(
+        default=True,
+        description=(
+            "If true, skip adding the EarlyStopping callback during debug "
+            "overfit runs."
+        ),
+    )
+    save_post_train_predictions: bool = Field(
+        default=True,
+        description=(
+            "If true, save a post-train prediction artifact on the selected "
+            "debug subset."
+        ),
+    )
+
 # @dataclass
 class DataConfig(BaseConfig):
     """dataset configuration"""
@@ -435,6 +490,13 @@ class TrainingConfig(BaseTrainerConfig):
 
     # Debug
     debug_model: bool = False
+    debug_overfit: DebugOverfitConfig = Field(
+        default_factory=DebugOverfitConfig,
+        description=(
+            "Optional overfit-only debug mode that trains on a reproducible "
+            "small subset and can evaluate on that same subset."
+        ),
+    )
 
     # Data split
     train_split: float = 0.8

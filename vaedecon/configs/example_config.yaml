@@ -59,6 +59,15 @@ training:
   debug_model: false
   train_split: 0.8
   val_split: 0.2
+  debug_overfit:
+    enabled: false  # Set true to train on a reproducible tiny subset for explicit overfit debugging.
+    subset_size: 100
+    subset_seed: 123
+    use_training_subset_as_eval: true  # Materialize the selected training subset as debug test set(s) and run the normal prediction workflow on them after training.
+    num_epochs_override: 10000
+    n_early_stopping_patience_override: 10000
+    disable_early_stopping: true
+    save_post_train_predictions: true  # Also save a lightweight trainer-side prediction artifact for the selected debug subset.
   
   # ── Warmup settings (NEW) ──────────────────────────────────────
   warmup_epochs: 50              # epochs to ramp up from ~0 → peak lr

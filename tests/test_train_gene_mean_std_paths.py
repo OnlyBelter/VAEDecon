@@ -3,10 +3,23 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from vaedecon.configs import VAEDeconConfig, LossCoefficient
 from vaedecon.workflow.inference import VAEDeconPredictor
 from vaedecon.workflow.train import VAEDeconTrainer
+
+
+class _DummyDebugDataset:
+    def __init__(self, n_samples: int):
+        self._n_samples = n_samples
+        self._sample_ids = [f"sample_{i}" for i in range(n_samples)]
+
+    def __len__(self):
+        return self._n_samples
+
+    def get_sample_ids(self):
+        return self._sample_ids
 
 
 def test_trainer_prefers_dedicated_sct_reference_for_gene_mean_std(tmp_path: Path):
@@ -287,6 +300,148 @@ def test_inference_builds_dataset_config_with_sct_gene_mean_std_refs(tmp_path: P
     assert dataset_cfg.pooled_sc_cell_subtype_col == "cell_subtype"
     assert dataset_cfg.pooled_sc_sample_size == 1
     assert dataset_cfg.pooled_sc_seed == 42
+
+
+def test_trainer_builds_reproducible_debug_overfit_subset_and_manifest(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "gene_mean_std_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+            },
+            "training": {
+                "debug_overfit": {
+                    "enabled": True,
+                    "subset_size": 5,
+                    "subset_seed": 7,
+                    "use_training_subset_as_eval": True,
+                }
+            },
+            "model": {
+                "model_dir": tmp_path / "final_model",
+            },
+        }
+    )
+
+    trainer = VAEDeconTrainer(config=config)
+    dataset = _DummyDebugDataset(n_samples=20)
+
+    train_subset, eval_subset = trainer._build_debug_overfit_subsets(dataset)
+
+    expected_indices = torch.randperm(20, generator=torch.Generator().manual_seed(7))[:5].tolist()
+    expected_indices = sorted(int(idx) for idx in expected_indices)
+
+    assert train_subset.indices == expected_indices
+    assert eval_subset is train_subset
+
+    manifest_path = tmp_path / "final_model" / "debug_overfit_subset.csv"
+    manifest_df = pd.read_csv(manifest_path)
+    assert manifest_df["debug_subset_row_index"].tolist() == expected_indices
+    assert manifest_df["sample_id"].tolist() == [f"sample_{i}" for i in expected_indices]
+
+
+def test_trainer_rejects_debug_overfit_subset_larger_than_dataset(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "gene_mean_std_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+            },
+            "training": {
+                "debug_overfit": {
+                    "enabled": True,
+                    "subset_size": 100,
+                }
+            },
+            "model": {
+                "model_dir": tmp_path / "final_model",
+            },
+        }
+    )
+
+    trainer = VAEDeconTrainer(config=config)
+    dataset = _DummyDebugDataset(n_samples=10)
+
+    with pytest.raises(ValueError, match="debug_overfit.subset_size"):
+        trainer._build_debug_overfit_subsets(dataset)
+
+
+def test_debug_overfit_mode_can_seed_generated_test_set_config(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "gene_mean_std_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+                "training_target_sets": {
+                    "Train_set1": {
+                        "training_set_file_path": str(tmp_path / "train1.h5ad"),
+                        "training_set_sample2cell_id_file_path": str(tmp_path / "train1_sample2cell.csv"),
+                        "training_sct_gep_file_path": str(tmp_path / "train1_sct.h5ad"),
+                    }
+                },
+            },
+            "training": {
+                "debug_overfit": {
+                    "enabled": True,
+                    "subset_size": 2,
+                    "subset_seed": 1,
+                    "use_training_subset_as_eval": True,
+                }
+            },
+            "model": {
+                "model_dir": tmp_path / "final_model",
+            },
+        }
+    )
+    trainer = VAEDeconTrainer(config=config)
+
+    class _NamespacedDataset(_DummyDebugDataset):
+        def __init__(self):
+            super().__init__(n_samples=3)
+            self._sample_ids = [
+                "Train_set1::sample_a",
+                "Train_set1::sample_b",
+                "Train_set1::sample_c",
+            ]
+            self.cell_prop = pd.DataFrame(
+                [[0.7, 0.3], [0.4, 0.6], [0.2, 0.8]],
+                index=self._sample_ids,
+                columns=["A", "B"],
+            )
+
+        def get_cell_prop(self):
+            return self.cell_prop
+
+    dataset = _NamespacedDataset()
+    bulk_df = pd.DataFrame(
+        [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+        index=["sample_a", "sample_b", "sample_c"],
+        columns=["g1", "g2"],
+    )
+    from anndata import AnnData
+    AnnData(
+        X=bulk_df.values.astype("float32"),
+        obs=pd.DataFrame(dataset.cell_prop.values, index=bulk_df.index, columns=dataset.cell_prop.columns),
+        var=pd.DataFrame(index=bulk_df.columns),
+    ).write_h5ad(tmp_path / "train1.h5ad")
+    pd.DataFrame(
+        {"cell_type": ["A", "B"], "selected_cell_id": ["c1", "c2"]},
+        index=["sample_a", "sample_b"],
+    ).to_csv(tmp_path / "train1_sample2cell.csv")
+    AnnData(
+        X=bulk_df.values[:2].astype("float32"),
+        obs=pd.DataFrame(index=["c1", "c2"]),
+        var=pd.DataFrame(index=bulk_df.columns),
+    ).write_h5ad(tmp_path / "train1_sct.h5ad")
+
+    train_subset = torch.utils.data.Subset(dataset, [0, 1])
+    trainer._prepare_debug_overfit_test_sets(dataset=dataset, train_set=train_subset)
+
+    assert "Debug_overfit_Train_set1" in trainer.config.data.test_sets
+    debug_test = trainer.config.data.test_sets["Debug_overfit_Train_set1"]
+    assert Path(debug_test.test_set_file_path).exists()
+    assert Path(debug_test.test_set_sample2cell_id_file_path).exists()
+    assert str(debug_test.sct_gep_file_path).endswith("train1_sct.h5ad")
 
 
 def test_compute_training_sct_cross_sample_gene_var_roundtrip(tmp_path: Path, monkeypatch):
