@@ -1052,18 +1052,10 @@ class ModelConfig(BaseModelConfig):
                 f"Either set predict_cell_prop=True or set cell_type_existence_weight to 0."
             )
 
-        if self.cell_type_existence_shift_scale > 0 and not self.predict_cell_prop:
-            raise ValueError(
-                f"cell_type_existence_shift_scale = {self.cell_type_existence_shift_scale} > 0 "
-                f"but predict_cell_prop=False. "
-                f"Either set predict_cell_prop=True or set cell_type_existence_shift_scale to 0."
-            )
+        if not self.predict_cell_prop:
+            return self
 
         if activation_function == "sigmoid":
-            if not self.predict_cell_prop:
-                raise ValueError(
-                    "cell_prop_activation_function='sigmoid' requires predict_cell_prop=True."
-                )
             if not self.cancer_cell_type_name or not self.cancer_cell_type_name.strip():
                 raise ValueError(
                     "cancer_cell_type_name must be set when "
@@ -1076,10 +1068,6 @@ class ModelConfig(BaseModelConfig):
                     "does not define a Dirichlet posterior."
                 )
         elif activation_function in {"softmax", "sigmoid_all_norm"}:
-            if not self.predict_cell_prop:
-                raise ValueError(
-                    f"cell_prop_activation_function='{activation_function}' requires predict_cell_prop=True."
-                )
             if kld_p_weight > 0:
                 raise ValueError(
                     "loss_coefficient['kld_p'] must be 0 when "
@@ -1087,12 +1075,12 @@ class ModelConfig(BaseModelConfig):
                     "does not define a Dirichlet posterior."
                 )
 
-        if self.predict_cell_prop and cell_prop_weight == 0 and kld_p_weight == 0:
+        if cell_prop_weight == 0 and kld_p_weight == 0:
             import warnings
             warnings.warn(
-                "predict_cell_prop=True but both loss_coefficient['cell_prop']=0 "
-                "and loss_coefficient['kld_p']=0. "
-                "The prediction head will not receive direct supervision or Dirichlet regularization during training."
+                "Both loss_coefficient['cell_prop']=0 and loss_coefficient['kld_p']=0. "
+                "If predict_cell_prop=True, the prediction head will not receive direct supervision "
+                "or Dirichlet regularization during training."
             )
 
         return self

@@ -332,6 +332,44 @@ def test_cell_prop_fusion_and_loss_config_loads():
     assert loaded.model.cell_prop_loss_kl_weight == 0.7
 
 
+def test_predict_cell_prop_false_allows_activation_for_oracle_mixing():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "predict_cell_prop": False,
+                "cell_prop_activation_function": "sigmoid_all_norm",
+                "cell_type_existence_shift_scale": 0.0,
+                "loss_coefficient": {
+                    "kld_p": 0.0,
+                    "cell_prop": 0.0,
+                    "cell_type_existence_weight": 0.0,
+                },
+            }
+        }
+    )
+    assert loaded.model.predict_cell_prop is False
+    assert loaded.model.cell_prop_activation_function == "sigmoid_all_norm"
+
+
+def test_predict_cell_prop_false_allows_existence_shift_for_oracle_mixing():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "predict_cell_prop": False,
+                "cell_prop_activation_function": "sigmoid_all_norm",
+                "cell_type_existence_shift_scale": 0.25,
+                "loss_coefficient": {
+                    "kld_p": 0.0,
+                    "cell_prop": 0.0,
+                    "cell_type_existence_weight": 0.0,
+                },
+            }
+        }
+    )
+    assert loaded.model.predict_cell_prop is False
+    assert loaded.model.cell_type_existence_shift_scale == 0.25
+
+
 def test_conditioned_decoder_config_loads():
     loaded = VAEDeconConfig.from_dict(
         {

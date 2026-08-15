@@ -115,6 +115,74 @@ def test_has_usable_labels_handles_empty_tensor():
     assert has_usable_labels(torch.tensor([[0.7, 0.3]], dtype=torch.float32))
 
 
+def test_resolve_effective_cell_prop_uses_ground_truth_when_prediction_disabled():
+    dummy = _build_dummy_vae(cell_prop_weight=0.0, kld_p_weight=0.0)
+    dummy.model_config.predict_cell_prop = False
+
+    labels = torch.tensor([[0.7, 0.3], [0.2, 0.8]], dtype=torch.float32)
+    predicted = torch.tensor([[0.1, 0.9], [0.6, 0.4]], dtype=torch.float32)
+
+    resolved = VAE._resolve_effective_cell_prop(
+        dummy,
+        labels=labels,
+        predicted_cell_prop=predicted,
+    )
+
+    assert torch.equal(resolved, labels)
+
+
+def test_resolve_effective_cell_prop_requires_labels_when_prediction_disabled():
+    dummy = _build_dummy_vae(cell_prop_weight=0.0, kld_p_weight=0.0)
+    dummy.model_config.predict_cell_prop = False
+
+    with pytest.raises(ValueError, match="requires ground-truth cell-fraction labels"):
+        VAE._resolve_effective_cell_prop(
+            dummy,
+            labels=torch.empty(0, dtype=torch.float32),
+            predicted_cell_prop=None,
+        )
+
+
+def test_resolve_effective_cell_prop_uses_prediction_when_enabled():
+    dummy = _build_dummy_vae(cell_prop_weight=1.0, kld_p_weight=0.0)
+
+    labels = torch.tensor([[0.7, 0.3], [0.2, 0.8]], dtype=torch.float32)
+    predicted = torch.tensor([[0.1, 0.9], [0.6, 0.4]], dtype=torch.float32)
+
+    resolved = VAE._resolve_effective_cell_prop(
+        dummy,
+        labels=labels,
+        predicted_cell_prop=predicted,
+    )
+
+    assert torch.equal(resolved, predicted)
+
+
+def test_apply_cell_type_existence_shift_uses_ground_truth_props_when_prediction_disabled():
+    dummy = _build_dummy_vae(
+        cell_prop_weight=0.0,
+        kld_p_weight=0.0,
+        training=False,
+        activation_function="sigmoid_all_norm",
+        existence_shift_scale=0.2,
+    )
+    dummy.model_config.predict_cell_prop = False
+    mu_types = torch.zeros((1, 2, 3), dtype=torch.float32)
+    labels = torch.tensor([[0.01, 0.10, 0.60]], dtype=torch.float32)
+
+    existence_logits, existence_probs, mu_types_shifted = VAE._apply_cell_type_existence_shift(
+        dummy,
+        mu_types=mu_types,
+        cell_prop=labels,
+        device=torch.device("cpu"),
+    )
+
+    assert existence_logits.shape == labels.shape
+    assert existence_probs.shape == labels.shape
+    assert mu_types_shifted[0, 0, 0].item() < 0.0
+    assert mu_types_shifted[0, 0, 2].item() > 0.0
+
+
 def test_dirichlet_mean_returns_deterministic_normalized_alpha():
     dd_alpha = torch.tensor([[1.0, 3.0], [3.0, 1.0]], dtype=torch.float32)
 
@@ -524,7 +592,7 @@ def test_apply_cell_type_existence_shift_uses_centered_soft_threshold():
     existence_logits, existence_probs, mu_types_shifted = VAE._apply_cell_type_existence_shift(
         dummy,
         mu_types=mu_types,
-        pred_cell_prop=pred_cell_prop,
+        cell_prop=pred_cell_prop,
         device=torch.device("cpu"),
     )
 

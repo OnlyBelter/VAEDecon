@@ -453,6 +453,28 @@ class VAE(BaseAE):
             return projected_features[0]
         return torch.stack(projected_features, dim=0).mean(dim=0)
 
+    def _resolve_effective_cell_prop(
+        self,
+        *,
+        labels: Optional[torch.Tensor],
+        predicted_cell_prop: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Resolve which cell proportions should be used downstream."""
+        if self.model_config.predict_cell_prop:
+            if predicted_cell_prop is None:
+                raise ValueError(
+                    "predict_cell_prop=True requires predicted cell proportions."
+                )
+            return predicted_cell_prop
+
+        if has_usable_labels(labels):
+            return labels
+
+        raise ValueError(
+            "predict_cell_prop=False requires ground-truth cell-fraction labels "
+            "whenever cell proportions are needed, but no usable labels were provided."
+        )
+
     # =========================================================================
     # Forward
     # =========================================================================
@@ -542,24 +564,29 @@ class VAE(BaseAE):
 
         if self.model_config.predict_cell_prop:
             if self._use_shared_cell_prop_head:
-                cell_prop, dd_alpha = self._predict_cell_prop_from_features(
+                pred_cell_prop, dd_alpha = self._predict_cell_prop_from_features(
                     feature_list=cell_prop_feature_list,
                 )
             elif self.n_encoders == 1:
-                cell_prop = prop_list[0]
+                pred_cell_prop = prop_list[0]
                 dd_alpha = dd_alpha_list[0] if dd_alpha_list else None
             else:
                 # Proportions: simple linear opinion pool (average) as baseline.
-                cell_prop = torch.mean(torch.stack(prop_list, dim=0), dim=0)
+                pred_cell_prop = torch.mean(torch.stack(prop_list, dim=0), dim=0)
                 dd_alpha = torch.mean(torch.stack(dd_alpha_list, dim=0), dim=0) if dd_alpha_list else None
         else:
-            cell_prop = prop_list[0] if self.n_encoders == 1 else torch.mean(torch.stack(prop_list, dim=0), dim=0)
+            pred_cell_prop = None
             dd_alpha = None
+
+        effective_cell_prop = self._resolve_effective_cell_prop(
+            labels=y,
+            predicted_cell_prop=pred_cell_prop,
+        )
 
         n_cell_types = mu_types.shape[2]
         existence_logits, _, mu_types = self._apply_cell_type_existence_shift(
             mu_types=mu_types,
-            pred_cell_prop=cell_prop,
+            cell_prop=effective_cell_prop,
             device=device,
         )
         mu_mean = mu_types.mean(dim=-1)
@@ -638,12 +665,8 @@ class VAE(BaseAE):
             # Normalize to CPM, then transpose back to (B, G, C).
             recon_x_all_types_cpm = non_log2cpm_tensor(recon_x_add_g_mean).transpose(1, 2)
 
-        # Prepare Proportions for Mixing
-        if cell_prop is not None:
-            # (B, C) -> (B, C, 1)
-            prop_matrix = cell_prop.unsqueeze(-1)
-        else:
-            prop_matrix = torch.zeros((batch_size, n_cell_types, 1), device=device)
+        # Prepare proportions for mixing.
+        prop_matrix = effective_cell_prop.unsqueeze(-1)
 
         # Mixing: (B, G, C) @ (B, C, 1) -> (B, G, 1)
         recon_x_conv = torch.bmm(recon_x_all_types_cpm, prop_matrix).squeeze(-1)
@@ -672,7 +695,7 @@ class VAE(BaseAE):
             recon_x_conv=recon_x_conv_log,
             mu_types=mu_types,
             logvar_types=log_var_types,
-            pred_cell_prop=cell_prop,
+            pred_cell_prop=effective_cell_prop,
             existence_logits=existence_logits,
             dd_alpha=dd_alpha,
             mu_prior=mu_prior,
@@ -705,7 +728,7 @@ class VAE(BaseAE):
             mu=mu_mean,
             mu_deconv=mu_types,
             log_var=log_var_types,
-            pred_cell_prop=cell_prop,
+            pred_cell_prop=effective_cell_prop,
             recon_x_conv=recon_x_conv_log,
             recon_x_all_types=recon_x_all_types_cpm,  # Usually return CPM format for analysis
             z_score_reciprocal=loss_terms.z_score_reciprocal,  # For monitoring potential z-score collapse when learning residuals
@@ -1063,18 +1086,18 @@ class VAE(BaseAE):
     def _apply_cell_type_existence_shift(
         self,
         mu_types: torch.Tensor,
-        pred_cell_prop: Optional[torch.Tensor],
+        cell_prop: Optional[torch.Tensor],
         device: torch.device,
     ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], torch.Tensor]:
-        """Shift cell-type latent means using a soft existence score from predicted proportions."""
-        if pred_cell_prop is None or not self.model_config.predict_cell_prop:
+        """Shift cell-type latent means using a soft existence score from cell proportions."""
+        if cell_prop is None:
             return None, None, mu_types
 
         threshold = float(
             getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
         )
         denom = max(threshold, 1e-2)
-        existence_logits = (pred_cell_prop - threshold) / denom
+        existence_logits = (cell_prop - threshold) / denom
         existence_probs = torch.sigmoid(existence_logits)
 
         shift_scale = float(getattr(self.model_config, "cell_type_existence_shift_scale", 0.0) or 0.0)

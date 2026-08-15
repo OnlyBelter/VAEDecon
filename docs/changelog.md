@@ -4,6 +4,45 @@ This changelog records notable user-facing changes in `VAEDecon`. It focuses
 on behavior, configuration, and workflow updates that affect training,
 inference, and evaluation.
 
+## August 15, 2026
+
+This update restores an oracle cell-proportion workflow for decoder-focused
+ablation studies and makes that behavior explicit in configuration and tests.
+
+### Oracle cell-proportion workflow
+
+When `model.predict_cell_prop: false`, the model now uses ground-truth cell
+fractions consistently anywhere cell proportions are needed.
+
+- Restored the historical behavior where labeled batches use ground-truth cell
+  proportions instead of cell-proportion head outputs when
+  `predict_cell_prop: false`.
+- Added a shared resolution step in the VAE so bulk mixing and decoder-side
+  existence shifting use the same effective cell-proportion tensor.
+- Stopped using cell-proportion head outputs anywhere downstream in oracle
+  mode.
+- Raised a clear error if oracle mode is requested on a batch without usable
+  ground-truth cell-fraction labels.
+
+### Configuration and validation
+
+The oracle workflow can now be configured directly without fighting the
+activation-specific validation rules that are only relevant when the prediction
+head is active.
+
+- Allowed `cell_prop_activation_function` to remain set when
+  `predict_cell_prop: false`.
+- Allowed `cell_type_existence_shift_scale > 0` in oracle mode so existence
+  shifts can also be driven by ground-truth cell fractions.
+- Clarified the warning text for runs where both
+  `loss_coefficient.cell_prop` and `loss_coefficient.kld_p` are `0`.
+
+### Tests
+
+- Added regression tests covering oracle effective-cell-proportion resolution,
+  oracle existence shifting, and config loading for oracle-mode activation and
+  existence-shift settings.
+
 ## August 12, 2026
 
 This update adds optional matched-`sctGEP` supervision during training and
