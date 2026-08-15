@@ -17,6 +17,28 @@ from ..configs.default_config import VAEDeconConfig, GEPDatasetConfig, TestSetCo
 
 logger = logging.getLogger(__name__)
 
+
+def _selected_sc_gep_cache_complete(
+    *,
+    sc_gep_result_dir: str | Path,
+    cell_types: list[str],
+    n_samples: int,
+    selected_sample2cell_id_file_path: str | Path,
+) -> bool:
+    """Return True only when the selected-sample manifest and all expected
+    ground-truth SCT GEP CSVs exist for the current plotting request.
+    """
+    selected_fp = Path(str(selected_sample2cell_id_file_path))
+    if not selected_fp.exists():
+        return False
+
+    result_dir = Path(str(sc_gep_result_dir))
+    for cell_type in cell_types:
+        expected_fp = result_dir / f"sct_gep_{cell_type}_from_{n_samples}_bulksamples.csv"
+        if not expected_fp.exists():
+            return False
+    return True
+
 def _cuda_usable() -> bool:
     if not torch.cuda.is_available():
         return False
@@ -689,7 +711,19 @@ class VAEDeconPredictor:
                 f"selected_{self.config.evaluation.n_samples}_samples2sct_ids.csv"
             )
 
-            if not os.path.exists(selected_sample2cell_id_fp):
+            if not _selected_sc_gep_cache_complete(
+                sc_gep_result_dir=sc_gep_result_dir,
+                cell_types=cell_types,
+                n_samples=self.config.evaluation.n_samples,
+                selected_sample2cell_id_file_path=selected_sample2cell_id_fp,
+            ):
+                if os.path.exists(selected_sample2cell_id_fp):
+                    logger.warning(
+                        "Found selected sample mapping file but one or more "
+                        "ground-truth SCT GEP CSVs are missing in %s. "
+                        "Regenerating the selected-sample SCT cache.",
+                        sc_gep_result_dir,
+                    )
                 find_sct_gep_of_bulk_sample(
                     sct_gep_dataset_file_path=sct_gep_file_path,
                     result_dir=sc_gep_result_dir,
