@@ -12,7 +12,7 @@ import torch
 
 from ..data import GEPDataset, find_sct_gep_of_bulk_sample
 from ..utility import check_dir
-from ..workflow import (
+from .workflow import (
     load_trained_model,
     evaluate_model,
     _apply_training_config_override,
