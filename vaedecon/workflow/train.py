@@ -55,7 +55,7 @@ class VAEDeconTrainer:
         self.config = config or VAEDeconConfig()
         self.model_dir: Path | str = ''
         # self._vae_config: Optional[ModelConfig] = None  # cached, built once in _prepare_data
-        self._precessed_training_set_dir: Optional[Path] = None  # exposed for cleanup after training
+        self._processed_training_set_dir: Optional[Path] = None  # exposed for cleanup after training
 
         self._setup_logging()
         self._setup_device()

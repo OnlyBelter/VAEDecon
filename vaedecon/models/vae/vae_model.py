@@ -1176,7 +1176,8 @@ class VAE(BaseAE):
                 target = None
 
             if supervised_pred is not None and target is not None:
-                cell_prop_loss = self._cell_prop_supervision_loss(
+                cell_prop_loss = VAE._cell_prop_supervision_loss(
+                    self,
                     supervised_pred=supervised_pred,
                     target=target,
                 )
