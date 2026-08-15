@@ -13,7 +13,7 @@ from ..models import AutoModel, BaseAE
 from ..models.base import BaseEncoder
 from ..models.base import has_usable_labels
 from ..models.gnn import EncoderSGNN
-from ..models.nn import (EncoderMLP, DecoderMLP, EncoderHybrid, EncoderResMLP, DecoderResMLP,
+from ..models.nn import (EncoderMLP, DecoderMLP, DecoderConditionalMLP, EncoderHybrid, EncoderResMLP, DecoderResMLP,
                          PositionalEncoding, GeneTransformerEncoder, EncoderPathNet)
 from ..models.vae import VAE
 from ..configs import ModelConfig, TrainingConfig, DataConfig
@@ -101,6 +101,8 @@ def create_model(
         decoder_cls_name = decoder_cls_name.lower()
         if decoder_cls_name == "DecoderMLP".lower():
             decoder_cls = DecoderMLP
+        elif decoder_cls_name == "DecoderConditionalMLP".lower():
+            decoder_cls = DecoderConditionalMLP
         elif decoder_cls_name == "DecoderResMLP".lower():
             decoder_cls = DecoderResMLP
         else:

@@ -332,6 +332,23 @@ def test_cell_prop_fusion_and_loss_config_loads():
     assert loaded.model.cell_prop_loss_kl_weight == 0.7
 
 
+def test_conditioned_decoder_config_loads():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "decoders": ["DecoderConditionalMLP"],
+                "conditional_decoder_cell_type_emb_dim": 48,
+                "conditional_decoder_context_dim": 192,
+                "conditional_decoder_dropout_rate": 0.15,
+            }
+        }
+    )
+    assert loaded.model.decoders == ["DecoderConditionalMLP"]
+    assert loaded.model.conditional_decoder_cell_type_emb_dim == 48
+    assert loaded.model.conditional_decoder_context_dim == 192
+    assert loaded.model.conditional_decoder_dropout_rate == 0.15
+
+
 def test_aux_loss_schedules_reject_unknown_target():
     with pytest.raises(ValueError, match="aux_loss_schedules contains unsupported targets"):
         VAEDeconConfig.from_dict(

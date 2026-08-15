@@ -286,6 +286,143 @@ class DecoderMLP(BaseDecoder):
                 "class_name": self.__class__.__name__}
 
 
+class _ConditionalFiLMBlock(nn.Module):
+    """Dense decoder block with FiLM-style conditioning."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        conditioning_dim: int,
+        dropout_rate: float,
+    ):
+        super().__init__()
+        self.linear = nn.Linear(input_dim, hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim, eps=EPS)
+        self.activation = nn.GELU()
+        self.dropout = nn.Dropout(p=dropout_rate) if dropout_rate > 0 else nn.Identity()
+        self.film = nn.Sequential(
+            nn.Linear(conditioning_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim, eps=EPS),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim * 2),
+        )
+        last_linear = self.film[-1]
+        nn.init.zeros_(last_linear.weight)
+        nn.init.zeros_(last_linear.bias)
+
+    def forward(self, x: torch.Tensor, conditioning: torch.Tensor) -> torch.Tensor:
+        out = self.linear(x)
+        out = self.norm(out)
+        gamma, beta = self.film(conditioning).chunk(2, dim=-1)
+        out = (1.0 + gamma) * out + beta
+        out = self.activation(out)
+        return self.dropout(out)
+
+
+class DecoderConditionalMLP(BaseDecoder):
+    """Shared MLP decoder conditioned on cell type identity and bulk context."""
+
+    supports_conditioning = True
+
+    def __init__(self, args: ModelConfig):
+        super().__init__()
+        self.args = args
+        self.input_dim = args.input_dim
+        self.latent_dim = args.latent_dim
+        self.n_cell_types = args.n_cell_types
+        self.hidden_dims = getattr(args, 'decoder_hidden_dims', [512, 512, 1024])
+        self.dropout_rate = args.decoder_dropout_rate
+        self.cell_type_embedding_dim = getattr(args, 'conditional_decoder_cell_type_emb_dim', 64)
+        self.context_dim = getattr(args, 'conditional_decoder_context_dim', 256)
+        self.conditioning_dropout_rate = getattr(args, 'conditional_decoder_dropout_rate', 0.1)
+
+        output_dim = int(np.prod(self.input_dim))
+        conditioning_dim = self.context_dim
+
+        self.cell_type_embedding = nn.Embedding(
+            num_embeddings=self.n_cell_types,
+            embedding_dim=self.cell_type_embedding_dim,
+        )
+        self.conditioning_projector = nn.Sequential(
+            nn.Linear(self.cell_type_embedding_dim + self.context_dim, conditioning_dim),
+            nn.LayerNorm(conditioning_dim, eps=EPS),
+            nn.GELU(),
+            nn.Dropout(self.conditioning_dropout_rate)
+            if self.conditioning_dropout_rate > 0
+            else nn.Identity(),
+        )
+
+        self.layers = nn.ModuleList()
+        input_size = self.latent_dim
+        for i, hidden_dim_size in enumerate(self.hidden_dims):
+            self.layers.append(
+                _ConditionalFiLMBlock(
+                    input_dim=input_size,
+                    hidden_dim=hidden_dim_size,
+                    conditioning_dim=conditioning_dim,
+                    dropout_rate=self.dropout_rate[i],
+                )
+            )
+            input_size = hidden_dim_size
+
+        self.final_layer = nn.Sequential(
+            nn.Linear(self.hidden_dims[-1], output_dim),
+            nn.Softplus(),
+        )
+
+        self.depth = len(self.layers) + 1
+
+    def forward(
+        self,
+        z: torch.Tensor,
+        *,
+        cell_type_indices: torch.Tensor,
+        bulk_context: torch.Tensor,
+        output_layer_levels: Optional[List[int]] = None,
+    ) -> ModelOutput:
+        if z.dim() != 2:
+            raise ValueError(
+                f"DecoderConditionalMLP expects z with shape (N, latent_dim), got {tuple(z.shape)}"
+            )
+        if cell_type_indices is None or bulk_context is None:
+            raise ValueError(
+                "DecoderConditionalMLP requires both cell_type_indices and bulk_context."
+            )
+        if cell_type_indices.dim() != 1:
+            raise ValueError(
+                f"cell_type_indices must have shape (N,), got {tuple(cell_type_indices.shape)}"
+            )
+        if bulk_context.dim() != 2:
+            raise ValueError(
+                f"bulk_context must have shape (N, context_dim), got {tuple(bulk_context.shape)}"
+            )
+        if z.shape[0] != cell_type_indices.shape[0] or z.shape[0] != bulk_context.shape[0]:
+            raise ValueError(
+                "DecoderConditionalMLP inputs must share the same leading dimension."
+            )
+
+        cell_type_embedding = self.cell_type_embedding(cell_type_indices)
+        conditioning = self.conditioning_projector(
+            torch.cat((cell_type_embedding, bulk_context), dim=-1)
+        )
+
+        out = z
+        output = ModelOutput()
+        for i, layer in enumerate(self.layers):
+            out = layer(out, conditioning)
+            if output_layer_levels and (i + 1) in output_layer_levels:
+                output[f"reconstruction_layer_{i + 1}"] = out
+
+        output["reconstruction"] = self.final_layer(out)
+        return output
+
+    def get_config(self):
+        return {"params": {"args": self.args.to_dict()},
+                "module_name": self.__class__.__module__,
+                "class_name": self.__class__.__name__}
+
+
 class ClampLayer(nn.Module):
     def __init__(self, min_val, max_val):
         super(ClampLayer, self).__init__()

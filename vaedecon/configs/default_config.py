@@ -858,6 +858,22 @@ class ModelConfig(BaseModelConfig):
         default=False,
         description="Whether to learn GEP residuals compared to the mean GEP of each cell type (instead of learning the full GEP)"
     )
+    conditional_decoder_cell_type_emb_dim: int = Field(
+        default=64,
+        gt=0,
+        description="Decoder-side cell-type embedding dimension used by conditioned decoders.",
+    )
+    conditional_decoder_context_dim: int = Field(
+        default=256,
+        gt=0,
+        description="Projected bulk-context dimension used by conditioned decoders.",
+    )
+    conditional_decoder_dropout_rate: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="Dropout rate used inside conditioned decoder FiLM blocks.",
+    )
 
     # ==================== Validators ====================
 

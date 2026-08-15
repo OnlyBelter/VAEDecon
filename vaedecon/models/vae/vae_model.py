@@ -300,6 +300,26 @@ class VAE(BaseAE):
                 out_dim=head_output_dim,
                 dropout=self.cell_prop_head_dropout_rate,
             )
+        self._use_decoder_conditioning = bool(getattr(self.decoder, "supports_conditioning", False))
+        self.decoder_context_dim = int(
+            getattr(model_config, "conditional_decoder_context_dim", 256)
+        )
+        self.decoder_context_feature_projectors = nn.ModuleList()
+        if self._use_decoder_conditioning:
+            decoder_context_dropout = float(
+                getattr(model_config, "conditional_decoder_dropout_rate", 0.1)
+            )
+            self.decoder_context_feature_projectors = nn.ModuleList(
+                [
+                    MLPBlock(
+                        in_dim=None,
+                        out_dim=self.decoder_context_dim,
+                        dropout=decoder_context_dropout,
+                        lazy=True,
+                    )
+                    for _ in range(self.n_encoders)
+                ]
+            )
 
         # ---------------------------------------------------------------------
         # --- Gene Weights Calculation ---
@@ -409,6 +429,29 @@ class VAE(BaseAE):
             eps=eps,
             cancer_cell_type_index=self.cancer_cell_type_index,
         )
+
+    def _build_decoder_bulk_context(
+        self,
+        feature_list: List[Optional[torch.Tensor]],
+    ) -> torch.Tensor:
+        """Fuse encoder-side sample features into one per-sample decoder context."""
+        available_features = [feature for feature in feature_list if feature is not None]
+        if not available_features:
+            raise ValueError(
+                "Conditioned decoders require encoders to expose cell_prop_feature."
+            )
+
+        projected_features = [
+            projector(feature)
+            for projector, feature in zip(
+                self.decoder_context_feature_projectors,
+                available_features,
+                strict=False,
+            )
+        ]
+        if len(projected_features) == 1:
+            return projected_features[0]
+        return torch.stack(projected_features, dim=0).mean(dim=0)
 
     # =========================================================================
     # Forward
@@ -520,6 +563,11 @@ class VAE(BaseAE):
             device=device,
         )
         mu_mean = mu_types.mean(dim=-1)
+        decoder_bulk_context = None
+        if self._use_decoder_conditioning:
+            decoder_bulk_context = self._build_decoder_bulk_context(
+                feature_list=cell_prop_feature_list,
+            )
 
         # 4. Reconstruction (Batch Decoding Optimization)
         # -------------------------------------------------------
@@ -534,8 +582,26 @@ class VAE(BaseAE):
         # Flatten for decoder: (B, L, C) -> (B, C, L) -> (B*C, L)
         z_types_flat = z_types.permute(0, 2, 1).reshape(-1, self.model_config.latent_dim)
 
-        # One-time decoding: (B*C, L) -> (B*C, G)
-        recon_flat = self.decoder(z_types_flat)["reconstruction"]
+        if self._use_decoder_conditioning:
+            cell_type_indices = (
+                torch.arange(n_cell_types, device=device)
+                .unsqueeze(0)
+                .expand(batch_size, -1)
+                .reshape(-1)
+            )
+            bulk_context_flat = (
+                decoder_bulk_context.unsqueeze(1)
+                .expand(-1, n_cell_types, -1)
+                .reshape(-1, decoder_bulk_context.shape[-1])
+            )
+            recon_flat = self.decoder(
+                z_types_flat,
+                cell_type_indices=cell_type_indices,
+                bulk_context=bulk_context_flat,
+            )["reconstruction"]
+        else:
+            # One-time decoding: (B*C, L) -> (B*C, G)
+            recon_flat = self.decoder(z_types_flat)["reconstruction"]
 
         # Restore shape: (B*C, G) -> (B, C, G) -> (B, G, C)
         # We need (B, G, C) for subsequent matrix multiplication.
