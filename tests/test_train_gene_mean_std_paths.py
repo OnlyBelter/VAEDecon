@@ -7,7 +7,7 @@ import torch
 
 from vaedecon.configs import VAEDeconConfig, LossCoefficient
 from vaedecon.workflow.inference import VAEDeconPredictor
-from vaedecon.workflow.train import VAEDeconTrainer
+from vaedecon.workflow.train import VAEDeconTrainer, train_vaedecon
 
 
 class _DummyDebugDataset:
@@ -442,6 +442,43 @@ def test_debug_overfit_mode_can_seed_generated_test_set_config(tmp_path: Path):
     assert Path(debug_test.test_set_file_path).exists()
     assert Path(debug_test.test_set_sample2cell_id_file_path).exists()
     assert str(debug_test.sct_gep_file_path).endswith("train1_sct.h5ad")
+
+
+def test_train_vaedecon_reuses_saved_config_with_test_sets_when_checkpoint_exists(tmp_path: Path):
+    model_dir = tmp_path / "final_model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "best_model.ckpt").write_text("placeholder", encoding="utf-8")
+
+    saved_cfg = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "test_sets": {
+                    "Debug_overfit_Train_set2": {
+                        "test_set_file_path": str(tmp_path / "debug_subset.h5ad"),
+                        "test_set_sample2cell_id_file_path": str(tmp_path / "debug_subset_sample2cell.csv"),
+                        "sct_gep_file_path": str(tmp_path / "debug_subset_sct.h5ad"),
+                    }
+                }
+            },
+            "model": {
+                "model_dir": model_dir,
+            },
+        }
+    )
+    saved_cfg.to_yaml(model_dir / "config.yaml")
+
+    input_cfg = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "model_dir": model_dir,
+            }
+        }
+    )
+
+    returned_cfg = train_vaedecon(config=input_cfg)
+
+    assert "Debug_overfit_Train_set2" in returned_cfg.data.test_sets
+    assert returned_cfg.data.test_set_file_path == Path(tmp_path / "debug_subset.h5ad")
 
 
 def test_compute_training_sct_cross_sample_gene_var_roundtrip(tmp_path: Path, monkeypatch):

@@ -815,7 +815,31 @@ def train_vaedecon(
         ckpt_files = [f for f in model_dir.iterdir() if f.suffix == '.ckpt']
         if ckpt_files:
             logger.info(f"Checkpoint found in {model_dir}. Skipping training.")
-            config.model.cell_type_fp       = model_dir / 'cell_type_list.txt'
+            saved_config_candidates = [
+                model_dir / "config.yaml",
+                model_dir / "config_final.yaml",
+                model_dir / "used_config.yaml",
+            ]
+            for candidate in saved_config_candidates:
+                if candidate.exists() and candidate.is_file():
+                    try:
+                        loaded_config = VAEDeconConfig.from_yaml(candidate)
+                        loaded_config.model.cell_type_fp = model_dir / 'cell_type_list.txt'
+                        loaded_config.model.input_gene_list_fp = model_dir / 'input_gene_list.txt'
+                        loaded_config.model.model_dir = model_dir
+                        logger.info(
+                            "Loaded saved config from %s while reusing existing checkpoint.",
+                            candidate,
+                        )
+                        return loaded_config
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not load saved config %s while reusing existing checkpoint. "
+                            "Falling back to the input config. Details: %s",
+                            candidate,
+                            exc,
+                        )
+            config.model.cell_type_fp = model_dir / 'cell_type_list.txt'
             config.model.input_gene_list_fp = model_dir / 'input_gene_list.txt'
             return config
     # Create model directory
