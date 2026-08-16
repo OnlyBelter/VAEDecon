@@ -561,33 +561,10 @@ class VAEDeconTrainer:
 
     def _build_trainer_config(self) -> TrainingConfig:
         """Convert to TrainerConfig"""
-        return TrainingConfig(
-            name='VAETrainerConfig',
-            output_dir=self.config.training.output_dir,
-            learning_rate=self.config.training.learning_rate,
-            per_device_train_batch_size=self.config.training.batch_size,
-            per_device_eval_batch_size=self.config.training.batch_size,
-            train_dataloader_num_workers=self.config.training.train_dataloader_num_workers,
-            eval_dataloader_num_workers=self.config.training.eval_dataloader_num_workers,
-            steps_saving=self.config.training.steps_saving,
-            num_epochs=self.config.training.num_epochs,
-            optimizer_cls=self.config.training.optimizer_cls,
-            n_early_stopping_patience=self.config.training.n_early_stopping_patience,
-            devices=self.config.training.devices,
-            debug_model=self.config.training.debug_model,
-            scheduler_cls=self.config.training.scheduler_cls,
-            scheduler_params=self.config.training.scheduler_params,
-            warmup_epochs=self.config.training.warmup_epochs,
-            gradient_clip_val=self.config.training.gradient_clip_val,
-            gene_stat_weight_schedule=self.config.training.gene_stat_weight_schedule,
-            gene_stat_weight_schedule_epochs=self.config.training.gene_stat_weight_schedule_epochs,
-            gene_mean_weight_end=self.config.training.gene_mean_weight_end,
-            gene_std_weight_end=self.config.training.gene_std_weight_end,
-            gene_std_weight_start=self.config.training.gene_std_weight_start,
-            gene_mean_weight_start=self.config.training.gene_mean_weight_start,
-            prog_bar_metrics=self.config.training.prog_bar_metrics,
-            debug_overfit=self.config.training.debug_overfit,
-        )
+        trainer_config = self.config.training.model_copy(deep=True)
+        trainer_config.per_device_train_batch_size = self.config.training.batch_size
+        trainer_config.per_device_eval_batch_size = self.config.training.batch_size
+        return trainer_config
 
     def _build_gepdataset_config(self) -> GEPDatasetConfig:
         """

@@ -5,6 +5,7 @@ import pytest
 import yaml
 
 from vaedecon.configs import VAEDeconConfig
+from vaedecon.workflow.train import VAEDeconTrainer
 
 
 def test_example_config_resource_loads(tmp_path: Path):
@@ -17,6 +18,35 @@ def test_example_config_resource_loads(tmp_path: Path):
     loaded = VAEDeconConfig.from_yaml(p)
     assert loaded is not None
     assert "Test_set1" in loaded.data.test_sets
+
+
+def test_build_trainer_config_preserves_saved_model_selection(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "training": {
+                "output_dir": str(tmp_path),
+                "naming_postfix": "preserve-training-config-fields",
+                "batch_size": 60,
+                "seed": 10,
+                "device": "cpu",
+                "train_split": 0.9,
+                "val_split": 0.1,
+                "saved_model_selection": "last",
+            }
+        }
+    )
+
+    trainer = VAEDeconTrainer(config=config)
+    trainer_config = trainer._build_trainer_config()
+
+    assert trainer_config.saved_model_selection == "last"
+    assert trainer_config.seed == 10
+    assert trainer_config.device == "cpu"
+    assert trainer_config.naming_postfix == "preserve-training-config-fields"
+    assert trainer_config.train_split == pytest.approx(0.9)
+    assert trainer_config.val_split == pytest.approx(0.1)
+    assert trainer_config.per_device_train_batch_size == 60
+    assert trainer_config.per_device_eval_batch_size == 60
 
 
 def test_legacy_single_test_set_populates_test_sets():
