@@ -803,6 +803,16 @@ def train_vaedecon(
                 if candidate.exists() and candidate.is_file():
                     try:
                         loaded_config = VAEDeconConfig.from_yaml(candidate)
+                        for attr_name in (
+                            "test_set_file_path",
+                            "test_set_sample2cell_id_file_path",
+                            "sct_gep_file_path",
+                        ):
+                            attr_value = getattr(loaded_config.data, attr_name, "")
+                            if isinstance(attr_value, str) and attr_value.strip():
+                                attr_path = Path(attr_value)
+                                if attr_path.is_absolute():
+                                    setattr(loaded_config.data, attr_name, attr_path)
                         loaded_config.model.cell_type_fp = model_dir / 'cell_type_list.txt'
                         loaded_config.model.input_gene_list_fp = model_dir / 'input_gene_list.txt'
                         loaded_config.model.model_dir = model_dir

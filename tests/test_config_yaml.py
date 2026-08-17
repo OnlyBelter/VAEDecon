@@ -199,6 +199,74 @@ def test_duplicate_yaml_keys_raise(tmp_path: Path):
         _ = VAEDeconConfig.from_yaml(p)
 
 
+def test_to_yaml_writes_plain_yaml_roundtrip(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "test_sets": {
+                    "Debug_overfit_Train_set2": {
+                        "test_set_file_path": "./datasets/debug_subset.h5ad",
+                        "test_set_sample2cell_id_file_path": "./datasets/debug_subset_sample2cell.csv",
+                        "sct_gep_file_path": "./datasets/debug_subset_sct.h5ad",
+                    }
+                }
+            },
+            "training": {
+                "saved_model_selection": "last",
+            },
+        }
+    )
+
+    yaml_path = tmp_path / "config.yaml"
+    config.to_yaml(yaml_path)
+
+    text = yaml_path.read_text(encoding="utf-8")
+    loaded = VAEDeconConfig.from_yaml(yaml_path)
+
+    assert "python/object" not in text
+    assert "Debug_overfit_Train_set2" in loaded.data.test_sets
+    assert str(loaded.data.test_set_file_path) == "./datasets/debug_subset.h5ad"
+    assert loaded.training.saved_model_selection == "last"
+
+
+def test_from_yaml_loads_legacy_python_object_yaml(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "test_sets": {
+                    "Debug_overfit_Train_set2": {
+                        "test_set_file_path": "./datasets/debug_subset.h5ad",
+                        "test_set_sample2cell_id_file_path": "./datasets/debug_subset_sample2cell.csv",
+                        "sct_gep_file_path": "./datasets/debug_subset_sct.h5ad",
+                    }
+                }
+            },
+            "training": {
+                "saved_model_selection": "last",
+            },
+        }
+    )
+
+    yaml_path = tmp_path / "legacy_config.yaml"
+    with yaml_path.open("w", encoding="utf-8") as f:
+        yaml.dump(
+            {
+                "data": config.data,
+                "training": config.training,
+                "model": config.model,
+                "evaluation": config.evaluation,
+            },
+            f,
+            default_flow_style=False,
+        )
+
+    loaded = VAEDeconConfig.from_yaml(yaml_path)
+
+    assert "Debug_overfit_Train_set2" in loaded.data.test_sets
+    assert str(loaded.data.test_set_file_path) == "./datasets/debug_subset.h5ad"
+    assert loaded.training.saved_model_selection == "last"
+
+
 def test_sigmoid_cell_prop_requires_cancer_cell_type_name():
     with pytest.raises(ValueError, match="cancer_cell_type_name must be set"):
         VAEDeconConfig.from_dict(

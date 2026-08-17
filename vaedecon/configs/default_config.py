@@ -1,7 +1,7 @@
 """
 Default configuration for VAEDecon
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict, is_dataclass
 from .base_config import BaseTrainerConfig, BaseModelConfig, BaseConfig
 from typing import List, Dict, Optional, Tuple, Any, Union, Literal
 from pathlib import Path
@@ -1337,6 +1337,24 @@ class EvaluationConfig:
     save_recon_bulk_gep_conv: bool = True  # Whether to save the reconstructed bulk GEPs
 
 
+def _to_plain_yaml_data(value: Any) -> Any:
+    """Convert config objects into plain YAML-safe Python data."""
+    if isinstance(value, BaseModel):
+        return _to_plain_yaml_data(value.model_dump(mode="python", exclude_none=True))
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return _to_plain_yaml_data(asdict(value))
+    if isinstance(value, dict):
+        return {
+            key: _to_plain_yaml_data(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_to_plain_yaml_data(item) for item in value]
+    return value
+
+
 @dataclass
 class VAEDeconConfig:
     """The complete configuration for VAEDecon"""
@@ -1395,6 +1413,7 @@ class VAEDeconConfig:
     def from_yaml(cls, yaml_path: str | Path):
         """Loads configuration from a YAML file"""
         import yaml
+        from yaml.constructor import ConstructorError
         from pathlib import Path as _Path
         yaml_path = _Path(yaml_path)
 
@@ -1415,14 +1434,26 @@ class VAEDeconConfig:
             _construct_mapping,
         )
 
-        with open(yaml_path, 'r') as f:
-            config_dict = yaml.load(f, Loader=_NoDuplicateSafeLoader)
+        with open(yaml_path, 'r', encoding='utf-8') as f:
+            try:
+                config_dict = yaml.load(f, Loader=_NoDuplicateSafeLoader)
+            except ConstructorError:
+                f.seek(0)
+                config_dict = _to_plain_yaml_data(
+                    yaml.load(f, Loader=yaml.UnsafeLoader)
+                )
         return cls.from_dict(config_dict)
 
     def to_yaml(self, yaml_path: str | Path):
         """Saves the configuration to a YAML file"""
         import yaml
-        from dataclasses import asdict
-        config_dict = asdict(self)
-        with open(yaml_path, 'w') as f:
-            yaml.dump(config_dict, f, default_flow_style=False)
+        config_dict = _to_plain_yaml_data(
+            {
+                "data": self.data,
+                "training": self.training,
+                "model": self.model,
+                "evaluation": self.evaluation,
+            }
+        )
+        with open(yaml_path, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(config_dict, f, default_flow_style=False, sort_keys=False)
