@@ -450,3 +450,169 @@ def test_aux_loss_schedules_reject_unknown_target():
                 }
             }
         )
+
+
+def test_adaptive_aux_loss_schedule_config_loads():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "training_target_sets": {
+                    "Train_set1": {
+                        "training_set_file_path": "./datasets/train_bulk_a.h5ad",
+                        "training_set_sample2cell_id_file_path": "./datasets/train_bulk_a_sample2cell.csv",
+                        "training_sct_gep_file_path": "./datasets/train_sct_a.h5ad",
+                    }
+                },
+            },
+            "training": {
+                "adaptive_aux_loss_schedule": {
+                    "enabled": True,
+                    "monitor": "val_loss",
+                    "min_epoch_before_trigger": 10,
+                    "trigger_patience": 5,
+                    "trigger_min_delta": 0.001,
+                    "cooldown_epochs": 15,
+                    "update_interval_epochs": 1,
+                    "pair_targets": True,
+                    "targets": {
+                        "cell_prop": {
+                            "range": [500.0, 100.0],
+                            "step_size": 25.0,
+                            "reverse_on_plateau": True,
+                        },
+                        "cell_type_sct_gep_weight": {
+                            "range": [10.0, 30.0],
+                            "step_size": 1.0,
+                            "reverse_on_plateau": True,
+                        },
+                    },
+                }
+            },
+            "model": {
+                "predict_cell_prop": True,
+            },
+        }
+    )
+
+    schedule = loaded.training.adaptive_aux_loss_schedule
+    assert schedule is not None
+    assert schedule.enabled is True
+    assert schedule.monitor == "val_loss"
+    assert tuple(schedule.targets["cell_prop"].range) == (500.0, 100.0)
+    assert tuple(schedule.targets["cell_type_sct_gep_weight"].range) == (10.0, 30.0)
+
+
+def test_adaptive_aux_loss_schedule_rejects_overlap_with_linear_schedule():
+    with pytest.raises(
+        ValueError,
+        match="adaptive_aux_loss_schedule conflicts with aux_loss_schedules",
+    ):
+        VAEDeconConfig.from_dict(
+            {
+                "data": {
+                    "training_target_sets": {
+                        "Train_set1": {
+                            "training_set_file_path": "./datasets/train_bulk_a.h5ad",
+                            "training_set_sample2cell_id_file_path": "./datasets/train_bulk_a_sample2cell.csv",
+                            "training_sct_gep_file_path": "./datasets/train_sct_a.h5ad",
+                        }
+                    },
+                },
+                "training": {
+                    "aux_loss_schedules": {
+                        "cell_type_sct_gep_weight": {
+                            "type": "linear",
+                            "start_epoch": 0,
+                            "end_epoch": 10,
+                            "start_value": 10.0,
+                            "end_value": 30.0,
+                        }
+                    },
+                    "adaptive_aux_loss_schedule": {
+                        "enabled": True,
+                        "pair_targets": False,
+                        "targets": {
+                            "cell_type_sct_gep_weight": {
+                                "range": [10.0, 30.0],
+                                "step_size": 1.0,
+                            },
+                        },
+                    },
+                },
+            }
+        )
+
+
+def test_adaptive_aux_loss_schedule_requires_predict_cell_prop_for_positive_cell_prop_range():
+    with pytest.raises(
+        ValueError,
+        match="adaptive_aux_loss_schedule target 'cell_prop' requires model.predict_cell_prop=True",
+    ):
+        VAEDeconConfig.from_dict(
+            {
+                "training": {
+                    "adaptive_aux_loss_schedule": {
+                        "enabled": True,
+                        "pair_targets": False,
+                        "targets": {
+                            "cell_prop": {
+                                "range": [500.0, 100.0],
+                                "step_size": 25.0,
+                            },
+                        },
+                    },
+                },
+                "model": {
+                    "predict_cell_prop": False,
+                },
+            }
+        )
+
+
+def test_adaptive_aux_loss_schedule_requires_training_target_sets_for_positive_sct_gep_range():
+    with pytest.raises(
+        ValueError,
+        match="adaptive_aux_loss_schedule target 'cell_type_sct_gep_weight' requires data.training_target_sets",
+    ):
+        VAEDeconConfig.from_dict(
+            {
+                "training": {
+                    "adaptive_aux_loss_schedule": {
+                        "enabled": True,
+                        "pair_targets": False,
+                        "targets": {
+                            "cell_type_sct_gep_weight": {
+                                "range": [10.0, 30.0],
+                                "step_size": 1.0,
+                            },
+                        },
+                    },
+                },
+            }
+        )
+
+
+def test_adaptive_aux_loss_schedule_pair_targets_requires_both_targets():
+    with pytest.raises(
+        ValueError,
+        match="adaptive_aux_loss_schedule with pair_targets=True must configure exactly",
+    ):
+        VAEDeconConfig.from_dict(
+            {
+                "training": {
+                    "adaptive_aux_loss_schedule": {
+                        "enabled": True,
+                        "pair_targets": True,
+                        "targets": {
+                            "cell_prop": {
+                                "range": [500.0, 100.0],
+                                "step_size": 25.0,
+                            },
+                        },
+                    },
+                },
+                "model": {
+                    "predict_cell_prop": True,
+                },
+            }
+        )

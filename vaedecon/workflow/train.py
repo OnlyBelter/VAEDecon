@@ -94,9 +94,11 @@ class VAEDeconTrainer:
         model_dir_cfg = self.config.model.model_dir
         model_dir_unset = not model_dir_cfg or str(model_dir_cfg).strip() == ''
         if model_dir_unset:
-            self.result_dir = set_output_dir(
-                output_dir=self.config.training.output_dir,
-                naming_postfix=self.config.training.naming_postfix
+            self.result_dir = Path(
+                set_output_dir(
+                    output_dir=self.config.training.output_dir,
+                    naming_postfix=self.config.training.naming_postfix
+                )
             )
             self.model_dir = self.result_dir / 'final_model'
             self.config.model.model_dir = self.model_dir

@@ -138,6 +138,112 @@ class ScalarScheduleConfig(BaseModel):
         return self
 
 
+class AdaptiveAuxLossTargetConfig(BaseModel):
+    """Bounded adaptive schedule for one auxiliary loss target."""
+
+    range: Tuple[float, float] = Field(
+        default=(0.0, 0.0),
+        description=(
+            "Ordered two-point range. The first value is the initial weight and "
+            "the second value defines the initial direction."
+        ),
+    )
+    step_size: float = Field(
+        default=1.0,
+        gt=0.0,
+        description="Absolute amount to move the target weight at each update event.",
+    )
+    reverse_on_plateau: bool = Field(
+        default=True,
+        description=(
+            "Whether to reverse direction for this target when the adaptive "
+            "schedule detects a plateau and cooldown has expired."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_range_values(self):
+        start, end = self.range
+        if start == end:
+            raise ValueError("adaptive schedule range endpoints must differ to define a direction")
+        return self
+
+
+class AdaptiveAuxLossScheduleConfig(BaseModel):
+    """Adaptive epoch-based schedule for selected multitask loss weights."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable adaptive epoch-based updates for configured auxiliary loss targets.",
+    )
+    monitor: str = Field(
+        default="val_loss",
+        description="Metric name used to detect plateaus for adaptive schedule reversals.",
+    )
+    min_epoch_before_trigger: int = Field(
+        default=0,
+        ge=0,
+        description="Earliest epoch where plateau-triggered reversals are allowed.",
+    )
+    trigger_patience: int = Field(
+        default=5,
+        ge=1,
+        description="Consecutive non-improving epochs required before a plateau trigger can fire.",
+    )
+    trigger_min_delta: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Minimum decrease in the monitored metric that counts as an improvement.",
+    )
+    cooldown_epochs: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Number of epochs to wait after a reversal before another reversal "
+            "is allowed."
+        ),
+    )
+    update_interval_epochs: int = Field(
+        default=1,
+        ge=1,
+        description="How often to update scheduled target weights, in epochs.",
+    )
+    pair_targets: bool = Field(
+        default=True,
+        description=(
+            "If true, all configured targets are treated as one paired schedule "
+            "and reverse together on plateau events."
+        ),
+    )
+    targets: Dict[str, AdaptiveAuxLossTargetConfig] = Field(
+        default_factory=dict,
+        description="Per-target adaptive schedule configuration.",
+    )
+
+    @model_validator(mode="after")
+    def validate_targets(self):
+        supported_targets = {
+            "cell_prop",
+            "cell_type_sct_gep_weight",
+        }
+        invalid_targets = set(self.targets.keys()) - supported_targets
+        if invalid_targets:
+            raise ValueError(
+                "adaptive_aux_loss_schedule contains unsupported targets: "
+                + ", ".join(sorted(invalid_targets))
+            )
+        if self.enabled and not self.targets:
+            raise ValueError(
+                "adaptive_aux_loss_schedule.enabled=True requires at least one configured target"
+            )
+        if self.pair_targets and self.enabled and set(self.targets.keys()) != supported_targets:
+            raise ValueError(
+                "adaptive_aux_loss_schedule with pair_targets=True must configure exactly "
+                "'cell_prop' and 'cell_type_sct_gep_weight'"
+            )
+        return self
+
+
 class DebugOverfitConfig(BaseModel):
     """Config-gated overfit mode for memorization/debugging runs."""
 
@@ -541,6 +647,14 @@ class TrainingConfig(BaseTrainerConfig):
             "loss weights and related scalar controls."
         ),
     )
+    adaptive_aux_loss_schedule: Optional[AdaptiveAuxLossScheduleConfig] = Field(
+        default=None,
+        description=(
+            "Optional adaptive epoch-based schedule for selected auxiliary "
+            "loss weights. When omitted or disabled, fixed loss coefficients "
+            "behave exactly as before."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_aux_schedule_targets(self):
@@ -556,6 +670,14 @@ class TrainingConfig(BaseTrainerConfig):
                 "aux_loss_schedules contains unsupported targets: "
                 + ", ".join(sorted(invalid_targets))
             )
+        adaptive_schedule = self.adaptive_aux_loss_schedule
+        if adaptive_schedule is not None and adaptive_schedule.enabled:
+            overlapping_targets = set(self.aux_loss_schedules.keys()) & set(adaptive_schedule.targets.keys())
+            if overlapping_targets:
+                raise ValueError(
+                    "adaptive_aux_loss_schedule conflicts with aux_loss_schedules for targets: "
+                    + ", ".join(sorted(overlapping_targets))
+                )
         return self
 
 
@@ -1226,12 +1348,48 @@ class VAEDeconConfig:
     @classmethod
     def from_dict(cls, config_dict: Dict):
         """Creates configuration from a dictionary"""
-        return cls(
-            data=DataConfig(**config_dict.get('data', {})),
-            training=TrainingConfig(**config_dict.get('training', {})),
-            model=ModelConfig(**config_dict.get('model', {})),
-            evaluation=EvaluationConfig(**config_dict.get('evaluation', {}))
+        data = DataConfig(**config_dict.get('data', {}))
+        training = TrainingConfig(**config_dict.get('training', {}))
+        model = ModelConfig(**config_dict.get('model', {}))
+        evaluation = EvaluationConfig(**config_dict.get('evaluation', {}))
+        cls._validate_cross_section_config(
+            data=data,
+            training=training,
+            model=model,
         )
+        return cls(
+            data=data,
+            training=training,
+            model=model,
+            evaluation=evaluation
+        )
+
+    @staticmethod
+    def _validate_cross_section_config(
+        *,
+        data: DataConfig,
+        training: TrainingConfig,
+        model: ModelConfig,
+    ) -> None:
+        adaptive_schedule = training.adaptive_aux_loss_schedule
+        if adaptive_schedule is None or not adaptive_schedule.enabled:
+            return
+
+        cell_prop_schedule = adaptive_schedule.targets.get("cell_prop")
+        if cell_prop_schedule is not None and max(cell_prop_schedule.range) > 0 and not model.predict_cell_prop:
+            raise ValueError(
+                "adaptive_aux_loss_schedule target 'cell_prop' requires model.predict_cell_prop=True "
+                "when its configured range includes values > 0."
+            )
+
+        sct_gep_schedule = adaptive_schedule.targets.get("cell_type_sct_gep_weight")
+        if sct_gep_schedule is not None and max(sct_gep_schedule.range) > 0:
+            training_target_sets = dict(data.training_target_sets or {})
+            if not training_target_sets:
+                raise ValueError(
+                    "adaptive_aux_loss_schedule target 'cell_type_sct_gep_weight' requires "
+                    "data.training_target_sets when its configured range includes values > 0."
+                )
 
     @classmethod
     def from_yaml(cls, yaml_path: str | Path):

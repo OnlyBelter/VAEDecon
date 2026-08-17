@@ -79,6 +79,26 @@ training:
   gene_mean_weight_end: 0.0
   gene_std_weight_start: 0.0
   gene_std_weight_end: 0.0
+  # Optional adaptive multitask schedule. Omit this block to keep fixed loss
+  # coefficients exactly as configured under model.loss_coefficient.
+  # adaptive_aux_loss_schedule:
+  #   enabled: true
+  #   monitor: "val_loss"
+  #   min_epoch_before_trigger: 10
+  #   trigger_patience: 5
+  #   trigger_min_delta: 0.001
+  #   cooldown_epochs: 15
+  #   update_interval_epochs: 1
+  #   pair_targets: true
+  #   targets:
+  #     cell_prop:
+  #       range: [500.0, 100.0]
+  #       step_size: 25.0
+  #       reverse_on_plateau: true
+  #     cell_type_sct_gep_weight:
+  #       range: [10.0, 30.0]
+  #       step_size: 1.0
+  #       reverse_on_plateau: true
   prog_bar_metrics:
     - loss
     - kld

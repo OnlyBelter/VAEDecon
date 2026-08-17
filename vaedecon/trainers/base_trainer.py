@@ -1,6 +1,8 @@
+import csv
 import json
 import os
 from pathlib import Path
+from dataclasses import dataclass, field
 
 import numpy as np
 import logging
@@ -69,6 +71,217 @@ def _apply_aux_loss_schedules(model: BaseAE, training_config: TrainingConfig, ep
         if target_obj is None:
             continue
         setattr(target_obj, target_name, _resolve_linear_schedule_value(schedule, epoch))
+
+
+@dataclass
+class AdaptiveAuxLossTargetState:
+    name: str
+    current_value: float
+    start_value: float
+    end_value: float
+    min_value: float
+    max_value: float
+    direction: int
+    step_size: float
+    reverse_on_plateau: bool
+
+
+@dataclass
+class AdaptiveAuxLossScheduleState:
+    monitor: str
+    min_epoch_before_trigger: int
+    trigger_patience: int
+    trigger_min_delta: float
+    cooldown_epochs: int
+    update_interval_epochs: int
+    pair_targets: bool
+    targets: Dict[str, AdaptiveAuxLossTargetState] = field(default_factory=dict)
+    best_metric: Optional[float] = None
+    epochs_since_improvement: int = 0
+    last_trigger_epoch: Optional[int] = None
+    trace_rows: list[Dict[str, Any]] = field(default_factory=list)
+
+
+def _get_adaptive_aux_loss_target_map(model: BaseAE) -> Dict[str, tuple[Any, str]]:
+    loss_coefficient = model.model_config.loss_coefficient
+    return {
+        "cell_prop": (loss_coefficient, "cell_prop"),
+        "cell_type_sct_gep_weight": (loss_coefficient, "cell_type_sct_gep_weight"),
+    }
+
+
+def _set_adaptive_aux_loss_target_value(model: BaseAE, target_name: str, value: float) -> None:
+    target_map = _get_adaptive_aux_loss_target_map(model)
+    if target_name not in target_map:
+        raise ValueError(f"Unsupported adaptive aux loss target: {target_name}")
+    target_obj, attr_name = target_map[target_name]
+    setattr(target_obj, attr_name, float(value))
+
+
+def _adaptive_trace_weight_key(target_name: str) -> str:
+    if target_name.endswith("_weight"):
+        return target_name
+    return f"{target_name}_weight"
+
+
+def _adaptive_trace_next_weight_key(target_name: str) -> str:
+    return f"next_{_adaptive_trace_weight_key(target_name)}"
+
+
+def _adaptive_trace_direction_key(target_name: str) -> str:
+    return f"{target_name}_direction"
+
+
+def _adaptive_trace_next_direction_key(target_name: str) -> str:
+    return f"next_{target_name}_direction"
+
+
+def _initialize_adaptive_aux_loss_schedule(
+    model: BaseAE,
+    training_config: TrainingConfig,
+) -> Optional[AdaptiveAuxLossScheduleState]:
+    schedule_cfg = getattr(training_config, "adaptive_aux_loss_schedule", None)
+    if schedule_cfg is None or not getattr(schedule_cfg, "enabled", False):
+        return None
+
+    target_states: Dict[str, AdaptiveAuxLossTargetState] = {}
+    for target_name, target_cfg in schedule_cfg.targets.items():
+        start_value = float(target_cfg.range[0])
+        end_value = float(target_cfg.range[1])
+        direction = 1 if end_value > start_value else -1
+        state = AdaptiveAuxLossTargetState(
+            name=target_name,
+            current_value=start_value,
+            start_value=start_value,
+            end_value=end_value,
+            min_value=min(start_value, end_value),
+            max_value=max(start_value, end_value),
+            direction=direction,
+            step_size=float(target_cfg.step_size),
+            reverse_on_plateau=bool(target_cfg.reverse_on_plateau),
+        )
+        target_states[target_name] = state
+        _set_adaptive_aux_loss_target_value(model, target_name, state.current_value)
+
+    return AdaptiveAuxLossScheduleState(
+        monitor=str(schedule_cfg.monitor),
+        min_epoch_before_trigger=int(schedule_cfg.min_epoch_before_trigger),
+        trigger_patience=int(schedule_cfg.trigger_patience),
+        trigger_min_delta=float(schedule_cfg.trigger_min_delta),
+        cooldown_epochs=int(schedule_cfg.cooldown_epochs),
+        update_interval_epochs=int(schedule_cfg.update_interval_epochs),
+        pair_targets=bool(schedule_cfg.pair_targets),
+        targets=target_states,
+    )
+
+
+def _update_adaptive_plateau_state(
+    state: AdaptiveAuxLossScheduleState,
+    monitored_metric: Optional[float],
+) -> None:
+    if monitored_metric is None:
+        return
+    if state.best_metric is None or monitored_metric < (state.best_metric - state.trigger_min_delta):
+        state.best_metric = float(monitored_metric)
+        state.epochs_since_improvement = 0
+        return
+    state.epochs_since_improvement += 1
+
+
+def _adaptive_schedule_update_due(
+    state: AdaptiveAuxLossScheduleState,
+    epoch: int,
+) -> bool:
+    return ((epoch + 1) % max(1, state.update_interval_epochs)) == 0
+
+
+def _adaptive_schedule_cooldown_active(
+    state: AdaptiveAuxLossScheduleState,
+    epoch: int,
+) -> bool:
+    if state.last_trigger_epoch is None:
+        return False
+    return (epoch - state.last_trigger_epoch) < state.cooldown_epochs
+
+
+def _step_adaptive_aux_loss_schedule(
+    model: BaseAE,
+    state: Optional[AdaptiveAuxLossScheduleState],
+    *,
+    epoch: int,
+    monitored_metric: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    if state is None:
+        return None
+
+    weights_before = {
+        target_name: float(target_state.current_value)
+        for target_name, target_state in state.targets.items()
+    }
+    directions_before = {
+        target_name: int(target_state.direction)
+        for target_name, target_state in state.targets.items()
+    }
+
+    _update_adaptive_plateau_state(state, monitored_metric)
+    update_due = _adaptive_schedule_update_due(state, epoch)
+    cooldown_active = _adaptive_schedule_cooldown_active(state, epoch)
+    plateau_reached = (
+        epoch >= state.min_epoch_before_trigger
+        and state.epochs_since_improvement >= state.trigger_patience
+    )
+    trigger_fired = False
+
+    if update_due and plateau_reached and not cooldown_active:
+        reversible_targets = [
+            target_state
+            for target_state in state.targets.values()
+            if target_state.reverse_on_plateau
+        ]
+        if reversible_targets:
+            for target_state in reversible_targets:
+                target_state.direction *= -1
+            state.last_trigger_epoch = epoch
+            state.epochs_since_improvement = 0
+            if monitored_metric is not None:
+                state.best_metric = float(monitored_metric)
+            trigger_fired = True
+
+    if update_due:
+        for target_state in state.targets.values():
+            next_value = target_state.current_value + (target_state.direction * target_state.step_size)
+            target_state.current_value = min(
+                target_state.max_value,
+                max(target_state.min_value, next_value),
+            )
+            _set_adaptive_aux_loss_target_value(model, target_state.name, target_state.current_value)
+
+    weights_after = {
+        target_name: float(target_state.current_value)
+        for target_name, target_state in state.targets.items()
+    }
+    directions_after = {
+        target_name: int(target_state.direction)
+        for target_name, target_state in state.targets.items()
+    }
+    trace_row: Dict[str, Any] = {
+        "epoch": int(epoch),
+        "monitor": state.monitor,
+        "monitored_metric": None if monitored_metric is None else float(monitored_metric),
+        "update_due": int(update_due),
+        "plateau_reached": int(plateau_reached),
+        "cooldown_active": int(cooldown_active),
+        "trigger_fired": int(trigger_fired),
+        "epochs_since_improvement": int(state.epochs_since_improvement),
+    }
+    for target_name in sorted(state.targets.keys()):
+        trace_row[_adaptive_trace_weight_key(target_name)] = weights_before[target_name]
+        trace_row[_adaptive_trace_direction_key(target_name)] = directions_before[target_name]
+        trace_row[_adaptive_trace_next_weight_key(target_name)] = weights_after[target_name]
+        trace_row[_adaptive_trace_next_direction_key(target_name)] = directions_after[target_name]
+
+    state.trace_rows.append(trace_row)
+    return trace_row
 
 
 def get_dataloader(
@@ -280,6 +493,10 @@ class PLTrainer(L.LightningModule):
                 "attractor_loss",
             }
         self.prog_bar_metrics.add("loss")
+        self._adaptive_aux_schedule_state = _initialize_adaptive_aux_loss_schedule(
+            model=self.model,
+            training_config=self.training_config,
+        )
 
     def forward(self, inputs: Dict[str, Any], **kwargs) -> Any:
         """Forward pass of the model."""
@@ -350,6 +567,74 @@ class PLTrainer(L.LightningModule):
             epoch=int(self.current_epoch),
         )
 
+    def _get_monitored_metric_value(self, metric_name: str) -> Optional[float]:
+        monitored_value = self.trainer.callback_metrics.get(metric_name, None)
+        if monitored_value is not None and torch.is_tensor(monitored_value):
+            monitored_value = monitored_value.item()
+        if monitored_value is None:
+            return None
+        return float(monitored_value)
+
+    def _log_adaptive_schedule_epoch_metrics(
+        self,
+        *,
+        trace_row: Dict[str, Any],
+    ) -> None:
+        for target_name in sorted(self._adaptive_aux_schedule_state.targets.keys()):
+            weight_key = _adaptive_trace_weight_key(target_name)
+            direction_key = _adaptive_trace_direction_key(target_name)
+            next_weight_key = _adaptive_trace_next_weight_key(target_name)
+            next_direction_key = _adaptive_trace_next_direction_key(target_name)
+            self.log(
+                f"schedule_{weight_key}",
+                float(trace_row[next_weight_key]),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f"schedule_{direction_key}",
+                float(trace_row[next_direction_key]),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f"schedule_previous_{weight_key}",
+                float(trace_row[weight_key]),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f"schedule_previous_{direction_key}",
+                float(trace_row[direction_key]),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+        if trace_row["monitored_metric"] is not None:
+            self.log(
+                "schedule_monitored_metric",
+                float(trace_row["monitored_metric"]),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+        self.log(
+            "schedule_trigger_fired",
+            float(trace_row["trigger_fired"]),
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Performs a single validation step."""
         output = self(batch)
@@ -364,15 +649,28 @@ class PLTrainer(L.LightningModule):
 
     def on_train_epoch_end(self):
         """Optional debug info after each epoch."""
+        adaptive_trace_row = _step_adaptive_aux_loss_schedule(
+            model=self.model,
+            state=self._adaptive_aux_schedule_state,
+            epoch=int(self.current_epoch),
+            monitored_metric=self._get_monitored_metric_value(
+                getattr(
+                    self._adaptive_aux_schedule_state,
+                    "monitor",
+                    self.monitor_metric,
+                )
+            ) if self._adaptive_aux_schedule_state is not None else None,
+        )
+        if adaptive_trace_row is not None:
+            self._log_adaptive_schedule_epoch_metrics(trace_row=adaptive_trace_row)
+
         if self.debug_model:
             opt = self.optimizers()
             current_lr = None
             if opt is not None:
                 current_lr = opt.param_groups[0]["lr"]
 
-            monitored_value = self.trainer.callback_metrics.get(self.monitor_metric, None)
-            if monitored_value is not None and torch.is_tensor(monitored_value):
-                monitored_value = monitored_value.item()
+            monitored_value = self._get_monitored_metric_value(self.monitor_metric)
 
             if current_lr is not None:
                 print(
@@ -380,6 +678,11 @@ class PLTrainer(L.LightningModule):
                     f"lr={current_lr:.2e}, "
                     f"{self.monitor_metric}={monitored_value}"
                 )
+
+    def get_adaptive_aux_schedule_trace_rows(self) -> list[Dict[str, Any]]:
+        if self._adaptive_aux_schedule_state is None:
+            return []
+        return list(self._adaptive_aux_schedule_state.trace_rows)
 
     def configure_optimizers(self) -> Dict[str, Any]:
         """Configures optimizer and learning rate scheduler.
@@ -615,6 +918,17 @@ class BaseTrainerL:
         with metadata_path.open("w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
 
+    def _save_adaptive_aux_schedule_trace(self) -> None:
+        trace_rows = self.pl_model.get_adaptive_aux_schedule_trace_rows()
+        if not trace_rows:
+            return
+        trace_path = Path(self.model_dir) / "adaptive_aux_loss_schedule_trace.csv"
+        fieldnames = list(trace_rows[0].keys())
+        with trace_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(trace_rows)
+
     def train(self) -> str:
         set_seed(self.training_config.seed)
         os.makedirs(self.model_dir, exist_ok=True)
@@ -680,6 +994,7 @@ class BaseTrainerL:
         )
 
         self._copy_metrics_file(csv_logger)
+        self._save_adaptive_aux_schedule_trace()
         self._save_debug_overfit_artifacts()
 
         logger.info(f"Training done. Model saved to: {self.model_dir}")

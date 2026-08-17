@@ -14,8 +14,10 @@ from vaedecon.models.base import (
 )
 from vaedecon.models.vae.vae_model import VAE
 from vaedecon.trainers.base_trainer import (
+    _initialize_adaptive_aux_loss_schedule,
     _apply_aux_loss_schedules,
     _resolve_linear_schedule_value,
+    _step_adaptive_aux_loss_schedule,
 )
 from vaedecon.workflow.workflow import evaluate_model
 
@@ -680,6 +682,173 @@ def test_apply_aux_loss_schedules_updates_live_model_config():
 
     assert model.model_config.loss_coefficient.cell_type_sct_gep_weight == 0.5
     assert model.model_config.cell_type_existence_shift_scale == 0.25
+
+
+def test_initialize_adaptive_aux_loss_schedule_uses_ordered_ranges_and_sets_live_weights():
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(
+            loss_coefficient=SimpleNamespace(
+                cell_prop=0.0,
+                cell_type_sct_gep_weight=0.0,
+            ),
+        )
+    )
+    training_config = SimpleNamespace(
+        adaptive_aux_loss_schedule=SimpleNamespace(
+            enabled=True,
+            monitor="val_loss",
+            min_epoch_before_trigger=10,
+            trigger_patience=5,
+            trigger_min_delta=0.001,
+            cooldown_epochs=15,
+            update_interval_epochs=1,
+            pair_targets=True,
+            targets={
+                "cell_prop": SimpleNamespace(
+                    range=(500.0, 100.0),
+                    step_size=25.0,
+                    reverse_on_plateau=True,
+                ),
+                "cell_type_sct_gep_weight": SimpleNamespace(
+                    range=(10.0, 30.0),
+                    step_size=1.0,
+                    reverse_on_plateau=True,
+                ),
+            },
+        )
+    )
+
+    state = _initialize_adaptive_aux_loss_schedule(model, training_config)
+
+    assert state is not None
+    assert state.targets["cell_prop"].direction == -1
+    assert state.targets["cell_type_sct_gep_weight"].direction == 1
+    assert model.model_config.loss_coefficient.cell_prop == 500.0
+    assert model.model_config.loss_coefficient.cell_type_sct_gep_weight == 10.0
+
+
+def test_adaptive_aux_loss_schedule_reverses_on_plateau_and_records_trace():
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(
+            loss_coefficient=SimpleNamespace(
+                cell_prop=0.0,
+                cell_type_sct_gep_weight=0.0,
+            ),
+        )
+    )
+    training_config = SimpleNamespace(
+        adaptive_aux_loss_schedule=SimpleNamespace(
+            enabled=True,
+            monitor="val_loss",
+            min_epoch_before_trigger=0,
+            trigger_patience=1,
+            trigger_min_delta=0.0,
+            cooldown_epochs=0,
+            update_interval_epochs=1,
+            pair_targets=True,
+            targets={
+                "cell_prop": SimpleNamespace(
+                    range=(500.0, 100.0),
+                    step_size=25.0,
+                    reverse_on_plateau=True,
+                ),
+                "cell_type_sct_gep_weight": SimpleNamespace(
+                    range=(10.0, 30.0),
+                    step_size=1.0,
+                    reverse_on_plateau=True,
+                ),
+            },
+        )
+    )
+    state = _initialize_adaptive_aux_loss_schedule(model, training_config)
+
+    first_row = _step_adaptive_aux_loss_schedule(
+        model,
+        state,
+        epoch=0,
+        monitored_metric=1.0,
+    )
+    second_row = _step_adaptive_aux_loss_schedule(
+        model,
+        state,
+        epoch=1,
+        monitored_metric=1.0,
+    )
+
+    assert first_row is not None
+    assert first_row["trigger_fired"] == 0
+    assert first_row["cell_prop_weight"] == 500.0
+    assert first_row["next_cell_prop_weight"] == 475.0
+    assert first_row["cell_type_sct_gep_weight"] == 10.0
+    assert first_row["next_cell_type_sct_gep_weight"] == 11.0
+
+    assert second_row is not None
+    assert second_row["plateau_reached"] == 1
+    assert second_row["trigger_fired"] == 1
+    assert second_row["cell_prop_direction"] == -1
+    assert second_row["next_cell_prop_direction"] == 1
+    assert second_row["cell_prop_weight"] == 475.0
+    assert second_row["next_cell_prop_weight"] == 500.0
+    assert second_row["cell_type_sct_gep_weight"] == 11.0
+    assert second_row["next_cell_type_sct_gep_weight"] == 10.0
+    assert len(state.trace_rows) == 2
+    assert model.model_config.loss_coefficient.cell_prop == 500.0
+    assert model.model_config.loss_coefficient.cell_type_sct_gep_weight == 10.0
+
+
+def test_adaptive_aux_loss_schedule_clips_at_configured_bounds():
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(
+            loss_coefficient=SimpleNamespace(
+                cell_prop=0.0,
+                cell_type_sct_gep_weight=0.0,
+            ),
+        )
+    )
+    training_config = SimpleNamespace(
+        adaptive_aux_loss_schedule=SimpleNamespace(
+            enabled=True,
+            monitor="val_loss",
+            min_epoch_before_trigger=100,
+            trigger_patience=5,
+            trigger_min_delta=0.0,
+            cooldown_epochs=0,
+            update_interval_epochs=1,
+            pair_targets=True,
+            targets={
+                "cell_prop": SimpleNamespace(
+                    range=(500.0, 100.0),
+                    step_size=250.0,
+                    reverse_on_plateau=True,
+                ),
+                "cell_type_sct_gep_weight": SimpleNamespace(
+                    range=(10.0, 30.0),
+                    step_size=15.0,
+                    reverse_on_plateau=True,
+                ),
+            },
+        )
+    )
+    state = _initialize_adaptive_aux_loss_schedule(model, training_config)
+
+    row = _step_adaptive_aux_loss_schedule(
+        model,
+        state,
+        epoch=0,
+        monitored_metric=1.0,
+    )
+    row = _step_adaptive_aux_loss_schedule(
+        model,
+        state,
+        epoch=1,
+        monitored_metric=0.9,
+    )
+
+    assert row is not None
+    assert row["next_cell_prop_weight"] == 100.0
+    assert row["next_cell_type_sct_gep_weight"] == 30.0
+    assert model.model_config.loss_coefficient.cell_prop == 100.0
+    assert model.model_config.loss_coefficient.cell_type_sct_gep_weight == 30.0
 
 
 class _DummyPredictionDataset(torch.utils.data.Dataset):
