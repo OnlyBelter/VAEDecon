@@ -140,6 +140,8 @@ model:
   fusion_dropout_rate: [0.1, 0]
   encoders: ['EncoderResMLP']
   decoders: ['DecoderResMLP']
+  learn_gep_residual: false  # Set true to decode cell-type GEP residuals relative to the reference mean instead of full GEPs.
+  learn_gep_residual_mode: 'zscore'  # 'zscore' keeps the legacy std-scaled residual path; 'mean_centered' predicts direct scaled-log residuals around the cell-type-specific mean.
   predict_cell_prop: false  # Set to true to enable cell-proportion prediction and supervision.
   cell_prop_activation_function: 'softplus'  # 'softplus' keeps the Dirichlet workflow; 'sigmoid' predicts non-cancer cell types and fills cancer as the remainder; 'softmax' predicts all cell types directly; 'sigmoid_all_norm' applies sigmoid to all cell types and then normalizes them to sum to 1.
   cancer_cell_type_name: 'Cancer Cells'  # Required when cell_prop_activation_function is 'sigmoid'.
@@ -164,7 +166,8 @@ model:
     cross_sample_gene_var_weight: 1.0  # Matches per-(gene, cell_type) cross-sample variance of recon GEPs to training-SCT targets.
     cell_type_sct_gep_weight: 0.0  # Set > 0 to enable masked matched-sctGEP supervision during training.
     cell_type_existence_weight: 0.0  # Set > 0 to supervise thresholded cell-type existence derived from predicted cell proportions.
-    z_score_kl_weight: 0.1
+    z_score_kl_weight: 0.1  # Must be 0 when learn_gep_residual_mode='mean_centered'.
+    z_score_reg_weight: 0.0  # Must be 0 when learn_gep_residual_mode='mean_centered'.
     hierarchical_code_weight: 0.1
     low_mean_std_weight: 0  # weight for low mean/std genes to fit pre-calculated gene mean and std
     low_mean_threshold: 2.0
