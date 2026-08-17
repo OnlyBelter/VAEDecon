@@ -988,6 +988,15 @@ class ModelConfig(BaseModelConfig):
         default=False,
         description="Whether to learn GEP residuals compared to the mean GEP of each cell type (instead of learning the full GEP)"
     )
+    learn_gep_residual_mode: Literal["zscore", "mean_centered"] = Field(
+        default="zscore",
+        description=(
+            "Residual decoding mode used when learn_gep_residual=True. "
+            "'zscore' keeps the current std-scaled residual path; "
+            "'mean_centered' predicts scaled-log-space residuals relative to the "
+            "cell-type-specific mean."
+        ),
+    )
     conditional_decoder_cell_type_emb_dim: int = Field(
         default=64,
         gt=0,
@@ -1229,6 +1238,29 @@ class ModelConfig(BaseModelConfig):
 
         return self
 
+    @model_validator(mode='after')
+    def validate_residual_mode_consistency(self):
+        """Ensure residual-mode-specific losses are only used with compatible branches."""
+        if not self.learn_gep_residual:
+            return self
+
+        if self.learn_gep_residual_mode != "mean_centered":
+            return self
+
+        if self.loss_coefficient.z_score_kl_weight > 0:
+            raise ValueError(
+                "loss_coefficient['z_score_kl_weight'] must be 0 when "
+                "learn_gep_residual_mode='mean_centered'."
+            )
+
+        if self.loss_coefficient.z_score_reg_weight > 0:
+            raise ValueError(
+                "loss_coefficient['z_score_reg_weight'] must be 0 when "
+                "learn_gep_residual_mode='mean_centered'."
+            )
+
+        return self
+
     # ==================== Helper Methods ====================
 
     def get_encoder_architecture(self) -> List[Tuple[int, float]]:
@@ -1258,6 +1290,8 @@ class ModelConfig(BaseModelConfig):
             "encoder_types": self.encoders,
             "predict_cell_prop": self.predict_cell_prop,
             "cell_prop_activation_function": self.cell_prop_activation_function,
+            "learn_gep_residual": self.learn_gep_residual,
+            "learn_gep_residual_mode": self.learn_gep_residual_mode,
             "loss_settings": {
                 "beta": self.loss_coefficient.beta,
                 "gamma": self.loss_coefficient.gamma,

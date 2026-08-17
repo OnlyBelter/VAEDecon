@@ -49,6 +49,52 @@ def test_build_trainer_config_preserves_saved_model_selection(tmp_path: Path):
     assert trainer_config.per_device_eval_batch_size == 60
 
 
+def test_learn_gep_residual_mode_defaults_to_zscore_for_legacy_configs():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "learn_gep_residual": True,
+            }
+        }
+    )
+
+    assert loaded.model.learn_gep_residual is True
+    assert loaded.model.learn_gep_residual_mode == "zscore"
+
+
+def test_mean_centered_learn_gep_residual_mode_config_loads():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "learn_gep_residual": True,
+                "learn_gep_residual_mode": "mean_centered",
+            }
+        }
+    )
+
+    assert loaded.model.learn_gep_residual is True
+    assert loaded.model.learn_gep_residual_mode == "mean_centered"
+
+
+@pytest.mark.parametrize("weight_name", ["z_score_kl_weight", "z_score_reg_weight"])
+def test_mean_centered_mode_rejects_z_score_regularizers(weight_name: str):
+    with pytest.raises(
+        ValueError,
+        match="learn_gep_residual_mode='mean_centered'",
+    ):
+        VAEDeconConfig.from_dict(
+            {
+                "model": {
+                    "learn_gep_residual": True,
+                    "learn_gep_residual_mode": "mean_centered",
+                    "loss_coefficient": {
+                        weight_name: 1.0,
+                    },
+                }
+            }
+        )
+
+
 def test_legacy_single_test_set_populates_test_sets():
     loaded = VAEDeconConfig.from_dict(
         {

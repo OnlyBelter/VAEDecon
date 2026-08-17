@@ -637,23 +637,39 @@ class VAE(BaseAE):
 
         # 5. Scaling & Mixing
 
+        residual_mode = getattr(self.model_config, "learn_gep_residual_mode", "zscore")
+        recon_residual_log = None
+        recon_x_all_types_log = None
+
         # Log -> CPM (Batch, Genes, C)
         if not self.model_config.learn_gep_residual:
+            recon_x_all_types_log = recon_x_all_types
             if self.data_config.scaling_by_constant:
                 # Scale back up if input was scaled down.
                 recon_x_all_types = recon_x_all_types * self.scaling_factor
             # Decoder outputs full GEP in log space -> convert to CPM for mixing.
             recon_x_all_types_cpm = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
+            self.z_scores = None
+        elif residual_mode == "mean_centered":
+            # Decoder outputs a mean-centered residual in scaled log space.
+            recon_residual_log = recon_x_all_types
+            recon_x_all_types_log = recon_residual_log + self.g_mean.unsqueeze(0)
+            recon_x_all_types_unscaled_log = recon_x_all_types_log * self.scaling_factor
+            recon_x_all_types_cpm = log_exp2cpm_tensor(
+                recon_x_all_types_unscaled_log,
+                transpose=True,
+            )
+            self.z_scores = None
         else:
-            # If learning residual, decoder outputs residual z-score in range (-3, 3).
+            # If learning residual, decoder outputs residual z-score in range (-6, 6).
             # We multiply by std and add mean GEP in non-log space, then normalize to CPM.
 
             # Redefine minimum z-score to guarantee all values >= 0 after adding mean GEP.
             mu = self.g_mean_non_log.unsqueeze(0)                           # (1, G, C)
             std = torch.clamp(self.g_std_non_log, min=EPS).unsqueeze(0)     # (1, G, C)
-            z_min = torch.maximum(torch.full_like(std, -3.0), -mu / std)
+            z_min = torch.maximum(torch.full_like(std, -6.0), -mu / std)
             # Now recon_x_all_types is in range (z_min, 3).
-            recon_x_all_types = z_min + (3.0 - z_min) * recon_x_all_types
+            recon_x_all_types = z_min + (6.0 - z_min) * recon_x_all_types
             self.z_scores = recon_x_all_types  # For loss calculation: store the actual z-scores.
 
             # Convert residual z-score to residual in non-log space.
@@ -664,6 +680,7 @@ class VAE(BaseAE):
 
             # Normalize to CPM, then transpose back to (B, G, C).
             recon_x_all_types_cpm = non_log2cpm_tensor(recon_x_add_g_mean).transpose(1, 2)
+            recon_x_all_types_log = to_log_space(recon_x_all_types_cpm, self.scaling_factor)
 
         # Prepare proportions for mixing.
         prop_matrix = effective_cell_prop.unsqueeze(-1)
@@ -705,6 +722,8 @@ class VAE(BaseAE):
             mu_mean=mu_mean,
             device=device,
             recon_x_all_types_cpm=recon_x_all_types_cpm,
+            recon_x_all_types_log=recon_x_all_types_log,
+            recon_residual_log=recon_residual_log,
             true_sct_gep=true_sct_gep,
             true_sct_gep_present_mask=true_sct_gep_present_mask,
         )
@@ -731,6 +750,8 @@ class VAE(BaseAE):
             pred_cell_prop=effective_cell_prop,
             recon_x_conv=recon_x_conv_log,
             recon_x_all_types=recon_x_all_types_cpm,  # Usually return CPM format for analysis
+            recon_x_all_types_log=recon_x_all_types_log,
+            recon_residual_log=recon_residual_log,
             z_score_reciprocal=loss_terms.z_score_reciprocal,  # For monitoring potential z-score collapse when learning residuals
         )
 
@@ -754,6 +775,8 @@ class VAE(BaseAE):
         mu_mean: torch.Tensor,
         device: torch.device,
         recon_x_all_types_cpm: Optional[torch.Tensor] = None,
+        recon_x_all_types_log: Optional[torch.Tensor] = None,
+        recon_residual_log: Optional[torch.Tensor] = None,
         true_sct_gep: Optional[torch.Tensor] = None,
         true_sct_gep_present_mask: Optional[torch.Tensor] = None,
     ) -> LossTerms:
@@ -786,7 +809,20 @@ class VAE(BaseAE):
         gamma = lo.gamma
         attractor_weight = lo.attractor_weight
         z_score_reg_weight = lo.z_score_reg_weight
+        residual_mode = getattr(self.model_config, "learn_gep_residual_mode", "zscore")
         labels_available = has_usable_labels(y)
+
+        if self.model_config.learn_gep_residual and residual_mode == "mean_centered":
+            if lo.z_score_kl_weight > 0:
+                raise ValueError(
+                    "loss_coefficient['z_score_kl_weight'] must be 0 when "
+                    "learn_gep_residual_mode='mean_centered'."
+                )
+            if z_score_reg_weight > 0:
+                raise ValueError(
+                    "loss_coefficient['z_score_reg_weight'] must be 0 when "
+                    "learn_gep_residual_mode='mean_centered'."
+                )
 
         if (
             self.training
@@ -844,7 +880,13 @@ class VAE(BaseAE):
         g_mean_expanded = self.g_mean_non_log.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
         # g_std_expanded = self.g_std_non_log.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
         g_mean_expanded_log = to_log_space(g_mean_expanded, self.scaling_factor)  # (B, G, C)
-        recon_x_all_types_log = to_log_space(recon_x_all_types_cpm, self.scaling_factor)  # (B, G, C)
+        if recon_x_all_types_log is None:
+            if recon_x_all_types_cpm is None:
+                raise ValueError(
+                    "Either recon_x_all_types_log or recon_x_all_types_cpm is required "
+                    "for per-cell-type auxiliary losses."
+                )
+            recon_x_all_types_log = to_log_space(recon_x_all_types_cpm, self.scaling_factor)
         mask_f = mask.to(dtype=recon_x_all_types_log.dtype)
         diff2 = (recon_x_all_types_log - g_mean_expanded_log).pow(2) * mask_f
         denom = mask_f.sum(dim=(1, 2)).clamp_min(1.0)
@@ -862,7 +904,13 @@ class VAE(BaseAE):
 
         cell_type_sct_gep_weight = float(getattr(lo, "cell_type_sct_gep_weight", 0.0) or 0.0)
         if cell_type_sct_gep_weight > 0:
-            if recon_x_all_types_cpm is None:
+            if residual_mode == "mean_centered":
+                if recon_residual_log is None:
+                    raise ValueError(
+                        "recon_residual_log is required when cell_type_sct_gep_weight > 0 "
+                        "and learn_gep_residual_mode='mean_centered'."
+                    )
+            elif recon_x_all_types_cpm is None:
                 raise ValueError(
                     "recon_x_all_types_cpm is required when cell_type_sct_gep_weight > 0"
                 )
@@ -872,15 +920,26 @@ class VAE(BaseAE):
                 and labels_available
             )
             if supervision_ready:
-                cell_type_sct_gep_loss = self._matched_sct_gep_supervision_loss(
-                    recon_x_all_types_cpm=recon_x_all_types_cpm,
-                    true_sct_gep=true_sct_gep,
-                    true_sct_gep_present_mask=true_sct_gep_present_mask,
-                    true_cell_prop=y,
-                    cell_prop_threshold=float(
-                        getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
-                    ),
-                )
+                if residual_mode == "mean_centered":
+                    cell_type_sct_gep_loss = self._matched_sct_gep_residual_supervision_loss(
+                        pred_residual_log=recon_residual_log,
+                        true_sct_gep=true_sct_gep,
+                        true_sct_gep_present_mask=true_sct_gep_present_mask,
+                        true_cell_prop=y,
+                        cell_prop_threshold=float(
+                            getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
+                        ),
+                    )
+                else:
+                    cell_type_sct_gep_loss = self._matched_sct_gep_supervision_loss(
+                        recon_x_all_types_cpm=recon_x_all_types_cpm,
+                        true_sct_gep=true_sct_gep,
+                        true_sct_gep_present_mask=true_sct_gep_present_mask,
+                        true_cell_prop=y,
+                        cell_prop_threshold=float(
+                            getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
+                        ),
+                    )
             elif self.training:
                 if true_sct_gep is None or true_sct_gep_present_mask is None:
                     raise ValueError(
@@ -1080,6 +1139,22 @@ class VAE(BaseAE):
         active_cell_type_mask = true_sct_gep_present_mask & (true_cell_prop >= cell_prop_threshold)
         active_gene_mask = active_cell_type_mask.unsqueeze(1).to(dtype=recon_x_all_types_log.dtype)
         diff2 = (recon_x_all_types_log - true_sct_gep).pow(2) * active_gene_mask
+        denom = active_gene_mask.sum(dim=(1, 2)).clamp_min(1.0)
+        return diff2.sum(dim=(1, 2)) / denom
+
+    def _matched_sct_gep_residual_supervision_loss(
+        self,
+        pred_residual_log: torch.Tensor,
+        true_sct_gep: torch.Tensor,
+        true_sct_gep_present_mask: torch.Tensor,
+        true_cell_prop: torch.Tensor,
+        cell_prop_threshold: float,
+    ) -> torch.Tensor:
+        """Masked scaled-log MSE between predicted and true mean-centered SCT residuals."""
+        true_residual_log = true_sct_gep - self.g_mean.unsqueeze(0)
+        active_cell_type_mask = true_sct_gep_present_mask & (true_cell_prop >= cell_prop_threshold)
+        active_gene_mask = active_cell_type_mask.unsqueeze(1).to(dtype=pred_residual_log.dtype)
+        diff2 = (pred_residual_log - true_residual_log).pow(2) * active_gene_mask
         denom = active_gene_mask.sum(dim=(1, 2)).clamp_min(1.0)
         return diff2.sum(dim=(1, 2)) / denom
 

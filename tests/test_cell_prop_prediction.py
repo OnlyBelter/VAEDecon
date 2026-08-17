@@ -58,6 +58,7 @@ def _build_dummy_vae(
             gene_std_weight=0.0,
         ),
         learn_gep_residual=False,
+        learn_gep_residual_mode="zscore",
         predict_cell_prop=True,
         cell_prop_activation_function=activation_function,
         cell_type_existence_shift_scale=existence_shift_scale,
@@ -72,6 +73,7 @@ def _build_dummy_vae(
     dummy.cancer_cell_type_index = cancer_cell_type_index
     dummy.training = training
     dummy.scaling_factor = 1.0
+    dummy.g_mean = torch.zeros((3, 2), dtype=torch.float32)
     dummy.g_mean_non_log = torch.ones((3, 2), dtype=torch.float32)
     dummy.g_std_non_log = torch.ones((3, 2), dtype=torch.float32)
     dummy.z_scores = torch.ones((2, 3, 2), dtype=torch.float32)
@@ -640,6 +642,121 @@ def test_loss_function_skips_cell_type_existence_supervision_during_inference():
         loss_terms.cell_type_existence,
         torch.tensor(0.0, dtype=torch.float32),
     )
+
+
+def test_matched_sct_gep_residual_supervision_loss_uses_true_minus_mean_with_mask():
+    dummy = _build_dummy_vae(cell_prop_weight=0.0, training=True)
+    dummy.g_mean = torch.tensor(
+        [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]],
+        dtype=torch.float32,
+    )
+
+    pred_residual_log = torch.tensor(
+        [
+            [[0.0, 5.0], [1.0, 6.0], [2.0, 7.0]],
+            [[3.0, 8.0], [4.0, 9.0], [5.0, 10.0]],
+        ],
+        dtype=torch.float32,
+    )
+    true_residual_log = torch.tensor(
+        [
+            [[1.0, 50.0], [2.0, 60.0], [3.0, 70.0]],
+            [[4.0, 80.0], [5.0, 90.0], [6.0, 100.0]],
+        ],
+        dtype=torch.float32,
+    )
+    true_sct_gep = true_residual_log + dummy.g_mean.unsqueeze(0)
+    true_sct_gep_present_mask = torch.tensor(
+        [[True, True], [True, False]],
+        dtype=torch.bool,
+    )
+    true_cell_prop = torch.tensor(
+        [[0.20, 0.05], [0.30, 0.40]],
+        dtype=torch.float32,
+    )
+
+    loss = VAE._matched_sct_gep_residual_supervision_loss(
+        dummy,
+        pred_residual_log=pred_residual_log,
+        true_sct_gep=true_sct_gep,
+        true_sct_gep_present_mask=true_sct_gep_present_mask,
+        true_cell_prop=true_cell_prop,
+        cell_prop_threshold=0.1,
+    )
+
+    expected = torch.tensor([3.0, 3.0], dtype=torch.float32)
+    assert torch.allclose(loss, expected)
+
+
+def test_loss_function_uses_direct_residual_supervision_in_mean_centered_mode():
+    dummy = _build_dummy_vae(cell_prop_weight=0.0, training=True)
+    dummy.model_config.learn_gep_residual = True
+    dummy.model_config.learn_gep_residual_mode = "mean_centered"
+    dummy.model_config.loss_coefficient.cell_type_sct_gep_weight = 1.0
+    dummy._matched_sct_gep_residual_supervision_loss = lambda **kwargs: torch.full(
+        (2,),
+        3.0,
+        dtype=torch.float32,
+    )
+
+    def _wrong_helper(**kwargs):
+        raise AssertionError("Expected mean_centered mode to use direct residual supervision.")
+
+    dummy._matched_sct_gep_supervision_loss = _wrong_helper
+
+    loss_terms = VAE.loss_function(
+        dummy,
+        x=torch.zeros((2, 3), dtype=torch.float32),
+        y=torch.tensor([[0.7, 0.3], [0.2, 0.8]], dtype=torch.float32),
+        recon_x_conv=torch.zeros((2, 3), dtype=torch.float32),
+        mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
+        logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
+        pred_cell_prop=torch.tensor([[0.7, 0.3], [0.2, 0.8]], dtype=torch.float32),
+        existence_logits=None,
+        dd_alpha=None,
+        mu_prior=torch.zeros((2, 1), dtype=torch.float32),
+        recon_gene_mean=torch.ones((3, 2), dtype=torch.float32),
+        recon_gene_std=torch.ones((3, 2), dtype=torch.float32),
+        logvar_mean=torch.zeros((2, 1), dtype=torch.float32),
+        mu_mean=torch.zeros((2, 1), dtype=torch.float32),
+        device=torch.device("cpu"),
+        recon_x_all_types_cpm=torch.ones((2, 3, 2), dtype=torch.float32),
+        recon_x_all_types_log=torch.zeros((2, 3, 2), dtype=torch.float32),
+        recon_residual_log=torch.zeros((2, 3, 2), dtype=torch.float32),
+        true_sct_gep=torch.zeros((2, 3, 2), dtype=torch.float32),
+        true_sct_gep_present_mask=torch.ones((2, 2), dtype=torch.bool),
+    )
+
+    assert torch.isclose(loss_terms.cell_type_sct_gep, torch.tensor(3.0, dtype=torch.float32))
+
+
+def test_loss_function_rejects_z_score_kl_in_mean_centered_mode():
+    dummy = _build_dummy_vae(cell_prop_weight=0.0, training=True)
+    dummy.model_config.learn_gep_residual = True
+    dummy.model_config.learn_gep_residual_mode = "mean_centered"
+    dummy.model_config.loss_coefficient.z_score_kl_weight = 1.0
+
+    with pytest.raises(ValueError, match="learn_gep_residual_mode='mean_centered'"):
+        VAE.loss_function(
+            dummy,
+            x=torch.zeros((2, 3), dtype=torch.float32),
+            y=torch.tensor([[0.7, 0.3], [0.2, 0.8]], dtype=torch.float32),
+            recon_x_conv=torch.zeros((2, 3), dtype=torch.float32),
+            mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
+            logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
+            pred_cell_prop=torch.tensor([[0.7, 0.3], [0.2, 0.8]], dtype=torch.float32),
+            existence_logits=None,
+            dd_alpha=None,
+            mu_prior=torch.zeros((2, 1), dtype=torch.float32),
+            recon_gene_mean=torch.ones((3, 2), dtype=torch.float32),
+            recon_gene_std=torch.ones((3, 2), dtype=torch.float32),
+            logvar_mean=torch.zeros((2, 1), dtype=torch.float32),
+            mu_mean=torch.zeros((2, 1), dtype=torch.float32),
+            device=torch.device("cpu"),
+            recon_x_all_types_cpm=torch.ones((2, 3, 2), dtype=torch.float32),
+            recon_x_all_types_log=torch.zeros((2, 3, 2), dtype=torch.float32),
+            recon_residual_log=torch.zeros((2, 3, 2), dtype=torch.float32),
+        )
 
 
 def test_resolve_linear_schedule_value_interpolates_between_epochs():
