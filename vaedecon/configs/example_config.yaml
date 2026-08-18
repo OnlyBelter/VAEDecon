@@ -119,6 +119,18 @@ model:
   fusion_hidden_dims: [512, 256]
   fusion_dropout_rate: [0.1, 0]
   encoders: ['EncoderResMLP']
+  encoder_aliases: ['resmlp_main']  # Optional aliases aligned with `encoders`; routing can target a specific alias or use `fused`.
+  encoder_output_routing:
+    cell_prop_source: 'fused'  # 'fused' keeps the default VAE behavior; set to an encoder alias to route from one branch directly.
+    latent_posterior_source: 'fused'
+    decoder_context_source: 'fused'
+  # Example task-specialized hybrid with the Transformer branch leading cell proportions and bulk context:
+  # encoders: ['EncoderResMLP', 'GeneTransformerEncoder']
+  # encoder_aliases: ['mlp_main', 'transformer_main']
+  # encoder_output_routing:
+  #   cell_prop_source: 'transformer_main'
+  #   latent_posterior_source: 'mlp_main'
+  #   decoder_context_source: 'transformer_main'
   decoders: ['DecoderResMLP']
   learn_gep_residual: false  # Set true to decode cell-type GEP residuals relative to the reference mean instead of full GEPs.
   learn_gep_residual_mode: 'zscore'  # 'zscore' keeps the legacy std-scaled residual path; 'mean_centered' predicts direct scaled-log residuals around the cell-type-specific mean.

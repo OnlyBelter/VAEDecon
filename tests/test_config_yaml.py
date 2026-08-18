@@ -95,6 +95,91 @@ def test_mean_centered_mode_rejects_z_score_regularizers(weight_name: str):
         )
 
 
+def test_encoder_output_routing_defaults_generate_encoder_aliases():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "encoders": ["EncoderMLP", "GeneTransformerEncoder"],
+            }
+        }
+    )
+
+    assert loaded.model.encoder_aliases == ["encoder_0", "encoder_1"]
+    assert loaded.model.encoder_output_routing.cell_prop_source == "fused"
+    assert loaded.model.encoder_output_routing.latent_posterior_source == "fused"
+    assert loaded.model.encoder_output_routing.decoder_context_source == "fused"
+
+
+def test_encoder_output_routing_accepts_explicit_aliases():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "encoders": ["EncoderMLP", "GeneTransformerEncoder"],
+                "encoder_aliases": ["mlp_main", "transformer_main"],
+                "encoder_output_routing": {
+                    "cell_prop_source": "transformer_main",
+                    "latent_posterior_source": "mlp_main",
+                    "decoder_context_source": "transformer_main",
+                },
+            }
+        }
+    )
+
+    assert loaded.model.encoder_aliases == ["mlp_main", "transformer_main"]
+    assert loaded.model.encoder_output_routing.cell_prop_source == "transformer_main"
+    assert loaded.model.encoder_output_routing.latent_posterior_source == "mlp_main"
+    assert loaded.model.encoder_output_routing.decoder_context_source == "transformer_main"
+
+
+def test_encoder_output_routing_rejects_unknown_alias():
+    with pytest.raises(ValueError, match="cell_prop_source must be one of"):
+        VAEDeconConfig.from_dict(
+            {
+                "model": {
+                    "encoders": ["EncoderMLP", "GeneTransformerEncoder"],
+                    "encoder_aliases": ["mlp_main", "transformer_main"],
+                    "encoder_output_routing": {
+                        "cell_prop_source": "pathway_main",
+                    },
+                }
+            }
+        )
+
+
+def test_encoder_output_routing_supports_four_encoders():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "encoders": [
+                    "EncoderMLP",
+                    "EncoderPathNet",
+                    "EncoderSGNN",
+                    "GeneTransformerEncoder",
+                ],
+                "encoder_aliases": [
+                    "mlp_main",
+                    "pathway_main",
+                    "sgnn_main",
+                    "transformer_main",
+                ],
+                "encoder_output_routing": {
+                    "cell_prop_source": "transformer_main",
+                    "latent_posterior_source": "fused",
+                    "decoder_context_source": "fused",
+                },
+            }
+        }
+    )
+
+    assert loaded.model.encoder_aliases == [
+        "mlp_main",
+        "pathway_main",
+        "sgnn_main",
+        "transformer_main",
+    ]
+    assert len(loaded.model.encoders) == 4
+
+
 def test_legacy_single_test_set_populates_test_sets():
     loaded = VAEDeconConfig.from_dict(
         {

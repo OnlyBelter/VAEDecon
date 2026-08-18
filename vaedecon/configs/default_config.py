@@ -122,6 +122,31 @@ class TrainingSetSCTTargetConfig(BaseModel):
         return self
 
 
+class EncoderOutputRoutingConfig(BaseModel):
+    """Routing policy for multi-encoder outputs."""
+
+    cell_prop_source: str = "fused"
+    latent_posterior_source: str = "fused"
+    decoder_context_source: str = "fused"
+
+    @field_validator(
+        "cell_prop_source",
+        "latent_posterior_source",
+        "decoder_context_source",
+        mode="before",
+    )
+    @classmethod
+    def validate_routing_source(cls, v: str) -> str:
+        if v is None:
+            return "fused"
+        if not isinstance(v, str):
+            raise ValueError("routing sources must be strings")
+        source = v.strip()
+        if not source:
+            raise ValueError("routing sources cannot be empty")
+        return source
+
+
 class ScalarScheduleConfig(BaseModel):
     """Linear scalar schedule for training-time coefficient updates."""
 
@@ -786,6 +811,14 @@ class ModelConfig(BaseModelConfig):
         default_factory=lambda: ['EncoderHybrid'],
         description="List of encoder types to use"
     )
+    encoder_aliases: List[str] = Field(
+        default_factory=list,
+        description="Optional aliases for active encoders, aligned by position with `encoders`.",
+    )
+    encoder_output_routing: EncoderOutputRoutingConfig = Field(
+        default_factory=EncoderOutputRoutingConfig,
+        description="Routing policy for cell proportions, latent posteriors, and decoder context.",
+    )
 
     # ==================== Decoder Types ====================
     decoders: List[str] = Field(
@@ -1123,6 +1156,21 @@ class ModelConfig(BaseModelConfig):
 
         return v
 
+    @field_validator('encoder_aliases')
+    @classmethod
+    def validate_encoder_aliases(cls, v: List[str]) -> List[str]:
+        aliases: List[str] = []
+        for alias in v:
+            if not isinstance(alias, str):
+                raise ValueError("encoder_aliases entries must be strings")
+            normalized = alias.strip()
+            if not normalized:
+                raise ValueError("encoder_aliases entries cannot be empty")
+            aliases.append(normalized)
+        if len(set(aliases)) != len(aliases):
+            raise ValueError(f"encoder_aliases must be unique, got {aliases}")
+        return aliases
+
     @model_validator(mode='after')
     def validate_architecture_consistency(self):
         """Ensure encoder/decoder architecture is consistent."""
@@ -1149,6 +1197,33 @@ class ModelConfig(BaseModelConfig):
                 f"fusion_dropout_rate (len={len(self.fusion_dropout_rate)}) "
                 f"must have the same length"
             )
+
+        return self
+
+    @model_validator(mode='after')
+    def validate_encoder_output_routing(self):
+        """Ensure encoder aliases and routing selections align with active encoders."""
+        if not self.encoder_aliases:
+            self.encoder_aliases = [f"encoder_{idx}" for idx in range(len(self.encoders))]
+
+        if len(self.encoder_aliases) != len(self.encoders):
+            raise ValueError(
+                f"encoder_aliases (len={len(self.encoder_aliases)}) and "
+                f"encoders (len={len(self.encoders)}) must have the same length"
+            )
+
+        valid_sources = set(self.encoder_aliases) | {"fused"}
+        routing = self.encoder_output_routing
+        routing_values = {
+            "cell_prop_source": routing.cell_prop_source,
+            "latent_posterior_source": routing.latent_posterior_source,
+            "decoder_context_source": routing.decoder_context_source,
+        }
+        for field_name, source in routing_values.items():
+            if source not in valid_sources:
+                raise ValueError(
+                    f"{field_name} must be one of {sorted(valid_sources)}, got {source!r}"
+                )
 
         return self
 

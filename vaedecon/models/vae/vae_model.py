@@ -72,7 +72,7 @@ class VAE(BaseAE):
     Variational Autoencoder model for cellular component deconvolution.
 
     Design highlights:
-    1) Supports 1 or 2 encoders.
+    1) Supports 1 to 4 encoders.
     2) Uses posterior-level fusion (default PoE) when multiple encoders are provided.
     3) Maintains gene-statistic targets (mean/std) as registered buffers.
     4) Keeps reconstruction in biologically meaningful spaces (log/non-log/CPM) with explicit transforms.
@@ -109,8 +109,23 @@ class VAE(BaseAE):
         # ---------------------------------------------------------------------
         self.z_scores = None
         self.n_encoders = len(self.encoders)
-        if self.n_encoders not in (1, 2, 3):
-            raise ValueError(f"Only 1, 2, or 3 encoders are supported, got {self.n_encoders}.")
+        if self.n_encoders not in (1, 2, 3, 4):
+            raise ValueError(f"Only 1, 2, 3, or 4 encoders are supported, got {self.n_encoders}.")
+        self.encoder_aliases = list(getattr(model_config, "encoder_aliases", []) or [])
+        if not self.encoder_aliases:
+            self.encoder_aliases = [f"encoder_{idx}" for idx in range(self.n_encoders)]
+        if len(self.encoder_aliases) != self.n_encoders:
+            raise ValueError(
+                f"encoder_aliases (len={len(self.encoder_aliases)}) must match "
+                f"the number of encoders ({self.n_encoders})."
+            )
+        self.encoder_alias_to_index = {
+            alias: idx for idx, alias in enumerate(self.encoder_aliases)
+        }
+        routing = getattr(model_config, "encoder_output_routing", None)
+        self.cell_prop_source = getattr(routing, "cell_prop_source", "fused")
+        self.latent_posterior_source = getattr(routing, "latent_posterior_source", "fused")
+        self.decoder_context_source = getattr(routing, "decoder_context_source", "fused")
 
         self.model_name = "VAE"
         self.scaling_factor = float(data_config.scaling_factor)
@@ -387,9 +402,12 @@ class VAE(BaseAE):
             raise ValueError("feature_list must contain at least one encoder feature tensor.")
 
         projected_features = [
-            projector(feature)
-            for projector, feature in zip(self.cell_prop_feature_projectors, feature_list, strict=False)
+            self.cell_prop_feature_projectors[idx](feature)
+            for idx, feature in enumerate(feature_list)
+            if feature is not None
         ]
+        if not projected_features:
+            raise ValueError("At least one encoder feature is required for shared feature fusion.")
         if len(projected_features) == 1:
             return projected_features[0], None
 
@@ -435,23 +453,123 @@ class VAE(BaseAE):
         feature_list: List[Optional[torch.Tensor]],
     ) -> torch.Tensor:
         """Fuse encoder-side sample features into one per-sample decoder context."""
-        available_features = [feature for feature in feature_list if feature is not None]
-        if not available_features:
+        projected_features = [
+            self.decoder_context_feature_projectors[idx](feature)
+            for idx, feature in enumerate(feature_list)
+            if feature is not None
+        ]
+        if not projected_features:
             raise ValueError(
                 "Conditioned decoders require encoders to expose cell_prop_feature."
             )
-
-        projected_features = [
-            projector(feature)
-            for projector, feature in zip(
-                self.decoder_context_feature_projectors,
-                available_features,
-                strict=False,
-            )
-        ]
         if len(projected_features) == 1:
             return projected_features[0]
         return torch.stack(projected_features, dim=0).mean(dim=0)
+
+    def _resolve_routing_index(self, source: str, *, field_name: str) -> Optional[int]:
+        """Return the encoder index for a named routing source, or None for fused."""
+        if source == "fused":
+            return None
+        if source not in self.encoder_alias_to_index:
+            raise ValueError(
+                f"{field_name}={source!r} does not match any active encoder alias "
+                f"{self.encoder_aliases}."
+            )
+        return self.encoder_alias_to_index[source]
+
+    def _route_latent_posterior(
+        self,
+        *,
+        mu_list: List[torch.Tensor],
+        logvar_list: List[torch.Tensor],
+        mu_mean_list: List[torch.Tensor],
+        logvar_mean_list: List[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Select one encoder posterior or fall back to the configured fusion path."""
+        source_index = self._resolve_routing_index(
+            self.latent_posterior_source,
+            field_name="encoder_output_routing.latent_posterior_source",
+        )
+        if source_index is not None:
+            return (
+                mu_list[source_index],
+                logvar_list[source_index],
+                mu_mean_list[source_index],
+                logvar_mean_list[source_index],
+            )
+        if self.n_encoders == 1:
+            return mu_list[0], logvar_list[0], mu_mean_list[0], logvar_mean_list[0]
+        return self._fuse_encoder_posteriors(
+            mu_lists_celltype=mu_list,
+            logvar_lists_celltype=logvar_list,
+            mu_list_overall=mu_mean_list,
+            logvar_list_overall=logvar_mean_list,
+            strategy=self.fusion_strategy,
+        )
+
+    def _route_cell_prop_prediction(
+        self,
+        *,
+        prop_list: List[Optional[torch.Tensor]],
+        dd_alpha_list: List[Optional[torch.Tensor]],
+        feature_list: List[Optional[torch.Tensor]],
+        eps: float = EPS,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Select one encoder cell-proportion branch or use the existing fusion path."""
+        if not self.model_config.predict_cell_prop:
+            return None, None
+
+        source_index = self._resolve_routing_index(
+            self.cell_prop_source,
+            field_name="encoder_output_routing.cell_prop_source",
+        )
+        if source_index is not None:
+            pred_cell_prop = prop_list[source_index]
+            if pred_cell_prop is None:
+                raise ValueError(
+                    f"Encoder alias {self.encoder_aliases[source_index]!r} does not expose cell_prop."
+                )
+            return pred_cell_prop, dd_alpha_list[source_index]
+
+        if self._use_shared_cell_prop_head:
+            return self._predict_cell_prop_from_features(feature_list=feature_list, eps=eps)
+        if self.n_encoders == 1:
+            return prop_list[0], dd_alpha_list[0]
+
+        available_props = [prop for prop in prop_list if prop is not None]
+        if not available_props:
+            raise ValueError("No encoder exposed cell_prop for fused cell-proportion routing.")
+        pred_cell_prop = torch.mean(torch.stack(available_props, dim=0), dim=0)
+        available_dd_alpha = [alpha for alpha in dd_alpha_list if alpha is not None]
+        dd_alpha = (
+            torch.mean(torch.stack(available_dd_alpha, dim=0), dim=0)
+            if available_dd_alpha else None
+        )
+        return pred_cell_prop, dd_alpha
+
+    def _route_decoder_bulk_context(
+        self,
+        *,
+        feature_list: List[Optional[torch.Tensor]],
+    ) -> Optional[torch.Tensor]:
+        """Select one encoder decoder context feature or use the fused context path."""
+        if not self._use_decoder_conditioning:
+            return None
+
+        source_index = self._resolve_routing_index(
+            self.decoder_context_source,
+            field_name="encoder_output_routing.decoder_context_source",
+        )
+        if source_index is None:
+            return self._build_decoder_bulk_context(feature_list=feature_list)
+
+        feature = feature_list[source_index]
+        if feature is None:
+            raise ValueError(
+                f"Encoder alias {self.encoder_aliases[source_index]!r} does not expose "
+                "a decoder context feature."
+            )
+        return self.decoder_context_feature_projectors[source_index](feature)
 
     def _resolve_effective_cell_prop(
         self,
@@ -532,6 +650,7 @@ class VAE(BaseAE):
         mu_mean_list, logvar_mean_list = [], []
         prop_list, dd_alpha_list = [], []
         cell_prop_feature_list = []
+        decoder_context_feature_list = []
 
         for encoder in self.encoders:
             out = encoder(x=x_input, y=y)
@@ -540,43 +659,29 @@ class VAE(BaseAE):
             mu_mean_list.append(out.mu_mean)                # (B, L)
             logvar_mean_list.append(out.logvar_mean)        # (B, L)
             prop_list.append(out.cell_prop)                 # (B, C)
-            cell_prop_feature_list.append(getattr(out, "cell_prop_feature", None))
-
-            if self.model_config.predict_cell_prop and out.dd_alpha is not None:
-                # Dirichlet distribution parameters for cell type proportions.
-                dd_alpha_list.append(out.dd_alpha)          # (B, C)
+            cell_prop_feature = getattr(out, "cell_prop_feature", None)
+            if cell_prop_feature is None:
+                cell_prop_feature = getattr(out, "bulk_context_feature", None)
+            cell_prop_feature_list.append(cell_prop_feature)
+            decoder_context_feature = getattr(out, "bulk_context_feature", None)
+            if decoder_context_feature is None:
+                decoder_context_feature = getattr(out, "cell_prop_feature", None)
+            decoder_context_feature_list.append(decoder_context_feature)
+            dd_alpha_list.append(getattr(out, "dd_alpha", None))
 
         # 3. Fusion (Single or Multi-Encoder)
-        if self.n_encoders == 1:
-            mu_types = mu_list[0]
-            log_var_types = logvar_list[0]
-            mu_mean = mu_mean_list[0]
-            logvar_mean = logvar_mean_list[0]
-        else:
-            # If multiple encoders exist, fuse at posterior level by default.
-            mu_types, log_var_types, mu_mean, logvar_mean = self._fuse_encoder_posteriors(
-                mu_lists_celltype=mu_list,
-                logvar_lists_celltype=logvar_list,
-                mu_list_overall=mu_mean_list,
-                logvar_list_overall=logvar_mean_list,
-                strategy=self.fusion_strategy,
-            )
+        mu_types, log_var_types, mu_mean, logvar_mean = self._route_latent_posterior(
+            mu_list=mu_list,
+            logvar_list=logvar_list,
+            mu_mean_list=mu_mean_list,
+            logvar_mean_list=logvar_mean_list,
+        )
 
-        if self.model_config.predict_cell_prop:
-            if self._use_shared_cell_prop_head:
-                pred_cell_prop, dd_alpha = self._predict_cell_prop_from_features(
-                    feature_list=cell_prop_feature_list,
-                )
-            elif self.n_encoders == 1:
-                pred_cell_prop = prop_list[0]
-                dd_alpha = dd_alpha_list[0] if dd_alpha_list else None
-            else:
-                # Proportions: simple linear opinion pool (average) as baseline.
-                pred_cell_prop = torch.mean(torch.stack(prop_list, dim=0), dim=0)
-                dd_alpha = torch.mean(torch.stack(dd_alpha_list, dim=0), dim=0) if dd_alpha_list else None
-        else:
-            pred_cell_prop = None
-            dd_alpha = None
+        pred_cell_prop, dd_alpha = self._route_cell_prop_prediction(
+            prop_list=prop_list,
+            dd_alpha_list=dd_alpha_list,
+            feature_list=cell_prop_feature_list,
+        )
 
         effective_cell_prop = self._resolve_effective_cell_prop(
             labels=y,
@@ -590,11 +695,9 @@ class VAE(BaseAE):
             device=device,
         )
         mu_mean = mu_types.mean(dim=-1)
-        decoder_bulk_context = None
-        if self._use_decoder_conditioning:
-            decoder_bulk_context = self._build_decoder_bulk_context(
-                feature_list=cell_prop_feature_list,
-            )
+        decoder_bulk_context = self._route_decoder_bulk_context(
+            feature_list=decoder_context_feature_list,
+        )
 
         # 4. Reconstruction (Batch Decoding Optimization)
         # -------------------------------------------------------

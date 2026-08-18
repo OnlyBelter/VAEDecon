@@ -69,8 +69,8 @@ def create_model(
     if not isinstance(encoder_cls_name_list, list):
         raise TypeError("encoder_cls_name_list must be a list of encoder class names.")
     
-    if not (1 <= len(encoder_cls_name_list) <= 3):
-        raise ValueError("encoder_cls_name_list must contain between 1 and 3 encoder names.")
+    if not (1 <= len(encoder_cls_name_list) <= 4):
+        raise ValueError("encoder_cls_name_list must contain between 1 and 4 encoder names.")
     
     if any(not isinstance(name, str) or not name.strip() for name in encoder_cls_name_list):
         raise ValueError("All encoder names in encoder_cls_name_list must be non-empty strings.")
@@ -89,14 +89,25 @@ def create_model(
     if unsupported:
         raise NotImplementedError(f"Unsupported encoder class name(s): {unsupported}")
     
-    for encoder_name in normalized_encoder_names:
+    encoder_aliases = list(getattr(model_config, "encoder_aliases", []) or [])
+    if not encoder_aliases:
+        encoder_aliases = [f"encoder_{idx}" for idx in range(len(normalized_encoder_names))]
+    elif len(encoder_aliases) != len(normalized_encoder_names):
+        raise ValueError(
+            f"encoder_aliases (len={len(encoder_aliases)}) must match the number of encoders "
+            f"({len(normalized_encoder_names)})."
+        )
+
+    for idx, encoder_name in enumerate(normalized_encoder_names):
         if encoder_name == "encoderhybrid":
             hybrid_kwargs = kwargs.copy()
             hybrid_kwargs["mlp_encoder"] = EncoderMLP(**kwargs)
             hybrid_kwargs["gnn_encoder"] = EncoderSGNN(**kwargs)
-            encoders.append(EncoderHybrid(**hybrid_kwargs))
+            encoder = EncoderHybrid(**hybrid_kwargs)
         else:
-            encoders.append(encoder_registry[encoder_name](**kwargs))
+            encoder = encoder_registry[encoder_name](**kwargs)
+        encoder.encoder_alias = encoder_aliases[idx]
+        encoders.append(encoder)
 
     for decoder_cls_name in decoder_cls:
         decoder_cls_name = decoder_cls_name.lower()
