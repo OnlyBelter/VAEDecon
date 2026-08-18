@@ -1,4 +1,6 @@
+import inspect
 import json
+import logging
 import os
 import numpy as np
 import pandas as pd
@@ -7,6 +9,55 @@ from pathlib import Path
 from typing import Dict, Any, Type, Union, List
 import torch
 from torch.utils.data import DataLoader
+
+# #region debug-point transformer-encoder-init-kwargs
+DEBUG_SESSION_ID = "transformer-encoder-init-kwargs"
+_debug_logger = logging.getLogger(f"debug.{DEBUG_SESSION_ID}")
+if not _debug_logger.handlers:
+    _debug_handler = logging.StreamHandler()
+    _debug_handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    _debug_logger.addHandler(_debug_handler)
+_debug_logger.setLevel(logging.INFO)
+_debug_logger.propagate = False
+
+
+def _debug_report_encoder_init(
+    *,
+    session_id: str,
+    event: str,
+    payload: Dict[str, Any],
+) -> None:
+    safe_payload = {}
+    for key, value in payload.items():
+        if isinstance(value, (str, int, float, bool, type(None))):
+            safe_payload[key] = value
+        elif isinstance(value, (list, tuple, set)):
+            try:
+                safe_payload[key] = [
+                    item if isinstance(item, (str, int, float, bool, type(None))) else str(item)
+                    for item in value
+                ]
+            except Exception:
+                safe_payload[key] = str(value)
+        elif isinstance(value, dict):
+            safe_payload[key] = {
+                str(k): v if isinstance(v, (str, int, float, bool, type(None))) else str(v)
+                for k, v in value.items()
+            }
+        else:
+            safe_payload[key] = str(value)
+    _debug_logger.info(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "event": event,
+                "payload": safe_payload,
+            },
+            sort_keys=True,
+            default=str,
+        )
+    )
+# #endregion debug-point transformer-encoder-init-kwargs
 
 from ..utility import check_dir, non_log2log_cpm
 from ..data import GEPDataset
@@ -99,13 +150,30 @@ def create_model(
         )
 
     for idx, encoder_name in enumerate(normalized_encoder_names):
+        encoder_cls = encoder_registry[encoder_name]
+        sig_params = list(inspect.signature(encoder_cls.__init__).parameters.keys())
+        # #region debug-point transformer-encoder-init-kwargs
+        _debug_report_encoder_init(
+            session_id=DEBUG_SESSION_ID,
+            event="before_encoder_init",
+            payload={
+                "idx": idx,
+                "encoder_name": encoder_name,
+                "encoder_class": encoder_cls.__name__,
+                "encoder_alias": encoder_aliases[idx],
+                "kwargs_keys": sorted(kwargs.keys()),
+                "init_params": sig_params,
+                "declares_data_config": "data_config" in sig_params,
+            },
+        )
+        # #endregion debug-point transformer-encoder-init-kwargs
         if encoder_name == "encoderhybrid":
             hybrid_kwargs = kwargs.copy()
             hybrid_kwargs["mlp_encoder"] = EncoderMLP(**kwargs)
             hybrid_kwargs["gnn_encoder"] = EncoderSGNN(**kwargs)
             encoder = EncoderHybrid(**hybrid_kwargs)
         else:
-            encoder = encoder_registry[encoder_name](**kwargs)
+            encoder = encoder_cls(**kwargs)
         encoder.encoder_alias = encoder_aliases[idx]
         encoders.append(encoder)
 

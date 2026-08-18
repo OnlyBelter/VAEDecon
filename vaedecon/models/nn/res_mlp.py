@@ -49,9 +49,10 @@ class EncoderResMLP(BaseEncoder):
     Residual MLP Encoder.
     """
 
-    def __init__(self, args: ModelConfig, position_encoding: Optional[PositionalEncoding] = None):
+    def __init__(self, args: ModelConfig, data_config=None, position_encoding: Optional[PositionalEncoding] = None):
         super().__init__()
         self.args = args
+        self.data_config = data_config
         self.input_dim = args.input_dim
         self.latent_dim = args.latent_dim
         self.n_cell_types = args.n_cell_types

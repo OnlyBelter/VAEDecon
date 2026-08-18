@@ -35,9 +35,10 @@ class GeneTransformerEncoder(BaseEncoder):
     Scales linearly with the number of genes O(N_genes), not quadratically.
     """
 
-    def __init__(self, args: ModelConfig, position_encoding: Optional[PositionalEncoding] = None):
+    def __init__(self, args: ModelConfig, data_config=None, position_encoding: Optional[PositionalEncoding] = None):
         super().__init__()
         self.args = args
+        self.data_config = data_config
         if isinstance(args.input_dim, (tuple, list)):
             self.input_dim = args.input_dim[1]  # Assume (1, G) format
         else:
