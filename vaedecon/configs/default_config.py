@@ -323,6 +323,216 @@ class DebugOverfitConfig(BaseModel):
         ),
     )
 
+
+class StageEarlyStoppingConfig(BaseModel):
+    """Stage-local early stopping settings for staged training."""
+
+    monitor: str = Field(
+        default="val_loss",
+        description="Metric monitored by ModelCheckpoint and EarlyStopping during this stage.",
+    )
+    patience: int = Field(
+        default=15,
+        ge=1,
+        description="Stage-local early-stopping patience.",
+    )
+    min_delta: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Minimum improvement required to reset stage-local early stopping.",
+    )
+
+    @field_validator("monitor", mode="before")
+    @classmethod
+    def validate_monitor(cls, v: str) -> str:
+        if not isinstance(v, str):
+            raise ValueError("early_stopping.monitor must be a string")
+        monitor = v.strip()
+        if not monitor:
+            raise ValueError("early_stopping.monitor cannot be empty")
+        return monitor
+
+
+class StagedTrainingStageConfig(BaseModel):
+    """Configuration for one named stage in the staged training workflow."""
+
+    name: Literal[
+        "cell_prop_predictor_pretrain",
+        "reconstruction_training",
+        "joint_finetune",
+    ]
+    max_epochs: int = Field(
+        gt=0,
+        description="Maximum epoch budget for this stage before stage-local early stopping.",
+    )
+    train_modules: List[str] = Field(
+        default_factory=list,
+        description="Logical module groups that should remain trainable during this stage.",
+    )
+    freeze_modules: List[str] = Field(
+        default_factory=list,
+        description="Logical module groups that should remain frozen during this stage.",
+    )
+    learning_rate_scale: float = Field(
+        default=1.0,
+        gt=0.0,
+        description="Multiplicative scale applied to training.learning_rate for this stage.",
+    )
+    loss_overrides: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Stage-local overrides applied to supported loss-related config fields.",
+    )
+    early_stopping: StageEarlyStoppingConfig = Field(
+        default_factory=StageEarlyStoppingConfig,
+        description="Stage-local early stopping settings.",
+    )
+
+    @field_validator("train_modules", "freeze_modules")
+    @classmethod
+    def validate_module_names(cls, v: List[str]) -> List[str]:
+        valid_modules = {"cell_prop_predictor", "encoders", "decoder"}
+        normalized: List[str] = []
+        for module_name in v:
+            if not isinstance(module_name, str):
+                raise ValueError("stage module names must be strings")
+            clean_name = module_name.strip()
+            if clean_name not in valid_modules:
+                raise ValueError(
+                    f"Unsupported stage module name: {module_name!r}. Valid names: {sorted(valid_modules)}"
+                )
+            normalized.append(clean_name)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("stage module names must be unique within one list")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_stage_settings(self):
+        if not self.train_modules:
+            raise ValueError("Each staged training stage must define at least one train_modules entry")
+        overlap = set(self.train_modules) & set(self.freeze_modules)
+        if overlap:
+            raise ValueError(
+                "A staged training stage cannot both train and freeze the same modules: "
+                + ", ".join(sorted(overlap))
+            )
+
+        supported_loss_overrides = set(LossCoefficient.model_fields.keys()) | {"cell_type_existence_shift_scale"}
+        invalid_override_keys = set(self.loss_overrides.keys()) - supported_loss_overrides
+        if invalid_override_keys:
+            raise ValueError(
+                "Unsupported staged-training loss_overrides keys: "
+                + ", ".join(sorted(invalid_override_keys))
+            )
+
+        if self.name == "cell_prop_predictor_pretrain" and "cell_prop_predictor" not in set(self.train_modules):
+            raise ValueError(
+                "cell_prop_predictor_pretrain must include 'cell_prop_predictor' in train_modules"
+            )
+        if self.name == "cell_prop_predictor_pretrain":
+            self.early_stopping.monitor = "val_cell_prop_loss"
+        return self
+
+
+class StagedTrainingConfig(BaseModel):
+    """Multi-stage training workflow for the DeSide predictor integration."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable staged training instead of the legacy single-pass training loop.",
+    )
+    run_stages: List[str] = Field(
+        default_factory=list,
+        description="Optional subset of configured stage names to execute in this invocation.",
+    )
+    stage_init_checkpoints: Dict[str, str | Path] = Field(
+        default_factory=dict,
+        description=(
+            "Optional stage-name -> checkpoint path mapping used when a selected stage does not "
+            "follow its direct predecessor in the same run."
+        ),
+    )
+    stages: List[StagedTrainingStageConfig] = Field(
+        default_factory=list,
+        description="Ordered stage definitions for the staged training workflow.",
+    )
+
+    @field_validator("run_stages")
+    @classmethod
+    def validate_run_stages(cls, v: List[str]) -> List[str]:
+        normalized: List[str] = []
+        for stage_name in v:
+            if not isinstance(stage_name, str):
+                raise ValueError("run_stages entries must be strings")
+            clean_name = stage_name.strip()
+            if not clean_name:
+                raise ValueError("run_stages entries cannot be empty")
+            normalized.append(clean_name)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("run_stages entries must be unique")
+        return normalized
+
+    @field_validator("stage_init_checkpoints", mode="before")
+    @classmethod
+    def normalize_stage_init_checkpoints(cls, v: Optional[Dict[str, str | Path]]) -> Dict[str, str | Path]:
+        if not v:
+            return {}
+        normalized: Dict[str, str | Path] = {}
+        for stage_name, checkpoint_path in dict(v).items():
+            clean_name = str(stage_name).strip()
+            if not clean_name:
+                raise ValueError("stage_init_checkpoints keys must be non-empty")
+            normalized[clean_name] = checkpoint_path
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_stage_plan(self):
+        if self.enabled and not self.stages:
+            raise ValueError("staged_training.enabled=True requires at least one configured stage")
+
+        configured_stage_names = [stage.name for stage in self.stages]
+        if len(set(configured_stage_names)) != len(configured_stage_names):
+            raise ValueError("staged_training stage names must be unique")
+
+        run_stage_names = self.run_stages or configured_stage_names
+        unknown_run_stages = set(run_stage_names) - set(configured_stage_names)
+        if unknown_run_stages:
+            raise ValueError(
+                "run_stages contains names that are not present in stages: "
+                + ", ".join(sorted(unknown_run_stages))
+            )
+        if run_stage_names:
+            expected_stage_slice = configured_stage_names[
+                configured_stage_names.index(run_stage_names[0]): configured_stage_names.index(run_stage_names[-1]) + 1
+            ]
+            if run_stage_names != expected_stage_slice:
+                raise ValueError(
+                    "run_stages must follow the canonical contiguous stage order: "
+                    "cell_prop_predictor_pretrain -> reconstruction_training -> joint_finetune"
+                )
+
+        unknown_init_ckpt_stages = set(self.stage_init_checkpoints.keys()) - set(configured_stage_names)
+        if unknown_init_ckpt_stages:
+            raise ValueError(
+                "stage_init_checkpoints contains unknown stage names: "
+                + ", ".join(sorted(unknown_init_ckpt_stages))
+            )
+
+        configured_index = {stage_name: idx for idx, stage_name in enumerate(configured_stage_names)}
+        for stage_name in run_stage_names:
+            stage_idx = configured_index[stage_name]
+            if stage_idx == 0:
+                continue
+            direct_predecessor = configured_stage_names[stage_idx - 1]
+            if direct_predecessor in run_stage_names:
+                continue
+            if stage_name not in self.stage_init_checkpoints:
+                raise ValueError(
+                    f"Selected stage {stage_name!r} requires an init checkpoint because its direct "
+                    f"predecessor {direct_predecessor!r} is not selected in this run."
+                )
+
+        return self
+
 # @dataclass
 class DataConfig(BaseConfig):
     """dataset configuration"""
@@ -678,6 +888,13 @@ class TrainingConfig(BaseTrainerConfig):
             "Optional adaptive epoch-based schedule for selected auxiliary "
             "loss weights. When omitted or disabled, fixed loss coefficients "
             "behave exactly as before."
+        ),
+    )
+    staged_training: Optional[StagedTrainingConfig] = Field(
+        default=None,
+        description=(
+            "Optional multi-stage training workflow for DeSide predictor pretraining, "
+            "reconstruction training, and low-LR joint fine-tuning."
         ),
     )
 
@@ -1610,6 +1827,31 @@ class VAEDeconConfig:
         training: TrainingConfig,
         model: ModelConfig,
     ) -> None:
+        staged_training = training.staged_training
+        if staged_training is not None and staged_training.enabled:
+            if not model.cell_prop_predictor_cls:
+                raise ValueError(
+                    "training.staged_training requires model.cell_prop_predictor_cls to be configured"
+                )
+            if not model.predict_cell_prop:
+                raise ValueError(
+                    "training.staged_training requires model.predict_cell_prop=True"
+                )
+
+            selected_stages = staged_training.run_stages or [stage.name for stage in staged_training.stages]
+            if any(stage_name in {"reconstruction_training", "joint_finetune"} for stage_name in selected_stages):
+                predictor_alias = model.cell_prop_predictor_alias
+                if model.encoder_output_routing.cell_prop_source != predictor_alias:
+                    raise ValueError(
+                        "training.staged_training reconstruction/joint stages require "
+                        "model.encoder_output_routing.cell_prop_source to use the cell_prop_predictor alias"
+                    )
+                if model.encoder_output_routing.decoder_context_source != predictor_alias:
+                    raise ValueError(
+                        "training.staged_training reconstruction/joint stages require "
+                        "model.encoder_output_routing.decoder_context_source to use the cell_prop_predictor alias"
+                    )
+
         adaptive_schedule = training.adaptive_aux_loss_schedule
         if adaptive_schedule is None or not adaptive_schedule.enabled:
             return

@@ -69,6 +69,48 @@ training:
     n_early_stopping_patience_override: 10000
     disable_early_stopping: true
     save_post_train_predictions: true  # Also save a lightweight trainer-side prediction artifact for the selected debug subset.
+  # staged_training:
+  #   enabled: true
+  #   run_stages:
+  #     - cell_prop_predictor_pretrain
+  #     - reconstruction_training
+  #     - joint_finetune
+  #   stage_init_checkpoints: {}
+  #   stages:
+  #     - name: cell_prop_predictor_pretrain
+  #       max_epochs: 300
+  #       train_modules: ['cell_prop_predictor']
+  #       freeze_modules: ['encoders', 'decoder']
+  #       learning_rate_scale: 1.0
+  #       loss_overrides:
+  #         cell_prop: 1.0e4
+  #         cell_type_sct_gep_weight: 0.0
+  #         hierarchical_code_weight: 0.0
+  #         cross_sample_gene_var_weight: 0.0
+  #       early_stopping:
+  #         monitor: 'val_cell_prop_loss'
+  #         patience: 30
+  #         min_delta: 0.0
+  #     - name: reconstruction_training
+  #       max_epochs: 500
+  #       train_modules: ['encoders', 'decoder']
+  #       freeze_modules: ['cell_prop_predictor']
+  #       learning_rate_scale: 1.0
+  #       loss_overrides:
+  #         cell_prop: 0.0
+  #       early_stopping:
+  #         monitor: 'val_loss'
+  #         patience: 50
+  #         min_delta: 0.0
+  #     - name: joint_finetune
+  #       max_epochs: 100
+  #       train_modules: ['cell_prop_predictor', 'encoders', 'decoder']
+  #       freeze_modules: []
+  #       learning_rate_scale: 0.1
+  #       early_stopping:
+  #         monitor: 'val_loss'
+  #         patience: 20
+  #         min_delta: 0.0
   
   # ── Warmup settings (NEW) ──────────────────────────────────────
   warmup_epochs: 50              # epochs to ramp up from ~0 → peak lr

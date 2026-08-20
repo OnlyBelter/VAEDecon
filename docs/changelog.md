@@ -44,6 +44,32 @@ changing latent-posterior routing semantics.
 - Added regression tests for the dedicated predictor output contract and the
   new predictor-alias routing rules.
 
+### Staged DeSide predictor training
+
+The training workflow can now run the DeSide-style predictor branch in staged
+mode so cell-proportion learning stabilizes before the reconstruction branch
+fully joins training.
+
+- Added `training.staged_training` with explicit
+  `cell_prop_predictor_pretrain`, `reconstruction_training`, and
+  `joint_finetune` stages.
+- Added per-stage module freezing, learning-rate scaling, loss overrides, and
+  early stopping.
+- Restricted `run_stages` to the canonical contiguous order so stage subsets
+  stay compatible with the staged checkpoint flow.
+- Made `cell_prop_predictor_pretrain` monitor `val_cell_prop_loss` so early
+  stopping focuses on cell-proportion quality.
+- Added predictor-only checkpoint export and import so
+  `reconstruction_training` can start from a pretrained DeSide predictor while
+  keeping encoder and decoder weights freshly initialized.
+- Saved per-stage outputs and a `staged_training_summary.csv` artifact to make
+  staged runs easier to inspect and compare.
+
+### Additional tests
+
+- Added regression tests for staged-training config validation, stage-order
+  constraints, module freezing behavior, and predictor-only checkpoint import.
+
 ## August 15, 2026
 
 This update restores an oracle cell-proportion workflow for decoder-focused

@@ -27,7 +27,22 @@ Training them in stages should improve stability and make the DeSide branch more
 
 The new workflow is a built-in multi-stage training schedule controlled by a single config file.
 
-### Stage 1: Predictor Pretrain
+The workflow should also support running selected stages independently. This is important for debugging and ablation work. For example, the user should be able to:
+
+- run only `cell_prop_predictor_pretrain`
+- run only `reconstruction_training` using an existing pretrained predictor checkpoint
+- run `cell_prop_predictor_pretrain` followed by `reconstruction_training`
+- run all three stages end to end
+
+To support this, staged training should accept:
+
+- an ordered `stages` list that defines all available stage configs
+- an optional `run_stages` list that selects which stages to execute in the current run
+- an optional `stage_init_checkpoints` mapping that supplies an input checkpoint when a selected stage does not follow a previously executed stage in the same run
+
+If `run_stages` is omitted, all configured stages run in order. If `run_stages` is set, only those stages run, in the order listed there.
+
+### Stage 1: Cell-Prop Predictor Pretrain (`cell_prop_predictor_pretrain`)
 
 Train only `cell_prop_predictor`.
 
@@ -96,8 +111,13 @@ Add a new optional block under `training`:
 training:
   staged_training:
     enabled: true
+    run_stages:
+      - cell_prop_predictor_pretrain
+      - reconstruction_training
+      - joint_finetune
+    stage_init_checkpoints: {}
     stages:
-      - name: predictor_pretrain
+      - name: cell_prop_predictor_pretrain
         max_epochs: 300
         train_modules: ["cell_prop_predictor"]
         freeze_modules: ["encoders", "decoder"]
@@ -139,6 +159,9 @@ training:
 
 - `staged_training.enabled: false` preserves current behavior.
 - `stages` must be ordered explicitly in execution order.
+- `run_stages` is optional. If omitted, run all configured stages in `stages` order.
+- `run_stages` may contain any subset of configured stage names.
+- when a selected stage depends on a prior stage that is not being run in the same invocation, the required starting checkpoint must be provided through `stage_init_checkpoints`.
 - `train_modules` and `freeze_modules` are constrained to supported names:
   - `cell_prop_predictor`
   - `encoders`
@@ -155,7 +178,9 @@ The training workflow should:
 2. build the model once
 3. iterate over configured stages in order
 4. before each stage:
-   - restore the best checkpoint from the previous stage if applicable
+   - determine whether the stage should run in this invocation
+   - restore the best checkpoint from the previous executed stage if applicable
+   - otherwise load an explicit stage-init checkpoint if one is required
    - freeze and unfreeze modules according to stage config
    - rebuild optimizer and scheduler for the current trainable parameter set
    - apply stage-local loss overrides
@@ -164,7 +189,7 @@ The training workflow should:
 6. promote the best checkpoint from the current stage into the next stage
 7. after the last stage, save the final merged model directory as usual
 
-This should be implemented as a single workflow invocation rather than multiple user-managed runs.
+This should be implemented as a single workflow invocation rather than multiple user-managed runs, while still allowing a subset of stages to be selected for a given run.
 
 ## Checkpointing and Early Stopping
 
@@ -178,10 +203,9 @@ Each stage should have its own:
 The next stage must start from the previous stage's best checkpoint, not from the last epoch state.
 
 Suggested saved artifacts:
-
-- `stage_predictor_pretrain/best.ckpt`
-- `stage_predictor_pretrain/last.ckpt`
-- `stage_predictor_pretrain/metrics.csv`
+- `stage_cell_prop_predictor_pretrain/best.ckpt`
+- `stage_cell_prop_predictor_pretrain/last.ckpt`
+- `stage_cell_prop_predictor_pretrain/metrics.csv`
 - `stage_reconstruction_training/best.ckpt`
 - `stage_joint_finetune/best.ckpt`
 
@@ -216,12 +240,16 @@ During staged training:
 Validation should fail early when:
 
 - `staged_training.enabled` is true but `stages` is empty
+- `run_stages` contains names that are not present in `stages`
 - a stage references unsupported module names
 - a stage omits `max_epochs`
 - the config enables staged training without `cell_prop_predictor_cls`
 - `train_modules` and `freeze_modules` conflict in a way that leaves no trainable parameters
-- Stage 1 does not include `cell_prop_predictor` in `train_modules`
+- `cell_prop_predictor_pretrain` does not include `cell_prop_predictor` in `train_modules`
 - a later stage refers to the predictor when the predictor is not configured
+- `reconstruction_training` or `joint_finetune` is selected without an available upstream checkpoint from either:
+  - an earlier stage in the same run, or
+  - `stage_init_checkpoints`
 
 Warnings should be emitted when:
 
@@ -256,6 +284,7 @@ Add tests for:
    - accepts valid staged training blocks
    - rejects invalid stage names or module names
    - rejects enabled staged training without a predictor branch
+   - rejects stage subsets that require missing init checkpoints
 
 2. module freezing behavior
    - Stage 1 trains only predictor parameters

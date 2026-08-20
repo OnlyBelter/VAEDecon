@@ -37,6 +37,42 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_stage_model(model: BaseAE) -> BaseAE:
+    """Return the underlying BaseAE when torch.compile wraps it."""
+    return getattr(model, "_orig_mod", model)
+
+
+def _resolve_stage_named_modules(model: BaseAE) -> Dict[str, Any]:
+    """Resolve logical stage module groups on the current model."""
+    base_model = _unwrap_stage_model(model)
+    modules: Dict[str, Any] = {}
+    encoders = getattr(base_model, "encoders", None)
+    if encoders is not None:
+        modules["encoders"] = encoders
+    decoder = getattr(base_model, "decoder", None)
+    if decoder is not None:
+        modules["decoder"] = decoder
+    cell_prop_predictor = getattr(base_model, "cell_prop_predictor", None)
+    if cell_prop_predictor is not None:
+        modules["cell_prop_predictor"] = cell_prop_predictor
+    return modules
+
+
+def _apply_stage_module_modes(model: BaseAE, module_mode_overrides: Optional[Dict[str, str]]) -> None:
+    """Apply train/eval mode overrides to logical module groups."""
+    if not module_mode_overrides:
+        return
+    modules = _resolve_stage_named_modules(model)
+    for module_name, mode in module_mode_overrides.items():
+        module = modules.get(module_name)
+        if module is None:
+            continue
+        if str(mode).lower() == "eval":
+            module.eval()
+        else:
+            module.train()
+
+
 def _resolve_linear_schedule_value(schedule: Any, epoch: int) -> float:
     """Return the scheduled scalar value for a given epoch."""
     start_epoch = int(getattr(schedule, "start_epoch", 0))
@@ -462,6 +498,7 @@ class PLTrainer(L.LightningModule):
         training_config: TrainingConfig,
         debug_model: Optional[bool] = False,
         monitor_metric: str = "val_loss",
+        module_mode_overrides: Optional[Dict[str, str]] = None,
     ):
         """Initializes the PLTrainer.
 
@@ -477,6 +514,7 @@ class PLTrainer(L.LightningModule):
         self.model_name = model.model_name
         self.debug_model = debug_model
         self.monitor_metric = monitor_metric
+        self.module_mode_overrides = dict(module_mode_overrides or {})
 
         cfg_metrics = getattr(training_config, "prog_bar_metrics", None)
         if cfg_metrics:
@@ -497,6 +535,9 @@ class PLTrainer(L.LightningModule):
             model=self.model,
             training_config=self.training_config,
         )
+
+    def on_fit_start(self) -> None:
+        _apply_stage_module_modes(self.model, self.module_mode_overrides)
 
     def forward(self, inputs: Dict[str, Any], **kwargs) -> Any:
         """Forward pass of the model."""
@@ -561,11 +602,15 @@ class PLTrainer(L.LightningModule):
         # self.log("w_gene_std", float(lo.gene_std_weight), on_step=True, on_epoch=False, prog_bar=True, logger=True)
 
     def on_train_epoch_start(self) -> None:
+        _apply_stage_module_modes(self.model, self.module_mode_overrides)
         _apply_aux_loss_schedules(
             model=self.model,
             training_config=self.training_config,
             epoch=int(self.current_epoch),
         )
+
+    def on_validation_epoch_start(self) -> None:
+        _apply_stage_module_modes(self.model, self.module_mode_overrides)
 
     def _get_monitored_metric_value(self, metric_name: str) -> Optional[float]:
         monitored_value = self.trainer.callback_metrics.get(metric_name, None)
@@ -704,15 +749,18 @@ class PLTrainer(L.LightningModule):
 
         # ── 1. Build optimizer (unchanged from original) ─────────────────────────
         optimizer_cls = getattr(optim, self.training_config.optimizer_cls)
+        trainable_parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
+        if not trainable_parameters:
+            raise ValueError("No trainable parameters remain after staged-training module freezing.")
         if self.training_config.optimizer_params is not None:
             optimizer = optimizer_cls(
-                self.model.parameters(),
+                trainable_parameters,
                 lr=self.training_config.learning_rate,
                 **self.training_config.optimizer_params,
             )
         else:
             optimizer = optimizer_cls(
-                self.model.parameters(),
+                trainable_parameters,
                 lr=self.training_config.learning_rate,
             )
 
@@ -837,6 +885,10 @@ class BaseTrainerL:
         data_config: Optional["DataConfig"] = None,
         n_early_stopping_patience: int = 10,
         debug_model: bool = False,
+        monitor_metric: Optional[str] = None,
+        early_stopping_min_delta: float = 0.001,
+        max_epochs_override: Optional[int] = None,
+        module_mode_overrides: Optional[Dict[str, str]] = None,
     ):
         if training_config is None:
             training_config = TrainingConfig()
@@ -851,6 +903,10 @@ class BaseTrainerL:
         self.n_early_stopping_patience = n_early_stopping_patience
         self.debug_model = debug_model
         self.model_dir = result_dir
+        self.monitor_metric_override = monitor_metric
+        self.early_stopping_min_delta = float(early_stopping_min_delta)
+        self.max_epochs_override = max_epochs_override
+        self.module_mode_overrides = dict(module_mode_overrides or {})
         self.debug_overfit_config = getattr(self.training_config, "debug_overfit", None)
         self.train_dataset_obj = train_dataset
         self.eval_dataset_obj = eval_dataset
@@ -862,13 +918,18 @@ class BaseTrainerL:
             logger.info("No eval dataset provided -> keep_best_on_train=True")
             self.training_config.keep_best_on_train = True
 
-        self.monitor_metric = "val_loss" if self.eval_loader is not None else "train_loss"
+        self.monitor_metric = (
+            self.monitor_metric_override
+            if self.monitor_metric_override is not None
+            else ("val_loss" if self.eval_loader is not None else "train_loss")
+        )
 
         self.pl_model = PLTrainer(
             model=model,
             training_config=training_config,
             debug_model=debug_model,
             monitor_metric=self.monitor_metric,
+            module_mode_overrides=self.module_mode_overrides,
         )
 
     def _build_loader(self, ds_or_loader, is_train: bool) -> DataLoader:
@@ -933,7 +994,11 @@ class BaseTrainerL:
         set_seed(self.training_config.seed)
         os.makedirs(self.model_dir, exist_ok=True)
         debug_cfg = self.debug_overfit_config
-        effective_max_epochs = self.training_config.num_epochs
+        effective_max_epochs = (
+            int(self.max_epochs_override)
+            if self.max_epochs_override is not None
+            else self.training_config.num_epochs
+        )
         effective_patience = self.n_early_stopping_patience
         disable_early_stopping = False
         if debug_cfg is not None and getattr(debug_cfg, "enabled", False):
@@ -954,7 +1019,7 @@ class BaseTrainerL:
             monitor=self.monitor_metric,
             patience=effective_patience,
             mode="min",
-            min_delta=0.001,
+            min_delta=self.early_stopping_min_delta,
         )
         lr_monitor = LearningRateMonitor(logging_interval="epoch")
         csv_logger = CSVLogger(save_dir=self.model_dir, name="training_logs")

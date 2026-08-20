@@ -1,6 +1,7 @@
 """
 Training pipeline for VAEDecon
 """
+import json
 import os
 import logging
 import shutil
@@ -21,6 +22,7 @@ from ..utility import compute_training_sct_cross_sample_gene_var
 from ..utility import create_h5ad_dataset
 from ..utility.read_file import ReadH5AD
 from .workflow import create_model, train_model, save_metadata
+from ..trainers.base_trainer import _unwrap_stage_model
 from ..configs.default_config import (
     VAEDeconConfig,
     TrainingConfig,
@@ -694,6 +696,334 @@ class VAEDeconTrainer:
             processed_data_dir=self._processed_training_set_dir,
         )
 
+    @staticmethod
+    def _resolve_stage_named_modules(model) -> Dict[str, torch.nn.Module]:
+        base_model = _unwrap_stage_model(model)
+        modules: Dict[str, torch.nn.Module] = {}
+        encoders = getattr(base_model, "encoders", None)
+        if encoders is not None:
+            modules["encoders"] = encoders
+        decoder = getattr(base_model, "decoder", None)
+        if decoder is not None:
+            modules["decoder"] = decoder
+        cell_prop_predictor = getattr(base_model, "cell_prop_predictor", None)
+        if cell_prop_predictor is not None:
+            modules["cell_prop_predictor"] = cell_prop_predictor
+        return modules
+
+    def _apply_stage_module_trainability(
+        self,
+        model,
+        *,
+        train_modules: list[str],
+    ) -> Dict[str, str]:
+        modules = self._resolve_stage_named_modules(model)
+        module_mode_overrides: Dict[str, str] = {}
+        for module_name, module in modules.items():
+            is_trainable = module_name in set(train_modules)
+            for parameter in module.parameters():
+                parameter.requires_grad = is_trainable
+            if is_trainable:
+                module.train()
+                module_mode_overrides[module_name] = "train"
+            else:
+                module.eval()
+                module_mode_overrides[module_name] = "eval"
+        return module_mode_overrides
+
+    @staticmethod
+    def _reset_stage_loss_overrides(model, base_model_config: ModelConfig) -> None:
+        base_model = _unwrap_stage_model(model)
+        base_model.model_config.loss_coefficient = base_model_config.loss_coefficient.model_copy(deep=True)
+        base_model.model_config.cell_type_existence_shift_scale = base_model_config.cell_type_existence_shift_scale
+
+    @staticmethod
+    def _apply_stage_loss_overrides(model, loss_overrides: Dict[str, float]) -> None:
+        if not loss_overrides:
+            return
+        base_model = _unwrap_stage_model(model)
+        for attr_name, attr_value in loss_overrides.items():
+            if hasattr(base_model.model_config.loss_coefficient, attr_name):
+                setattr(base_model.model_config.loss_coefficient, attr_name, float(attr_value))
+                continue
+            if hasattr(base_model.model_config, attr_name):
+                setattr(base_model.model_config, attr_name, float(attr_value))
+                continue
+            raise ValueError(f"Unsupported staged-training loss override: {attr_name}")
+
+    @staticmethod
+    def _extract_model_state_dict_from_checkpoint(checkpoint: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        normalized_state_dict: Dict[str, torch.Tensor] = {}
+        for key, value in state_dict.items():
+            while key.startswith("model._orig_mod."):
+                key = key[len("model._orig_mod."):]
+            if key.startswith("model."):
+                key = key[len("model."):]
+            while key.startswith("_orig_mod."):
+                key = key[len("_orig_mod."):]
+            normalized_state_dict[key] = value
+        return normalized_state_dict
+
+    def _load_stage_checkpoint(self, model, checkpoint_path: Path) -> None:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        state_dict = self._extract_model_state_dict_from_checkpoint(checkpoint)
+        base_model = _unwrap_stage_model(model)
+        base_model.load_state_dict(state_dict, strict=True)
+
+    @staticmethod
+    def _extract_cell_prop_predictor_state_dict_from_checkpoint(
+        checkpoint: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        predictor_state_dict: Dict[str, torch.Tensor] = {}
+        for key, value in state_dict.items():
+            normalized_key = key
+            while normalized_key.startswith("model._orig_mod."):
+                normalized_key = normalized_key[len("model._orig_mod."):]
+            if normalized_key.startswith("model."):
+                normalized_key = normalized_key[len("model."):]
+            while normalized_key.startswith("_orig_mod."):
+                normalized_key = normalized_key[len("_orig_mod."):]
+
+            if normalized_key.startswith("cell_prop_predictor."):
+                predictor_state_dict[normalized_key[len("cell_prop_predictor."):]] = value
+            elif not any(
+                normalized_key.startswith(prefix)
+                for prefix in ("encoders.", "decoder.", "logits", "hierarchical_code_head")
+            ):
+                predictor_state_dict[normalized_key] = value
+        return predictor_state_dict
+
+    def _load_cell_prop_predictor_checkpoint(self, model, checkpoint_path: Path) -> None:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        predictor_state_dict = self._extract_cell_prop_predictor_state_dict_from_checkpoint(checkpoint)
+        if not predictor_state_dict:
+            raise ValueError(
+                f"No cell_prop_predictor weights could be resolved from staged-training checkpoint: {checkpoint_path}"
+            )
+        base_model = _unwrap_stage_model(model)
+        predictor = getattr(base_model, "cell_prop_predictor", None)
+        if predictor is None:
+            raise ValueError("The current model does not expose cell_prop_predictor for predictor-only checkpoint import.")
+        predictor.load_state_dict(predictor_state_dict, strict=True)
+
+    def _export_cell_prop_predictor_checkpoint(self, model, output_path: Path) -> None:
+        base_model = _unwrap_stage_model(model)
+        predictor = getattr(base_model, "cell_prop_predictor", None)
+        if predictor is None:
+            return
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"state_dict": predictor.state_dict()}, output_path)
+
+    @staticmethod
+    def _build_stage_training_config(
+        base_training_config: TrainingConfig,
+        *,
+        stage_cfg,
+    ) -> TrainingConfig:
+        stage_training_config = base_training_config.model_copy(deep=True)
+        stage_training_config.num_epochs = int(stage_cfg.max_epochs)
+        stage_training_config.learning_rate = (
+            float(base_training_config.learning_rate) * float(stage_cfg.learning_rate_scale)
+        )
+        stage_training_config.n_early_stopping_patience = int(stage_cfg.early_stopping.patience)
+        stage_training_config.staged_training = None
+        return stage_training_config
+
+    @staticmethod
+    def _resolve_stage_checkpoint_paths(stage_dir: Path) -> tuple[Path, Path]:
+        metadata_path = stage_dir / "checkpoint_paths.json"
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"Missing staged-training checkpoint metadata: {metadata_path}")
+        with metadata_path.open("r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        best_name = str(metadata.get("best_model_path", "")).strip()
+        last_name = str(metadata.get("last_model_path", "")).strip()
+        if not best_name:
+            raise FileNotFoundError(f"No best checkpoint recorded in {metadata_path}")
+        best_path = stage_dir / best_name
+        last_path = stage_dir / last_name if last_name else stage_dir / "last_model.ckpt"
+        if not best_path.exists():
+            raise FileNotFoundError(f"Best staged-training checkpoint not found: {best_path}")
+        if not last_path.exists():
+            raise FileNotFoundError(f"Last staged-training checkpoint not found: {last_path}")
+        return best_path, last_path
+
+    def _promote_stage_outputs_to_final_model(
+        self,
+        *,
+        final_stage_dir: Path,
+        model,
+        base_training_config: TrainingConfig,
+        stage_summary_rows: list[dict],
+    ) -> None:
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        removable_patterns = ["*.ckpt", "metrics.csv", "adaptive_aux_loss_schedule_trace.csv", "debug_overfit_predictions.pt"]
+        for pattern in removable_patterns:
+            for path in self.model_dir.glob(pattern):
+                path.unlink()
+        for path in [self.model_dir / "checkpoint_paths.json", self.model_dir / "training_logs"]:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.exists():
+                path.unlink()
+
+        skip_names = {"model_config.json", "training_config.json", "data_config.json", "environment.json"}
+        for item in final_stage_dir.iterdir():
+            if item.name in skip_names:
+                continue
+            destination = self.model_dir / item.name
+            if item.is_dir():
+                shutil.copytree(item, destination, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, destination)
+
+        summary_df = pd.DataFrame(stage_summary_rows)
+        summary_df.to_csv(self.result_dir / "staged_training_summary.csv", index=False)
+        summary_df.to_csv(self.model_dir / "staged_training_summary.csv", index=False)
+
+        restored_model_config = self.config.model.model_copy(deep=True)
+        base_model = _unwrap_stage_model(model)
+        base_model.model_config = restored_model_config
+        self.config.model = restored_model_config
+        base_model.save(
+            self.model_dir,
+            training_config=base_training_config,
+            data_config=self.config.data,
+        )
+
+    def _train_with_staged_training(
+        self,
+        *,
+        model,
+        train_set,
+        val_set,
+        trainer_config: TrainingConfig,
+    ) -> None:
+        staged_training_cfg = trainer_config.staged_training
+        if staged_training_cfg is None or not staged_training_cfg.enabled:
+            raise ValueError("Staged training was requested without an enabled training.staged_training config.")
+
+        configured_stages = list(staged_training_cfg.stages)
+        stage_by_name = {stage.name: stage for stage in configured_stages}
+        configured_stage_names = [stage.name for stage in configured_stages]
+        run_stage_names = staged_training_cfg.run_stages or configured_stage_names
+        execution_stages = [stage_by_name[stage_name] for stage_name in run_stage_names]
+
+        base_training_config = trainer_config.model_copy(deep=True)
+        base_model_config = self.config.model.model_copy(deep=True)
+        executed_stage_best_checkpoints: Dict[str, Path] = {}
+        stage_summary_rows: list[dict] = []
+
+        logger.info("Starting staged training with stages: %s", ", ".join(run_stage_names))
+        for stage_index, stage_cfg in enumerate(execution_stages, start=1):
+            configured_index = configured_stage_names.index(stage_cfg.name)
+            direct_predecessor = configured_stage_names[configured_index - 1] if configured_index > 0 else None
+            init_checkpoint_path: Optional[Path] = None
+            init_source = "fresh_model"
+            if direct_predecessor and direct_predecessor in executed_stage_best_checkpoints:
+                init_checkpoint_path = executed_stage_best_checkpoints[direct_predecessor]
+                init_source = f"previous_stage:{direct_predecessor}"
+            elif direct_predecessor:
+                raw_checkpoint = staged_training_cfg.stage_init_checkpoints.get(stage_cfg.name)
+                if raw_checkpoint is not None:
+                    init_checkpoint_path = Path(raw_checkpoint).expanduser()
+                    init_source = f"stage_init_checkpoints:{stage_cfg.name}"
+
+            if init_checkpoint_path is not None:
+                if not init_checkpoint_path.exists():
+                    raise FileNotFoundError(
+                        f"Staged training init checkpoint for stage {stage_cfg.name!r} does not exist: "
+                        f"{init_checkpoint_path}"
+                    )
+                logger.info(
+                    "Loading staged-training init checkpoint for %s from %s",
+                    stage_cfg.name,
+                    init_checkpoint_path,
+                )
+                if stage_cfg.name == "reconstruction_training" and direct_predecessor not in executed_stage_best_checkpoints:
+                    self._load_cell_prop_predictor_checkpoint(model, init_checkpoint_path)
+                else:
+                    self._load_stage_checkpoint(model, init_checkpoint_path)
+
+            self._reset_stage_loss_overrides(model, base_model_config)
+            self._apply_stage_loss_overrides(model, stage_cfg.loss_overrides)
+            module_mode_overrides = self._apply_stage_module_trainability(
+                model,
+                train_modules=list(stage_cfg.train_modules),
+            )
+
+            stage_training_config = self._build_stage_training_config(
+                base_training_config,
+                stage_cfg=stage_cfg,
+            )
+            stage_dir = self.result_dir / f"stage_{stage_cfg.name}"
+            if stage_dir.exists():
+                shutil.rmtree(stage_dir)
+            stage_dir.mkdir(parents=True, exist_ok=True)
+
+            logger.info(
+                "Starting stage %s/%s: %s (lr=%.3e, monitor=%s)",
+                stage_index,
+                len(execution_stages),
+                stage_cfg.name,
+                stage_training_config.learning_rate,
+                stage_cfg.early_stopping.monitor,
+            )
+            stage_trainer = BaseTrainerL(
+                model=model,
+                result_dir=str(stage_dir),
+                train_dataset=train_set,
+                eval_dataset=val_set,
+                training_config=stage_training_config,
+                data_config=self.config.data,
+                n_early_stopping_patience=stage_cfg.early_stopping.patience,
+                debug_model=stage_training_config.debug_model,
+                monitor_metric=stage_cfg.early_stopping.monitor,
+                early_stopping_min_delta=stage_cfg.early_stopping.min_delta,
+                max_epochs_override=stage_cfg.max_epochs,
+                module_mode_overrides=module_mode_overrides,
+            )
+            stage_trainer.train()
+            if stage_cfg.name == "cell_prop_predictor_pretrain":
+                self._export_cell_prop_predictor_checkpoint(
+                    model=model,
+                    output_path=stage_dir / "cell_prop_predictor_state_dict.pt",
+                )
+
+            best_ckpt_path, last_ckpt_path = self._resolve_stage_checkpoint_paths(stage_dir)
+            executed_stage_best_checkpoints[stage_cfg.name] = best_ckpt_path
+            stage_summary_rows.append(
+                {
+                    "stage_name": stage_cfg.name,
+                    "stage_dir": str(stage_dir),
+                    "init_source": init_source,
+                    "init_checkpoint": str(init_checkpoint_path) if init_checkpoint_path is not None else "",
+                    "best_checkpoint": str(best_ckpt_path),
+                    "last_checkpoint": str(last_ckpt_path),
+                    "learning_rate": float(stage_training_config.learning_rate),
+                    "learning_rate_scale": float(stage_cfg.learning_rate_scale),
+                    "monitor": stage_cfg.early_stopping.monitor,
+                    "patience": int(stage_cfg.early_stopping.patience),
+                    "min_delta": float(stage_cfg.early_stopping.min_delta),
+                    "train_modules": ",".join(stage_cfg.train_modules),
+                    "freeze_modules": ",".join(stage_cfg.freeze_modules),
+                }
+            )
+
+        if not stage_summary_rows:
+            raise ValueError("No staged-training stages were executed.")
+
+        self._reset_stage_loss_overrides(model, base_model_config)
+        final_stage_dir = Path(stage_summary_rows[-1]["stage_dir"])
+        self._promote_stage_outputs_to_final_model(
+            final_stage_dir=final_stage_dir,
+            model=model,
+            base_training_config=base_training_config,
+            stage_summary_rows=stage_summary_rows,
+        )
+
     def train(self) -> VAEDeconConfig:
         """
         Run the full training pipeline: data preparation, model creation, and training loop.
@@ -707,16 +1037,25 @@ class VAEDeconTrainer:
 
         # Train the model
         logger.info("Starting training...")
-        train_model(
-            model=model,
-            train_set=train_set,
-            val_set=val_set,
-            training_config=trainer_config,
-            data_config=self.config.data,
-            device=self.device,
-            trainer_cls=BaseTrainerL,
-            result_dir=self.model_dir
-        )
+        staged_training_cfg = trainer_config.staged_training
+        if staged_training_cfg is not None and staged_training_cfg.enabled:
+            self._train_with_staged_training(
+                model=model,
+                train_set=train_set,
+                val_set=val_set,
+                trainer_config=trainer_config,
+            )
+        else:
+            train_model(
+                model=model,
+                train_set=train_set,
+                val_set=val_set,
+                training_config=trainer_config,
+                data_config=self.config.data,
+                device=self.device,
+                trainer_cls=BaseTrainerL,
+                result_dir=self.model_dir
+            )
 
         self._prepare_debug_overfit_test_sets(
             dataset=dataset,
