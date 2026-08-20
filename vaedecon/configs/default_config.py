@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, asdict, is_dataclass
 from .base_config import BaseTrainerConfig, BaseModelConfig, BaseConfig
 from typing import List, Dict, Optional, Tuple, Any, Union, Literal
 from pathlib import Path
-from pydantic import Field, field_validator, model_validator, BaseModel
+from pydantic import AliasChoices, Field, field_validator, model_validator, BaseModel
 
 
 class LossCoefficient(BaseModel):
@@ -981,14 +981,19 @@ class ModelConfig(BaseModelConfig):
         le=1.0,
         description="Dropout rate used in the shared cell-proportion head and feature projectors.",
     )
-    cell_prop_loss_type: Literal["mse", "l1_kl"] = Field(
+    cell_prop_loss_type: Literal["mse", "l1_kl", "l1_rmse"] = Field(
         default="mse",
         description="Supervised cell-proportion loss family.",
     )
-    cell_prop_loss_kl_weight: float = Field(
+    cell_prop_loss_alpha_weight: float = Field(
         default=0.5,
         ge=0.0,
-        description="KL multiplier used when cell_prop_loss_type='l1_kl'.",
+        validation_alias=AliasChoices("cell_prop_loss_alpha_weight", "cell_prop_loss_kl_weight"),
+        serialization_alias="cell_prop_loss_alpha_weight",
+        description=(
+            "Alpha weight used by cell_prop_loss_type. For 'l1_kl' it is the KL multiplier; "
+            "for 'l1_rmse' the loss is alpha * MAE + (1 - alpha) * RMSE."
+        ),
     )
     cell_prop_loss_weighting: Literal["none", "low_prop_inverse"] = Field(
         default="none",

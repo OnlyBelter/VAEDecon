@@ -31,7 +31,7 @@ def _build_dummy_vae(
     cancer_cell_type_index: int | None = None,
     existence_shift_scale: float = 0.0,
     cell_prop_loss_type: str = "mse",
-    cell_prop_loss_kl_weight: float = 0.5,
+    cell_prop_loss_alpha_weight: float = 0.5,
     cell_prop_loss_weighting: str = "none",
     cell_prop_loss_low_prop_epsilon: float = 0.01,
     cell_prop_loss_weight_clamp: tuple[float, float] = (1.0, 5.0),
@@ -63,7 +63,7 @@ def _build_dummy_vae(
         cell_prop_activation_function=activation_function,
         cell_type_existence_shift_scale=existence_shift_scale,
         cell_prop_loss_type=cell_prop_loss_type,
-        cell_prop_loss_kl_weight=cell_prop_loss_kl_weight,
+        cell_prop_loss_alpha_weight=cell_prop_loss_alpha_weight,
         cell_prop_loss_weighting=cell_prop_loss_weighting,
         cell_prop_loss_low_prop_epsilon=cell_prop_loss_low_prop_epsilon,
         cell_prop_loss_weight_clamp=cell_prop_loss_weight_clamp,
@@ -493,7 +493,7 @@ def test_softmax_cell_prop_loss_supports_l1_kl():
         training=True,
         activation_function="softmax",
         cell_prop_loss_type="l1_kl",
-        cell_prop_loss_kl_weight=0.5,
+        cell_prop_loss_alpha_weight=0.5,
     )
     pred_cell_prop = torch.tensor(
         [[0.25, 0.35, 0.40], [0.10, 0.60, 0.30]],
@@ -521,6 +521,39 @@ def test_softmax_cell_prop_loss_supports_l1_kl():
     expected_loss = expected_loss + 0.5 * (
         target_safe * (torch.log(target_safe) - torch.log(pred_safe))
     ).sum(dim=-1)
+
+    assert torch.allclose(cell_prop_loss, expected_loss)
+
+
+def test_softmax_cell_prop_loss_supports_l1_rmse():
+    dummy = _build_dummy_vae(
+        cell_prop_weight=1.0,
+        training=True,
+        activation_function="softmax",
+        cell_prop_loss_type="l1_rmse",
+        cell_prop_loss_alpha_weight=0.5,
+    )
+    pred_cell_prop = torch.tensor(
+        [[0.25, 0.35, 0.40], [0.10, 0.60, 0.30]],
+        dtype=torch.float32,
+    )
+    y = torch.tensor(
+        [[0.20, 0.50, 0.30], [0.30, 0.40, 0.30]],
+        dtype=torch.float32,
+    )
+
+    _, cell_prop_loss = VAE._cell_prop_dirichlet_loss(
+        dummy,
+        y=y,
+        dd_alpha=None,
+        pred_cell_prop=pred_cell_prop,
+        batch_size=pred_cell_prop.shape[0],
+        device=torch.device("cpu"),
+    )
+
+    diff = pred_cell_prop - y
+    expected_loss = 0.5 * torch.abs(diff).sum(dim=-1)
+    expected_loss = expected_loss + 0.5 * torch.sqrt(torch.square(diff).sum(dim=-1))
 
     assert torch.allclose(cell_prop_loss, expected_loss)
 
@@ -558,7 +591,7 @@ def test_cell_prop_supervision_loss_low_prop_inverse_weights_l1_kl():
         training=True,
         activation_function="sigmoid_all_norm",
         cell_prop_loss_type="l1_kl",
-        cell_prop_loss_kl_weight=0.5,
+        cell_prop_loss_alpha_weight=0.5,
         cell_prop_loss_weighting="low_prop_inverse",
         cell_prop_loss_low_prop_epsilon=0.01,
         cell_prop_loss_weight_clamp=(1.0, 5.0),

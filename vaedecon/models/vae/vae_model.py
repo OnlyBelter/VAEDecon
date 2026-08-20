@@ -1382,10 +1382,24 @@ class VAE(BaseAE):
                 * weight
             ).sum(dim=-1)
 
+        alpha_weight = float(
+            getattr(
+                self.model_config,
+                "cell_prop_loss_alpha_weight",
+                getattr(self.model_config, "cell_prop_loss_kl_weight", 0.5),
+            ) or 0.0
+        )
+
+        if loss_type == "l1_rmse":
+            mae = (weight * torch.abs(supervised_pred - target)).sum(dim=-1)
+            rmse = torch.sqrt(
+                (weight * torch.square(supervised_pred - target)).sum(dim=-1).clamp_min(EPS)
+            )
+            return alpha_weight * mae + (1.0 - alpha_weight) * rmse
+
         if loss_type != "l1_kl":
             raise ValueError(f"Unsupported cell_prop_loss_type: {loss_type}")
 
-        kl_weight = float(getattr(self.model_config, "cell_prop_loss_kl_weight", 0.5) or 0.0)
         pred_safe = supervised_pred.clamp_min(EPS)
         target_safe = target.clamp_min(EPS)
         pred_safe = pred_safe / pred_safe.sum(dim=-1, keepdim=True).clamp_min(EPS)
@@ -1397,7 +1411,7 @@ class VAE(BaseAE):
             * target_safe
             * (torch.log(target_safe) - torch.log(pred_safe))
         ).sum(dim=-1)
-        return l1 + kl_weight * kl
+        return l1 + alpha_weight * kl
 
     def _cell_prop_dirichlet_loss(
         self,

@@ -478,7 +478,7 @@ def test_sigmoid_all_norm_cell_prop_config_loads_without_cancer_cell_type_name()
                 "predict_cell_prop": True,
                 "cell_prop_activation_function": "sigmoid_all_norm",
                 "cell_prop_loss_type": "l1_kl",
-                "cell_prop_loss_kl_weight": 0.5,
+                "cell_prop_loss_alpha_weight": 0.5,
                 "cell_prop_loss_weighting": "low_prop_inverse",
                 "cell_prop_loss_low_prop_epsilon": 0.02,
                 "cell_prop_loss_weight_clamp": [1.0, 4.0],
@@ -565,16 +565,29 @@ def test_cell_prop_fusion_and_loss_config_loads():
                 "cell_prop_fusion_dim": 128,
                 "cell_prop_head_hidden_dims": [256, 128],
                 "cell_prop_head_dropout_rate": 0.2,
-                "cell_prop_loss_type": "l1_kl",
-                "cell_prop_loss_kl_weight": 0.7,
+                "cell_prop_loss_type": "l1_rmse",
+                "cell_prop_loss_alpha_weight": 0.7,
             }
         }
     )
     assert loaded.model.cell_prop_fusion_strategy == "shared_feature_gated"
     assert loaded.model.cell_prop_fusion_dim == 128
     assert loaded.model.cell_prop_head_hidden_dims == [256, 128]
+    assert loaded.model.cell_prop_loss_type == "l1_rmse"
+    assert loaded.model.cell_prop_loss_alpha_weight == 0.7
+
+
+def test_cell_prop_loss_legacy_kl_weight_alias_still_loads():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "cell_prop_loss_type": "l1_kl",
+                "cell_prop_loss_kl_weight": 0.6,
+            }
+        }
+    )
     assert loaded.model.cell_prop_loss_type == "l1_kl"
-    assert loaded.model.cell_prop_loss_kl_weight == 0.7
+    assert loaded.model.cell_prop_loss_alpha_weight == 0.6
 
 
 def test_predict_cell_prop_false_allows_activation_for_oracle_mixing():

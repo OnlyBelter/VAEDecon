@@ -138,8 +138,8 @@ model:
   cell_prop_activation_function: 'softplus'  # 'softplus' keeps the Dirichlet workflow; 'sigmoid' predicts non-cancer cell types and fills cancer as the remainder; 'softmax' predicts all cell types directly; 'sigmoid_all_norm' applies sigmoid to all cell types and then normalizes them to sum to 1.
   cancer_cell_type_name: 'Cancer Cells'  # Required when cell_prop_activation_function is 'sigmoid'.
   cell_type_existence_shift_scale: 0.0  # Set > 0 to shift each cell-type mu by a centered soft existence score derived from predicted cell proportions.
-  cell_prop_loss_type: 'mse'  # 'mse' or 'l1_kl' for supervised cell-proportion loss.
-  cell_prop_loss_kl_weight: 0.5  # KL multiplier used when cell_prop_loss_type is 'l1_kl'.
+  cell_prop_loss_type: 'mse'  # 'mse', 'l1_kl', or 'l1_rmse' for supervised cell-proportion loss.
+  cell_prop_loss_alpha_weight: 0.5  # For 'l1_kl': KL multiplier. For 'l1_rmse': alpha in alpha * MAE + (1 - alpha) * RMSE.
   cell_prop_loss_weighting: 'none'  # 'none' or 'low_prop_inverse' to emphasize low true proportions.
   cell_prop_loss_low_prop_epsilon: 0.01  # Stabilizer for low-proportion-aware weighting.
   cell_prop_loss_weight_clamp: [1.0, 5.0]  # Clamp range for low-proportion-aware loss weights.
