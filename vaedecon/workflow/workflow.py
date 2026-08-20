@@ -335,7 +335,11 @@ def load_trained_model(
                          encoder_cls_name_list=model_config.encoders,
                          decoder_cls=model_config.decoders,
                          device="cpu")
-    checkpoint = torch.load(model_file_path, map_location="cpu")
+    # Lightning checkpoints saved by this project may include objects such as
+    # LazyLinear/UninitializedParameter metadata. PyTorch 2.6+ changed
+    # torch.load(..., weights_only=True) to be the default, which rejects those
+    # trusted local checkpoint objects during inference-time reload.
+    checkpoint = torch.load(model_file_path, map_location="cpu", weights_only=False)
     state_dict = checkpoint.get("state_dict", checkpoint)
 
     if any(k.startswith("model._orig_mod.") for k in state_dict.keys()):
