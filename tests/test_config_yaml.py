@@ -220,6 +220,23 @@ def test_encoder_output_routing_rejects_predictor_alias_for_latent_posterior():
         )
 
 
+def test_deside_predictor_requires_sigmoid_activation():
+    with pytest.raises(ValueError, match="requires cell_prop_activation_function='sigmoid'"):
+        VAEDeconConfig.from_dict(
+            {
+                "model": {
+                    "predict_cell_prop": True,
+                    "cell_prop_predictor_cls": "DeSideCellPropPredictor",
+                    "cell_prop_activation_function": "sigmoid_all_norm",
+                    "cancer_cell_type_name": "Cancer Cells",
+                    "loss_coefficient": {
+                        "kld_p": 0.0,
+                    },
+                }
+            }
+        )
+
+
 def test_legacy_single_test_set_populates_test_sets():
     loaded = VAEDeconConfig.from_dict(
         {

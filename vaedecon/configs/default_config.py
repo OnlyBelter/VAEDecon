@@ -1067,6 +1067,15 @@ class ModelConfig(BaseModelConfig):
         default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 0.0],
         description="Dropout rates for the DeSide-style pathway branch.",
     )
+    deside_input_gene_list: Literal["filtered_genes", "intersection_with_pathway_genes"] = Field(
+        default="filtered_genes",
+        description=(
+            "Gene-selection mode used by the DeSide-style predictor GEP branch when the pathway "
+            "branch is enabled. 'filtered_genes' keeps the full filtered input-gene list; "
+            "'intersection_with_pathway_genes' matches standalone DeSide by restricting the GEP "
+            "branch to genes that appear in the pathway mask."
+        ),
+    )
     deside_normalization: Optional[Literal["batch_normalization", "layer_normalization"]] = Field(
         default="layer_normalization",
         description="Normalization style used inside the DeSide-style predictor.",
@@ -1597,6 +1606,12 @@ class ModelConfig(BaseModelConfig):
 
         if not self.predict_cell_prop:
             return self
+
+        if self.cell_prop_predictor_cls == "DeSideCellPropPredictor" and activation_function != "sigmoid":
+            raise ValueError(
+                "DeSideCellPropPredictor requires cell_prop_activation_function='sigmoid' "
+                "to match standalone DeSide's non-cancer sigmoid workflow."
+            )
 
         if activation_function == "sigmoid":
             if not self.cancer_cell_type_name or not self.cancer_cell_type_name.strip():

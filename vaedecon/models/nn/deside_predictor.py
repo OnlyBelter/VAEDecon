@@ -109,6 +109,7 @@ class DeSideCellPropPredictor(BaseEncoder):
         self.normalization = getattr(args, "deside_normalization", "layer_normalization")
         self.normalization_layer = list(getattr(args, "deside_normalization_layer", [0, 0, 1, 1, 1, 1]))
         self.pathway_enabled = bool(getattr(args, "deside_pathway_network", True))
+        self.input_gene_mode = getattr(args, "deside_input_gene_list", "filtered_genes")
 
         self.gep_hidden_dims = list(getattr(args, "deside_hidden_dims", [200, 2000, 2000, 2000, 50]))
         self.gep_dropout_rate = list(getattr(args, "deside_dropout_rate", [0.05, 0.05, 0.05, 0.2, 0.0]))
@@ -119,8 +120,35 @@ class DeSideCellPropPredictor(BaseEncoder):
             getattr(args, "deside_pathway_dropout_rate", [0.0, 0.0, 0.0, 0.0, 0.0])
         )
 
+        pathway_mask_df = None
+        gep_input_dim = int(args.input_dim[1])
+        selected_gene_idx = None
+        if self.pathway_enabled:
+            if not data_config or not data_config.pathway_file_path:
+                raise ValueError(
+                    "DeSideCellPropPredictor requires data.pathway_file_path when deside_pathway_network=True."
+                )
+            pathway_mask_df = self._build_pathway_mask_df(
+                pathway_file_path=data_config.pathway_file_path,
+                gene_list_file_path=args.input_gene_list_fp,
+            )
+            if self.input_gene_mode == "intersection_with_pathway_genes":
+                selected_gene_idx = torch.nonzero(
+                    torch.as_tensor(pathway_mask_df.to_numpy(dtype="float32").sum(axis=1) > 0.0),
+                    as_tuple=False,
+                ).flatten()
+                if selected_gene_idx.numel() == 0:
+                    raise ValueError(
+                        "DeSideCellPropPredictor could not find any input genes that intersect with the pathway mask."
+                    )
+                gep_input_dim = int(selected_gene_idx.numel())
+        if selected_gene_idx is not None:
+            self.register_buffer("gep_gene_indices", selected_gene_idx.to(dtype=torch.long))
+        else:
+            self.gep_gene_indices = None
+
         self.gep_branch = _FeatureBranch(
-            input_dim=int(args.input_dim[1]),
+            input_dim=gep_input_dim,
             hidden_units=self.gep_hidden_dims,
             dropout_rates=self.gep_dropout_rate,
             normalization=self.normalization,
@@ -130,14 +158,7 @@ class DeSideCellPropPredictor(BaseEncoder):
         self.pathway_branch = None
         self.merge_layer = None
         if self.pathway_enabled:
-            if not data_config or not data_config.pathway_file_path:
-                raise ValueError(
-                    "DeSideCellPropPredictor requires data.pathway_file_path when deside_pathway_network=True."
-                )
-            pathway_mask = self._build_pathway_mask(
-                pathway_file_path=data_config.pathway_file_path,
-                gene_list_file_path=args.input_gene_list_fp,
-            )
+            pathway_mask = torch.as_tensor(pathway_mask_df.to_numpy(dtype="float32", copy=True))
             self.register_buffer("pathway_mask", pathway_mask)
             self.pathway_branch = _FeatureBranch(
                 input_dim=pathway_mask.shape[1],
@@ -162,15 +183,14 @@ class DeSideCellPropPredictor(BaseEncoder):
         nn.init.zeros_(self.output_layer.bias)
 
     @staticmethod
-    def _build_pathway_mask(pathway_file_path, gene_list_file_path) -> torch.Tensor:
+    def _build_pathway_mask_df(pathway_file_path, gene_list_file_path) -> pd.DataFrame:
         if gene_list_file_path is None:
             raise ValueError(
                 "DeSideCellPropPredictor requires model.input_gene_list_fp to build the pathway mask."
             )
         pathway_mask = read_gene_set(pathway_file_path)
         gene_list_order = pd.read_csv(gene_list_file_path, header=None)[0].tolist()
-        pathway_mask = pathway_mask.reindex(gene_list_order, fill_value=0.0)
-        return torch.as_tensor(pathway_mask.to_numpy(dtype="float32", copy=True))
+        return pathway_mask.reindex(gene_list_order, fill_value=0.0)
 
     def _compute_pathway_profile(self, x: torch.Tensor) -> torch.Tensor:
         if self.data_config.scaling_by_constant:
@@ -190,7 +210,10 @@ class DeSideCellPropPredictor(BaseEncoder):
         eps: float = EPS,
     ) -> ModelOutput:
         del output_layer_levels
-        features = self.gep_branch(x)
+        gep_input = x
+        if self.gep_gene_indices is not None:
+            gep_input = x.index_select(dim=1, index=self.gep_gene_indices)
+        features = self.gep_branch(gep_input)
         if self.pathway_enabled:
             pathway_profile = self._compute_pathway_profile(x)
             pathway_features = self.pathway_branch(pathway_profile)
@@ -200,8 +223,11 @@ class DeSideCellPropPredictor(BaseEncoder):
         output = ModelOutput()
         output["bulk_context_feature"] = features
         if self.predict_cell_prop:
+            head_output = self.output_layer(features)
+            if self.cell_prop_activation_function == "sigmoid":
+                output["raw_non_cancer_cell_prop"] = torch.sigmoid(head_output)
             cell_prop, dd_alpha = build_cell_prop_from_head_output(
-                head_output=self.output_layer(features),
+                head_output=head_output,
                 activation_function=self.cell_prop_activation_function,
                 n_cell_types=self.n_cell_types,
                 eps=eps,

@@ -551,6 +551,7 @@ class VAEDeconTrainer:
             deside_dropout_rate=self.config.model.deside_dropout_rate,
             deside_pathway_hidden_dims=self.config.model.deside_pathway_hidden_dims,
             deside_pathway_dropout_rate=self.config.model.deside_pathway_dropout_rate,
+            deside_input_gene_list=self.config.model.deside_input_gene_list,
             deside_normalization=self.config.model.deside_normalization,
             deside_normalization_layer=self.config.model.deside_normalization_layer,
             cell_prop_activation_function=self.config.model.cell_prop_activation_function,

@@ -86,11 +86,12 @@ def _build_dummy_vae(
     dummy._z_score_kl_loss = lambda recon_x_all_types_cpm: torch.zeros(
         recon_x_all_types_cpm.shape[0], device=recon_x_all_types_cpm.device
     )
-    dummy._cell_prop_dirichlet_loss = lambda y, dd_alpha, pred_cell_prop, batch_size, device: VAE._cell_prop_dirichlet_loss(
+    dummy._cell_prop_dirichlet_loss = lambda y, dd_alpha, pred_cell_prop, raw_non_cancer_cell_prop, batch_size, device: VAE._cell_prop_dirichlet_loss(
         dummy,
         y=y,
         dd_alpha=dd_alpha,
         pred_cell_prop=pred_cell_prop,
+        raw_non_cancer_cell_prop=raw_non_cancer_cell_prop,
         batch_size=batch_size,
         device=device,
     )
@@ -267,6 +268,7 @@ def test_loss_function_includes_weighted_kld_p_and_supervised_cell_prop_term():
         mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
         logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
         pred_cell_prop=dirichlet_mean(dd_alpha),
+        raw_non_cancer_cell_prop=None,
         existence_logits=None,
         dd_alpha=dd_alpha,
         mu_prior=torch.zeros((2, 1), dtype=torch.float32),
@@ -305,6 +307,7 @@ def test_loss_function_requires_labels_for_supervised_training():
             mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
             logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
             pred_cell_prop=torch.ones((2, 2), dtype=torch.float32) / 2,
+            raw_non_cancer_cell_prop=None,
             existence_logits=None,
             dd_alpha=torch.ones((2, 2), dtype=torch.float32),
             mu_prior=torch.zeros((2, 1), dtype=torch.float32),
@@ -326,6 +329,7 @@ def test_cell_prop_dirichlet_loss_keeps_kl_without_labels():
         y=torch.empty(0, dtype=torch.float32),
         dd_alpha=dd_alpha,
         pred_cell_prop=dirichlet_mean(dd_alpha),
+        raw_non_cancer_cell_prop=None,
         batch_size=dd_alpha.shape[0],
         device=torch.device("cpu"),
     )
@@ -379,6 +383,7 @@ def test_sigmoid_cell_prop_loss_supervises_only_non_cancer_columns():
         y=y,
         dd_alpha=None,
         pred_cell_prop=pred_cell_prop,
+        raw_non_cancer_cell_prop=None,
         batch_size=pred_cell_prop.shape[0],
         device=torch.device("cpu"),
     )
@@ -446,6 +451,7 @@ def test_softmax_cell_prop_loss_supervises_all_cell_type_columns():
         y=y,
         dd_alpha=None,
         pred_cell_prop=pred_cell_prop,
+        raw_non_cancer_cell_prop=None,
         batch_size=pred_cell_prop.shape[0],
         device=torch.device("cpu"),
     )
@@ -480,6 +486,7 @@ def test_sigmoid_all_norm_cell_prop_loss_supervises_all_cell_type_columns():
         y=y,
         dd_alpha=None,
         pred_cell_prop=pred_cell_prop,
+        raw_non_cancer_cell_prop=None,
         batch_size=pred_cell_prop.shape[0],
         device=torch.device("cpu"),
     )
@@ -491,6 +498,45 @@ def test_sigmoid_all_norm_cell_prop_loss_supervises_all_cell_type_columns():
     ).sum(dim=-1)
 
     assert torch.allclose(kld_p, torch.zeros_like(kld_p))
+    assert torch.allclose(cell_prop_loss, expected_loss)
+
+
+def test_sigmoid_cell_prop_loss_uses_raw_non_cancer_predictions_when_provided():
+    dummy = _build_dummy_vae(
+        cell_prop_weight=1.0,
+        training=True,
+        activation_function="sigmoid",
+        cancer_cell_type_index=1,
+    )
+    pred_cell_prop = torch.tensor(
+        [[0.40, 0.10, 0.50], [0.55, 0.05, 0.40]],
+        dtype=torch.float32,
+    )
+    raw_non_cancer = torch.tensor(
+        [[0.80, 0.90], [0.70, 0.60]],
+        dtype=torch.float32,
+    )
+    y = torch.tensor(
+        [[0.75, 0.05, 0.20], [0.60, 0.10, 0.30]],
+        dtype=torch.float32,
+    )
+
+    _, cell_prop_loss = VAE._cell_prop_dirichlet_loss(
+        dummy,
+        y=y,
+        dd_alpha=None,
+        pred_cell_prop=pred_cell_prop,
+        raw_non_cancer_cell_prop=raw_non_cancer,
+        batch_size=pred_cell_prop.shape[0],
+        device=torch.device("cpu"),
+    )
+
+    expected_loss = F.mse_loss(
+        raw_non_cancer,
+        remove_cancer_cell_type(y, 1),
+        reduction="none",
+    ).sum(dim=-1)
+
     assert torch.allclose(cell_prop_loss, expected_loss)
 
 
@@ -516,6 +562,7 @@ def test_softmax_cell_prop_loss_supports_l1_kl():
         y=y,
         dd_alpha=None,
         pred_cell_prop=pred_cell_prop,
+        raw_non_cancer_cell_prop=None,
         batch_size=pred_cell_prop.shape[0],
         device=torch.device("cpu"),
     )
@@ -554,6 +601,7 @@ def test_softmax_cell_prop_loss_supports_l1_rmse():
         y=y,
         dd_alpha=None,
         pred_cell_prop=pred_cell_prop,
+        raw_non_cancer_cell_prop=None,
         batch_size=pred_cell_prop.shape[0],
         device=torch.device("cpu"),
     )
@@ -862,6 +910,7 @@ def test_loss_function_skips_cell_type_existence_supervision_during_inference():
         mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
         logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
         pred_cell_prop=torch.tensor([[0.7, 0.3], [0.4, 0.6]], dtype=torch.float32),
+        raw_non_cancer_cell_prop=None,
         existence_logits=existence_logits,
         dd_alpha=None,
         mu_prior=torch.zeros((2, 1), dtype=torch.float32),
@@ -947,6 +996,7 @@ def test_loss_function_uses_direct_residual_supervision_in_mean_centered_mode():
         mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
         logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
         pred_cell_prop=torch.tensor([[0.7, 0.3], [0.2, 0.8]], dtype=torch.float32),
+        raw_non_cancer_cell_prop=None,
         existence_logits=None,
         dd_alpha=None,
         mu_prior=torch.zeros((2, 1), dtype=torch.float32),
@@ -980,6 +1030,7 @@ def test_loss_function_rejects_z_score_kl_in_mean_centered_mode():
             mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
             logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
             pred_cell_prop=torch.tensor([[0.7, 0.3], [0.2, 0.8]], dtype=torch.float32),
+            raw_non_cancer_cell_prop=None,
             existence_logits=None,
             dd_alpha=None,
             mu_prior=torch.zeros((2, 1), dtype=torch.float32),

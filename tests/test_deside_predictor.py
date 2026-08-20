@@ -18,11 +18,17 @@ def _write_gmt(path: Path) -> None:
     )
 
 
+def _write_cell_types(path: Path, cell_types: list[str]) -> None:
+    path.write_text("\n".join(cell_types) + "\n", encoding="utf-8")
+
+
 def test_deside_predictor_returns_cell_prop_and_bulk_context_only(tmp_path: Path):
     gene_list_fp = tmp_path / "genes.txt"
     gmt_fp = tmp_path / "pathways.gmt"
+    cell_type_fp = tmp_path / "cell_types.txt"
     _write_gene_list(gene_list_fp, ["gene_a", "gene_b", "gene_c"])
     _write_gmt(gmt_fp)
+    _write_cell_types(cell_type_fp, ["Immune", "Cancer Cells", "Stromal"])
 
     args = SimpleNamespace(
         input_dim=(1, 3),
@@ -52,3 +58,78 @@ def test_deside_predictor_returns_cell_prop_and_bulk_context_only(tmp_path: Path
     assert "mu_all_types" not in output
     assert "logvar_all_types" not in output
     assert "cell_prop_feature" not in output
+
+
+def test_deside_predictor_exposes_raw_non_cancer_sigmoid_outputs(tmp_path: Path):
+    gene_list_fp = tmp_path / "genes.txt"
+    gmt_fp = tmp_path / "pathways.gmt"
+    cell_type_fp = tmp_path / "cell_types.txt"
+    _write_gene_list(gene_list_fp, ["gene_a", "gene_b", "gene_c"])
+    _write_gmt(gmt_fp)
+    _write_cell_types(cell_type_fp, ["Immune", "Cancer Cells", "Stromal"])
+
+    args = SimpleNamespace(
+        input_dim=(1, 3),
+        input_gene_list_fp=gene_list_fp,
+        cell_type_fp=cell_type_fp,
+        n_cell_types=3,
+        predict_cell_prop=True,
+        cell_prop_activation_function="sigmoid",
+        cancer_cell_type_name="Cancer Cells",
+        deside_normalization="layer_normalization",
+        deside_normalization_layer=[0, 0, 1],
+        deside_pathway_network=True,
+        deside_hidden_dims=[4, 3],
+        deside_dropout_rate=[0.0, 0.0],
+        deside_pathway_hidden_dims=[3, 3],
+        deside_pathway_dropout_rate=[0.0, 0.0],
+        deside_input_gene_list="filtered_genes",
+    )
+    data_config = SimpleNamespace(
+        pathway_file_path=[gmt_fp],
+        scaling_by_constant=True,
+        scaling_factor=20.0,
+    )
+
+    predictor = DeSideCellPropPredictor(args=args, data_config=data_config)
+    output = predictor(torch.rand(2, 3))
+
+    assert output["raw_non_cancer_cell_prop"].shape == (2, 2)
+    assert torch.all(output["raw_non_cancer_cell_prop"] >= 0.0)
+    assert torch.all(output["raw_non_cancer_cell_prop"] <= 1.0)
+
+
+def test_deside_predictor_can_restrict_gep_branch_to_pathway_genes(tmp_path: Path):
+    gene_list_fp = tmp_path / "genes.txt"
+    gmt_fp = tmp_path / "pathways.gmt"
+    cell_type_fp = tmp_path / "cell_types.txt"
+    _write_gene_list(gene_list_fp, ["gene_a", "gene_b", "gene_c", "gene_d"])
+    _write_gmt(gmt_fp)
+    _write_cell_types(cell_type_fp, ["Immune", "Cancer Cells", "Stromal"])
+
+    args = SimpleNamespace(
+        input_dim=(1, 4),
+        input_gene_list_fp=gene_list_fp,
+        cell_type_fp=cell_type_fp,
+        n_cell_types=3,
+        predict_cell_prop=True,
+        cell_prop_activation_function="sigmoid",
+        cancer_cell_type_name="Cancer Cells",
+        deside_normalization="layer_normalization",
+        deside_normalization_layer=[0, 0, 1],
+        deside_pathway_network=True,
+        deside_hidden_dims=[4, 3],
+        deside_dropout_rate=[0.0, 0.0],
+        deside_pathway_hidden_dims=[3, 3],
+        deside_pathway_dropout_rate=[0.0, 0.0],
+        deside_input_gene_list="intersection_with_pathway_genes",
+    )
+    data_config = SimpleNamespace(
+        pathway_file_path=[gmt_fp],
+        scaling_by_constant=True,
+        scaling_factor=20.0,
+    )
+
+    predictor = DeSideCellPropPredictor(args=args, data_config=data_config)
+
+    assert predictor.gep_branch.blocks[0].linear.in_features == 3

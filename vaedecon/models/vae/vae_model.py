@@ -692,6 +692,7 @@ class VAE(BaseAE):
         predictor_prop = None
         predictor_dd_alpha = None
         predictor_context_feature = None
+        predictor_raw_non_cancer_prop = None
 
         for encoder in self.encoders:
             out = encoder(x=x_input, y=y)
@@ -715,6 +716,7 @@ class VAE(BaseAE):
             predictor_prop = getattr(predictor_out, "cell_prop", None)
             predictor_dd_alpha = getattr(predictor_out, "dd_alpha", None)
             predictor_context_feature = getattr(predictor_out, "bulk_context_feature", None)
+            predictor_raw_non_cancer_prop = getattr(predictor_out, "raw_non_cancer_cell_prop", None)
 
         # 3. Fusion (Single or Multi-Encoder)
         mu_types, log_var_types, mu_mean, logvar_mean = self._route_latent_posterior(
@@ -866,6 +868,11 @@ class VAE(BaseAE):
             mu_types=mu_types,
             logvar_types=log_var_types,
             pred_cell_prop=effective_cell_prop,
+            raw_non_cancer_cell_prop=(
+                predictor_raw_non_cancer_prop
+                if self._is_cell_prop_predictor_source(self.cell_prop_source)
+                else None
+            ),
             existence_logits=existence_logits,
             dd_alpha=dd_alpha,
             mu_prior=mu_prior,
@@ -919,6 +926,7 @@ class VAE(BaseAE):
         mu_types: torch.Tensor,
         logvar_types: torch.Tensor,
         pred_cell_prop: Optional[torch.Tensor],
+        raw_non_cancer_cell_prop: Optional[torch.Tensor],
         existence_logits: Optional[torch.Tensor],
         dd_alpha: Optional[torch.Tensor],
         mu_prior: Optional[torch.Tensor],
@@ -941,6 +949,7 @@ class VAE(BaseAE):
             recon_x_conv: Reconstructed bulk GEPs (B, G), in log space after scaling by constant
             mu_types: Latent space mean (B, L, C)
             logvar_types: Latent space log-variance (B, L, C)
+            raw_non_cancer_cell_prop: Optional raw sigmoid outputs for the non-cancer cell types (B, C-1)
             mu_mean: Prior mean (B, L)
             logvar_mean: Prior log-variance (B, L)
             recon_gene_mean: Reconstructed gene mean per cell type across samples in a batch (G, C), in tpm space
@@ -1140,6 +1149,7 @@ class VAE(BaseAE):
             y=y,
             dd_alpha=dd_alpha,
             pred_cell_prop=pred_cell_prop,
+            raw_non_cancer_cell_prop=raw_non_cancer_cell_prop,
             batch_size=batch_size,
             device=device,
         )                                                                                   # (B,), (B,)
@@ -1468,6 +1478,7 @@ class VAE(BaseAE):
         y: Optional[torch.Tensor],
         dd_alpha: Optional[torch.Tensor],
         pred_cell_prop: Optional[torch.Tensor],
+        raw_non_cancer_cell_prop: Optional[torch.Tensor],
         batch_size: int,
         device: torch.device,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1494,7 +1505,9 @@ class VAE(BaseAE):
                 supervised_pred = dirichlet_mean(dd_alpha)
                 target = y
             elif self.cell_prop_activation_function == "sigmoid" and pred_cell_prop is not None:
-                supervised_pred = remove_cancer_cell_type(pred_cell_prop, self.cancer_cell_type_index)
+                supervised_pred = raw_non_cancer_cell_prop
+                if supervised_pred is None:
+                    supervised_pred = remove_cancer_cell_type(pred_cell_prop, self.cancer_cell_type_index)
                 target = remove_cancer_cell_type(y, self.cancer_cell_type_index)
             elif (
                 self.cell_prop_activation_function in {"softmax", "sigmoid_all_norm"}
