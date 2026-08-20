@@ -4,6 +4,46 @@ This changelog records notable user-facing changes in `VAEDecon`. It focuses
 on behavior, configuration, and workflow updates that affect training,
 inference, and evaluation.
 
+## August 20, 2026
+
+This update adds a dedicated DeSide-style predictor branch for cell
+proportions and decoder conditioning without replacing the main VAE latent
+encoder path.
+
+### DeSide-style cell-proportion predictor
+
+The model can now attach a pathway-aware DeSide-like branch that focuses on
+high-accuracy cell-fraction prediction and bulk sample representation.
+
+- Added `DeSideCellPropPredictor` as a dedicated predictor that outputs
+  `cell_prop` and `bulk_context_feature` only.
+- Kept latent posterior prediction in the regular VAE encoder stack instead of
+  forcing the DeSide branch to emit `mu_all_types` and `logvar_all_types`.
+- Added pathway-aware predictor settings including
+  `cell_prop_predictor_cls`, `cell_prop_predictor_alias`,
+  `deside_pathway_network`, `deside_hidden_dims`,
+  `deside_pathway_hidden_dims`, and the corresponding dropout and
+  normalization controls.
+
+### Routing and workflow integration
+
+The new predictor branch plugs into the existing VAE routing workflow without
+changing latent-posterior routing semantics.
+
+- Allowed `encoder_output_routing.cell_prop_source` to point to the dedicated
+  predictor alias.
+- Allowed `encoder_output_routing.decoder_context_source` to point to the
+  dedicated predictor alias for conditioned decoders.
+- Kept `encoder_output_routing.latent_posterior_source` restricted to the main
+  encoder aliases or `fused`.
+- Updated model creation and trainer config building so the dedicated
+  predictor branch can be configured cleanly from YAML.
+
+### Tests
+
+- Added regression tests for the dedicated predictor output contract and the
+  new predictor-alias routing rules.
+
 ## August 15, 2026
 
 This update restores an oracle cell-proportion workflow for decoder-focused
