@@ -819,6 +819,48 @@ class ModelConfig(BaseModelConfig):
         default_factory=EncoderOutputRoutingConfig,
         description="Routing policy for cell proportions, latent posteriors, and decoder context.",
     )
+    cell_prop_predictor_cls: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional dedicated predictor branch used only for cell proportions and bulk decoder context. "
+            "Current supported value: 'DeSideCellPropPredictor'."
+        ),
+    )
+    cell_prop_predictor_alias: str = Field(
+        default="cell_prop_predictor",
+        description="Alias used when routing cell proportions or decoder context from the dedicated predictor branch.",
+    )
+    deside_pathway_network: bool = Field(
+        default=True,
+        description="Enable the pathway branch inside the dedicated DeSide-style cell-proportion predictor.",
+    )
+    deside_hidden_dims: List[int] = Field(
+        default_factory=lambda: [200, 2000, 2000, 2000, 50],
+        description="Hidden dimensions for the DeSide-style bulk GEP branch.",
+    )
+    deside_dropout_rate: List[float] = Field(
+        default_factory=lambda: [0.05, 0.05, 0.05, 0.2, 0.0],
+        description="Dropout rates for the DeSide-style bulk GEP branch.",
+    )
+    deside_pathway_hidden_dims: List[int] = Field(
+        default_factory=lambda: [50, 500, 500, 500, 50],
+        description="Hidden dimensions for the DeSide-style pathway branch.",
+    )
+    deside_pathway_dropout_rate: List[float] = Field(
+        default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 0.0],
+        description="Dropout rates for the DeSide-style pathway branch.",
+    )
+    deside_normalization: Optional[Literal["batch_normalization", "layer_normalization"]] = Field(
+        default="layer_normalization",
+        description="Normalization style used inside the DeSide-style predictor.",
+    )
+    deside_normalization_layer: List[int] = Field(
+        default_factory=lambda: [0, 0, 1, 1, 1, 1],
+        description=(
+            "Per-layer normalization mask for the DeSide-style predictor. Length must equal "
+            "len(deside_hidden_dims) + 1."
+        ),
+    )
 
     # ==================== Decoder Types ====================
     decoders: List[str] = Field(
@@ -1104,7 +1146,13 @@ class ModelConfig(BaseModelConfig):
 
         return v
 
-    @field_validator('encoder_hidden_dims', 'decoder_hidden_dims', 'cell_prop_head_hidden_dims')
+    @field_validator(
+        'encoder_hidden_dims',
+        'decoder_hidden_dims',
+        'cell_prop_head_hidden_dims',
+        'deside_hidden_dims',
+        'deside_pathway_hidden_dims',
+    )
     @classmethod
     def validate_hidden_dims(cls, v: List[int]) -> List[int]:
         """Ensure all hidden dimensions are positive."""
@@ -1114,7 +1162,12 @@ class ModelConfig(BaseModelConfig):
             raise ValueError(f"All hidden dimensions must be positive, got {v}")
         return v
 
-    @field_validator('encoder_dropout_rate', 'decoder_dropout_rate')
+    @field_validator(
+        'encoder_dropout_rate',
+        'decoder_dropout_rate',
+        'deside_dropout_rate',
+        'deside_pathway_dropout_rate',
+    )
     @classmethod
     def validate_dropout_rates(cls, v: List[float]) -> List[float]:
         """Ensure dropout rates are in [0, 1]."""
@@ -1176,6 +1229,29 @@ class ModelConfig(BaseModelConfig):
             raise ValueError(f"encoder_aliases must be unique, got {aliases}")
         return aliases
 
+    @field_validator('cell_prop_predictor_cls')
+    @classmethod
+    def validate_cell_prop_predictor_cls(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        normalized = v.strip()
+        if not normalized:
+            return None
+        valid_predictors = {'DeSideCellPropPredictor'}
+        if normalized not in valid_predictors:
+            raise ValueError(
+                f"Unknown cell_prop_predictor_cls: {normalized}. Valid types: {sorted(valid_predictors)}"
+            )
+        return normalized
+
+    @field_validator('cell_prop_predictor_alias')
+    @classmethod
+    def validate_cell_prop_predictor_alias(cls, v: str) -> str:
+        alias = v.strip()
+        if not alias:
+            raise ValueError("cell_prop_predictor_alias cannot be empty")
+        return alias
+
     @model_validator(mode='after')
     def validate_architecture_consistency(self):
         """Ensure encoder/decoder architecture is consistent."""
@@ -1202,6 +1278,26 @@ class ModelConfig(BaseModelConfig):
                 f"fusion_dropout_rate (len={len(self.fusion_dropout_rate)}) "
                 f"must have the same length"
             )
+        if len(self.deside_hidden_dims) != len(self.deside_dropout_rate):
+            raise ValueError(
+                f"deside_hidden_dims (len={len(self.deside_hidden_dims)}) and "
+                f"deside_dropout_rate (len={len(self.deside_dropout_rate)}) "
+                f"must have the same length"
+            )
+        if len(self.deside_pathway_hidden_dims) != len(self.deside_pathway_dropout_rate):
+            raise ValueError(
+                f"deside_pathway_hidden_dims (len={len(self.deside_pathway_hidden_dims)}) and "
+                f"deside_pathway_dropout_rate (len={len(self.deside_pathway_dropout_rate)}) "
+                f"must have the same length"
+            )
+        if self.deside_pathway_network and len(self.deside_pathway_hidden_dims) != len(self.deside_hidden_dims):
+            raise ValueError(
+                "deside_pathway_hidden_dims must match deside_hidden_dims in length when deside_pathway_network=True"
+            )
+        if len(self.deside_normalization_layer) != len(self.deside_hidden_dims) + 1:
+            raise ValueError(
+                "deside_normalization_layer length must equal len(deside_hidden_dims) + 1"
+            )
 
         return self
 
@@ -1216,19 +1312,30 @@ class ModelConfig(BaseModelConfig):
                 f"encoder_aliases (len={len(self.encoder_aliases)}) and "
                 f"encoders (len={len(self.encoders)}) must have the same length"
             )
+        if self.cell_prop_predictor_cls and self.cell_prop_predictor_alias in set(self.encoder_aliases):
+            raise ValueError(
+                "cell_prop_predictor_alias must not duplicate an encoder alias"
+            )
 
         valid_sources = set(self.encoder_aliases) | {"fused"}
+        if self.cell_prop_predictor_cls:
+            valid_sources.add(self.cell_prop_predictor_alias)
         routing = self.encoder_output_routing
-        routing_values = {
+        cell_prop_context_routing = {
             "cell_prop_source": routing.cell_prop_source,
-            "latent_posterior_source": routing.latent_posterior_source,
             "decoder_context_source": routing.decoder_context_source,
         }
-        for field_name, source in routing_values.items():
+        for field_name, source in cell_prop_context_routing.items():
             if source not in valid_sources:
                 raise ValueError(
                     f"{field_name} must be one of {sorted(valid_sources)}, got {source!r}"
                 )
+        latent_valid_sources = set(self.encoder_aliases) | {"fused"}
+        if routing.latent_posterior_source not in latent_valid_sources:
+            raise ValueError(
+                "latent_posterior_source must be one of "
+                f"{sorted(latent_valid_sources)}, got {routing.latent_posterior_source!r}"
+            )
 
         return self
 

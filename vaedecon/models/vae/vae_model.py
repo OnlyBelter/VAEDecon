@@ -95,6 +95,7 @@ class VAE(BaseAE):
         model_config: ModelConfig,
         data_config: Optional[DataConfig] = None,
         encoders: Optional[List[BaseEncoder]] = None,
+        cell_prop_predictor: Optional[BaseEncoder] = None,
         decoder: Optional[BaseDecoder] = None,
     ):
         super().__init__(
@@ -122,6 +123,14 @@ class VAE(BaseAE):
         self.encoder_alias_to_index = {
             alias: idx for idx, alias in enumerate(self.encoder_aliases)
         }
+        self.cell_prop_predictor = cell_prop_predictor
+        self.cell_prop_predictor_alias = None
+        if self.cell_prop_predictor is not None:
+            self.cell_prop_predictor_alias = getattr(
+                self.cell_prop_predictor,
+                "encoder_alias",
+                getattr(model_config, "cell_prop_predictor_alias", "cell_prop_predictor"),
+            )
         routing = getattr(model_config, "encoder_output_routing", None)
         self.cell_prop_source = getattr(routing, "cell_prop_source", "fused")
         self.latent_posterior_source = getattr(routing, "latent_posterior_source", "fused")
@@ -320,6 +329,7 @@ class VAE(BaseAE):
             getattr(model_config, "conditional_decoder_context_dim", 256)
         )
         self.decoder_context_feature_projectors = nn.ModuleList()
+        self.cell_prop_predictor_context_projector = None
         if self._use_decoder_conditioning:
             decoder_context_dropout = float(
                 getattr(model_config, "conditional_decoder_dropout_rate", 0.1)
@@ -335,6 +345,13 @@ class VAE(BaseAE):
                     for _ in range(self.n_encoders)
                 ]
             )
+            if self.cell_prop_predictor is not None:
+                self.cell_prop_predictor_context_projector = MLPBlock(
+                    in_dim=None,
+                    out_dim=self.decoder_context_dim,
+                    dropout=decoder_context_dropout,
+                    lazy=True,
+                )
 
         # ---------------------------------------------------------------------
         # --- Gene Weights Calculation ---
@@ -477,6 +494,9 @@ class VAE(BaseAE):
             )
         return self.encoder_alias_to_index[source]
 
+    def _is_cell_prop_predictor_source(self, source: str) -> bool:
+        return self.cell_prop_predictor_alias is not None and source == self.cell_prop_predictor_alias
+
     def _route_latent_posterior(
         self,
         *,
@@ -513,11 +533,20 @@ class VAE(BaseAE):
         prop_list: List[Optional[torch.Tensor]],
         dd_alpha_list: List[Optional[torch.Tensor]],
         feature_list: List[Optional[torch.Tensor]],
+        predictor_prop: Optional[torch.Tensor] = None,
+        predictor_dd_alpha: Optional[torch.Tensor] = None,
         eps: float = EPS,
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Select one encoder cell-proportion branch or use the existing fusion path."""
         if not self.model_config.predict_cell_prop:
             return None, None
+
+        if self._is_cell_prop_predictor_source(self.cell_prop_source):
+            if predictor_prop is None:
+                raise ValueError(
+                    f"Cell-proportion predictor alias {self.cell_prop_predictor_alias!r} does not expose cell_prop."
+                )
+            return predictor_prop, predictor_dd_alpha
 
         source_index = self._resolve_routing_index(
             self.cell_prop_source,
@@ -551,10 +580,19 @@ class VAE(BaseAE):
         self,
         *,
         feature_list: List[Optional[torch.Tensor]],
+        predictor_feature: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         """Select one encoder decoder context feature or use the fused context path."""
         if not self._use_decoder_conditioning:
             return None
+
+        if self._is_cell_prop_predictor_source(self.decoder_context_source):
+            if predictor_feature is None:
+                raise ValueError(
+                    f"Cell-proportion predictor alias {self.cell_prop_predictor_alias!r} does not expose "
+                    "a decoder context feature."
+                )
+            return self.cell_prop_predictor_context_projector(predictor_feature)
 
         source_index = self._resolve_routing_index(
             self.decoder_context_source,
@@ -651,6 +689,9 @@ class VAE(BaseAE):
         prop_list, dd_alpha_list = [], []
         cell_prop_feature_list = []
         decoder_context_feature_list = []
+        predictor_prop = None
+        predictor_dd_alpha = None
+        predictor_context_feature = None
 
         for encoder in self.encoders:
             out = encoder(x=x_input, y=y)
@@ -669,6 +710,12 @@ class VAE(BaseAE):
             decoder_context_feature_list.append(decoder_context_feature)
             dd_alpha_list.append(getattr(out, "dd_alpha", None))
 
+        if self.cell_prop_predictor is not None:
+            predictor_out = self.cell_prop_predictor(x=x_input, y=y)
+            predictor_prop = getattr(predictor_out, "cell_prop", None)
+            predictor_dd_alpha = getattr(predictor_out, "dd_alpha", None)
+            predictor_context_feature = getattr(predictor_out, "bulk_context_feature", None)
+
         # 3. Fusion (Single or Multi-Encoder)
         mu_types, log_var_types, mu_mean, logvar_mean = self._route_latent_posterior(
             mu_list=mu_list,
@@ -681,6 +728,8 @@ class VAE(BaseAE):
             prop_list=prop_list,
             dd_alpha_list=dd_alpha_list,
             feature_list=cell_prop_feature_list,
+            predictor_prop=predictor_prop,
+            predictor_dd_alpha=predictor_dd_alpha,
         )
 
         effective_cell_prop = self._resolve_effective_cell_prop(
@@ -697,6 +746,7 @@ class VAE(BaseAE):
         mu_mean = mu_types.mean(dim=-1)
         decoder_bulk_context = self._route_decoder_bulk_context(
             feature_list=decoder_context_feature_list,
+            predictor_feature=predictor_context_feature,
         )
 
         # 4. Reconstruction (Batch Decoding Optimization)

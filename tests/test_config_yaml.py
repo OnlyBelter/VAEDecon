@@ -180,6 +180,46 @@ def test_encoder_output_routing_supports_four_encoders():
     assert len(loaded.model.encoders) == 4
 
 
+def test_encoder_output_routing_accepts_dedicated_predictor_alias_for_cell_prop_and_context():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "encoders": ["EncoderMLP"],
+                "encoder_aliases": ["mlp_main"],
+                "cell_prop_predictor_cls": "DeSideCellPropPredictor",
+                "cell_prop_predictor_alias": "deside_prop",
+                "encoder_output_routing": {
+                    "cell_prop_source": "deside_prop",
+                    "latent_posterior_source": "mlp_main",
+                    "decoder_context_source": "deside_prop",
+                },
+            }
+        }
+    )
+
+    assert loaded.model.cell_prop_predictor_cls == "DeSideCellPropPredictor"
+    assert loaded.model.cell_prop_predictor_alias == "deside_prop"
+    assert loaded.model.encoder_output_routing.cell_prop_source == "deside_prop"
+    assert loaded.model.encoder_output_routing.decoder_context_source == "deside_prop"
+
+
+def test_encoder_output_routing_rejects_predictor_alias_for_latent_posterior():
+    with pytest.raises(ValueError, match="latent_posterior_source must be one of"):
+        VAEDeconConfig.from_dict(
+            {
+                "model": {
+                    "encoders": ["EncoderMLP"],
+                    "encoder_aliases": ["mlp_main"],
+                    "cell_prop_predictor_cls": "DeSideCellPropPredictor",
+                    "cell_prop_predictor_alias": "deside_prop",
+                    "encoder_output_routing": {
+                        "latent_posterior_source": "deside_prop",
+                    },
+                }
+            }
+        )
+
+
 def test_legacy_single_test_set_populates_test_sets():
     loaded = VAEDeconConfig.from_dict(
         {

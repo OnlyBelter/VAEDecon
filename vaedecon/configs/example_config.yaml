@@ -124,6 +124,21 @@ model:
     cell_prop_source: 'fused'  # 'fused' keeps the default VAE behavior; set to an encoder alias to route from one branch directly.
     latent_posterior_source: 'fused'
     decoder_context_source: 'fused'
+  cell_prop_predictor_cls: null  # Set to 'DeSideCellPropPredictor' to add a DeSide-style cell-proportion/context branch without latent posterior outputs.
+  cell_prop_predictor_alias: 'cell_prop_predictor'
+  # Example: keep the latent posterior in the main encoder, but let the DeSide branch drive cell proportions and decoder context.
+  # cell_prop_predictor_cls: 'DeSideCellPropPredictor'
+  # encoder_output_routing:
+  #   cell_prop_source: 'cell_prop_predictor'
+  #   latent_posterior_source: 'mlp_main'
+  #   decoder_context_source: 'cell_prop_predictor'
+  deside_pathway_network: true
+  deside_hidden_dims: [200, 2000, 2000, 2000, 50]
+  deside_dropout_rate: [0.05, 0.05, 0.05, 0.2, 0.0]
+  deside_pathway_hidden_dims: [50, 500, 500, 500, 50]
+  deside_pathway_dropout_rate: [0.0, 0.0, 0.0, 0.0, 0.0]
+  deside_normalization: 'layer_normalization'
+  deside_normalization_layer: [0, 0, 1, 1, 1, 1]
   # Example task-specialized hybrid with the Transformer branch leading cell proportions and bulk context:
   # encoders: ['EncoderResMLP', 'GeneTransformerEncoder']
   # encoder_aliases: ['mlp_main', 'transformer_main']

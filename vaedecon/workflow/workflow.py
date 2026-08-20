@@ -15,7 +15,7 @@ from ..models.base import BaseEncoder
 from ..models.base import has_usable_labels
 from ..models.gnn import EncoderSGNN
 from ..models.nn import (EncoderMLP, DecoderMLP, DecoderConditionalMLP, EncoderHybrid, EncoderResMLP, DecoderResMLP,
-                         PositionalEncoding, GeneTransformerEncoder, EncoderPathNet)
+                         PositionalEncoding, GeneTransformerEncoder, EncoderPathNet, DeSideCellPropPredictor)
 from ..models.vae import VAE
 from ..configs import ModelConfig, TrainingConfig, DataConfig
 from ..trainers import BaseTrainerL, PLTrainer, TrainingPipeline
@@ -60,6 +60,7 @@ def create_model(
         max_len=model_config.n_cell_types
     )
     encoders = []
+    cell_prop_predictor = None
     kwargs: Dict[str, Any] = {
         "args": model_config,
         "data_config": data_config,
@@ -110,6 +111,17 @@ def create_model(
         encoder.encoder_alias = encoder_aliases[idx]
         encoders.append(encoder)
 
+    predictor_cls_name = str(getattr(model_config, "cell_prop_predictor_cls", "") or "").strip().lower()
+    if predictor_cls_name:
+        predictor_registry = {
+            "desidecellproppredictor": DeSideCellPropPredictor,
+        }
+        if predictor_cls_name not in predictor_registry:
+            raise NotImplementedError(f"Unsupported cell_prop_predictor_cls: {predictor_cls_name}")
+        predictor_cls = predictor_registry[predictor_cls_name]
+        cell_prop_predictor = predictor_cls(**kwargs)
+        cell_prop_predictor.encoder_alias = getattr(model_config, "cell_prop_predictor_alias", "cell_prop_predictor")
+
     for decoder_cls_name in decoder_cls:
         decoder_cls_name = decoder_cls_name.lower()
         if decoder_cls_name == "DecoderMLP".lower():
@@ -125,6 +137,7 @@ def create_model(
         model_config=model_config,
         data_config=data_config,
         encoders=encoders,
+        cell_prop_predictor=cell_prop_predictor,
         decoder=decoder,
     )
 

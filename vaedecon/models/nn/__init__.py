@@ -5,6 +5,7 @@ In this module are stored the main Neural Networks Architectures.
 
 from .mlp import EncoderMLP, DecoderMLP, DecoderConditionalMLP
 from .pathway_net import EncoderPathNet
+from .deside_predictor import DeSideCellPropPredictor
 from .fused_mlp_gnn import EncoderHybrid
 from .res_mlp import EncoderResMLP, DecoderResMLP
 from .transformer import GeneTransformerEncoder
@@ -20,4 +21,5 @@ __all__ = [
     "DecoderResMLP",
     "GeneTransformerEncoder",
     "EncoderPathNet",
+    "DeSideCellPropPredictor",
 ]

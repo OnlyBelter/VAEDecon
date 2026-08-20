@@ -119,6 +119,7 @@ def _build_routing_dummy(
     cell_prop_source: str = "fused",
     latent_posterior_source: str = "fused",
     decoder_context_source: str = "fused",
+    cell_prop_predictor_alias: str | None = None,
     predict_cell_prop: bool = True,
     use_shared_head: bool = False,
     use_decoder_conditioning: bool = False,
@@ -130,6 +131,7 @@ def _build_routing_dummy(
     dummy.cell_prop_source = cell_prop_source
     dummy.latent_posterior_source = latent_posterior_source
     dummy.decoder_context_source = decoder_context_source
+    dummy.cell_prop_predictor_alias = cell_prop_predictor_alias
     dummy.model_config = SimpleNamespace(predict_cell_prop=predict_cell_prop)
     dummy._use_shared_cell_prop_head = use_shared_head
     dummy._use_decoder_conditioning = use_decoder_conditioning
@@ -140,6 +142,7 @@ def _build_routing_dummy(
     dummy.decoder_context_feature_projectors = torch.nn.ModuleList(
         [torch.nn.Identity() for _ in encoder_aliases]
     )
+    dummy.cell_prop_predictor_context_projector = torch.nn.Identity()
     dummy.cell_prop_fusion_strategy = "shared_feature_mean"
     dummy.cell_prop_fusion_gate = None
     dummy._predict_cell_prop_from_features = lambda **kwargs: (
@@ -160,6 +163,10 @@ def _build_routing_dummy(
         dummy,
         source,
         field_name=field_name,
+    )
+    dummy._is_cell_prop_predictor_source = lambda source: VAE._is_cell_prop_predictor_source(
+        dummy,
+        source,
     )
     return dummy
 
@@ -697,6 +704,26 @@ def test_route_cell_prop_prediction_uses_selected_encoder_alias():
     assert torch.equal(dd_alpha, dd_alpha_list[1])
 
 
+def test_route_cell_prop_prediction_uses_dedicated_predictor_alias():
+    dummy = _build_routing_dummy(
+        encoder_aliases=["mlp_main", "transformer_main"],
+        cell_prop_source="cell_prop_predictor",
+        cell_prop_predictor_alias="cell_prop_predictor",
+    )
+
+    pred_cell_prop, dd_alpha = VAE._route_cell_prop_prediction(
+        dummy,
+        prop_list=[None, None],
+        dd_alpha_list=[None, None],
+        feature_list=[None, None],
+        predictor_prop=torch.tensor([[0.2, 0.8], [0.3, 0.7]], dtype=torch.float32),
+        predictor_dd_alpha=torch.tensor([[3.0, 4.0], [3.0, 4.0]], dtype=torch.float32),
+    )
+
+    assert torch.equal(pred_cell_prop, torch.tensor([[0.2, 0.8], [0.3, 0.7]], dtype=torch.float32))
+    assert torch.equal(dd_alpha, torch.tensor([[3.0, 4.0], [3.0, 4.0]], dtype=torch.float32))
+
+
 def test_route_latent_posterior_uses_selected_encoder_alias():
     dummy = _build_routing_dummy(
         encoder_aliases=["mlp_main", "transformer_main"],
@@ -769,6 +796,26 @@ def test_route_decoder_bulk_context_fused_supports_three_encoders():
 
     expected = torch.stack(feature_list, dim=0).mean(dim=0)
     assert torch.allclose(decoder_context, expected)
+
+
+def test_route_decoder_bulk_context_uses_dedicated_predictor_alias():
+    dummy = _build_routing_dummy(
+        encoder_aliases=["mlp_main", "transformer_main"],
+        decoder_context_source="cell_prop_predictor",
+        cell_prop_predictor_alias="cell_prop_predictor",
+        use_decoder_conditioning=True,
+    )
+
+    decoder_context = VAE._route_decoder_bulk_context(
+        dummy,
+        feature_list=[
+            torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+            torch.tensor([[5.0, 5.0]], dtype=torch.float32),
+        ],
+        predictor_feature=torch.tensor([[9.0, 9.0]], dtype=torch.float32),
+    )
+
+    assert torch.equal(decoder_context, torch.tensor([[9.0, 9.0]], dtype=torch.float32))
 
 
 def test_apply_cell_type_existence_shift_uses_centered_soft_threshold():
