@@ -19,7 +19,7 @@ from vaedecon.trainers.base_trainer import (
     _resolve_linear_schedule_value,
     _step_adaptive_aux_loss_schedule,
 )
-from vaedecon.workflow.workflow import evaluate_model
+from vaedecon.workflow.workflow import _detach_model_output_to_cpu, evaluate_model
 
 
 def _build_dummy_vae(
@@ -1290,6 +1290,24 @@ class _DummyPredictiveModel:
             "mu": torch.tensor([[0.5]], dtype=torch.float32),
             "recon_x_all_types": torch.ones((1, 2, 2), dtype=torch.float32),
         }
+
+
+def test_detach_model_output_to_cpu_moves_tensor_values_off_graph():
+    tensor = torch.tensor([[1.0, 2.0]], dtype=torch.float32, requires_grad=True)
+
+    result = _detach_model_output_to_cpu(
+        {
+            "pred_cell_prop": tensor,
+            "optional_value": None,
+            "label": "ok",
+        }
+    )
+
+    assert result["pred_cell_prop"].device.type == "cpu"
+    assert result["pred_cell_prop"].requires_grad is False
+    assert result["pred_cell_prop"].tolist() == [[1.0, 2.0]]
+    assert result["optional_value"] is None
+    assert result["label"] == "ok"
 
 
 def test_evaluate_model_saves_predicted_cell_prop_for_single_sample_batch(tmp_path):

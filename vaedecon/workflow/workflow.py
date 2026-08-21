@@ -46,6 +46,17 @@ def _cell_prop_batch_to_numpy(cell_prop: Union[torch.Tensor, np.ndarray, list]) 
     return array
 
 
+def _detach_model_output_to_cpu(output: Dict[str, Any]) -> Dict[str, Any]:
+    """Move tensor values in one model output dict to CPU before accumulation."""
+    detached_output: Dict[str, Any] = {}
+    for key, value in output.items():
+        if isinstance(value, torch.Tensor):
+            detached_output[key] = value.detach().cpu()
+        else:
+            detached_output[key] = value
+    return detached_output
+
+
 def create_model(
     model_config: ModelConfig,
     data_config: DataConfig,
@@ -395,7 +406,7 @@ def evaluate_model(
         pred_cell_prop_all = pred_cell_prop_all.loc[:, cell_types].values
     else:
         pred_cell_prop_all = None
-    pred_results = []
+    pred_all_dict = {}
     pred_cell_prop_list = []
     with torch.no_grad():
         for batch in test_set_loader:
@@ -420,16 +431,14 @@ def evaluate_model(
                     pred_cell_prop = _cell_prop_batch_to_numpy(labels)
 
             pred_cell_prop_list.append(pred_cell_prop)
-            pred_results.append(pred_a)
+            pred_a = _detach_model_output_to_cpu(pred_a)
+            for key, value in pred_a.items():
+                if key not in pred_all_dict:
+                    pred_all_dict[key] = []
+                pred_all_dict[key].append(value)
     valid_pred_cell_props = [arr for arr in pred_cell_prop_list if arr is not None and arr.size > 0]
     if pred_cell_prop_all is None and valid_pred_cell_props:
         pred_cell_prop_all = np.concatenate(valid_pred_cell_props, axis=0)
-    pred_all_dict = {}
-    for a_result in pred_results:
-        for key, value in a_result.items():
-            if key not in pred_all_dict:
-                pred_all_dict[key] = []
-            pred_all_dict[key].append(value)
     for key, value in pred_all_dict.items():
         if value[0] is not None and len(value[0].shape) > 0:
             pred_all_dict[key] = torch.cat(value, dim=0)
