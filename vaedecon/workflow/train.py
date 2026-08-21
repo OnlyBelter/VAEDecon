@@ -1,6 +1,7 @@
 """
 Training pipeline for VAEDecon
 """
+import copy
 import json
 import os
 import logging
@@ -851,6 +852,57 @@ class VAEDeconTrainer:
             raise FileNotFoundError(f"Last staged-training checkpoint not found: {last_path}")
         return best_path, last_path
 
+    def _run_post_stage_test_set_prediction(
+        self,
+        *,
+        stage_name: str,
+        stage_dir: Path,
+    ) -> Optional[Path]:
+        has_named_test_sets = bool(getattr(self.config.data, "test_sets", {}))
+        legacy_test_set_path = getattr(self.config.data, "test_set_file_path", "")
+        has_legacy_test_set = bool(legacy_test_set_path and str(legacy_test_set_path).strip())
+        if not has_named_test_sets and not has_legacy_test_set:
+            logger.info(
+                "Skipping post-stage prediction for %s because no test sets are configured.",
+                stage_name,
+            )
+            return None
+
+        from .inference import VAEDeconPredictor
+
+        inference_config = copy.deepcopy(self.config)
+        inference_config.model.model_dir = stage_dir
+        if stage_name == "cell_prop_predictor_pretrain":
+            inference_config.evaluation.save_reconstructed_gep = False
+            inference_config.evaluation.plot_single_cell_gep = False
+            inference_config.evaluation.plot_bulk_gep = False
+            inference_config.evaluation.plot_latent_space = False
+
+        output_dir = stage_dir / "test_results"
+        if stage_name == "cell_prop_predictor_pretrain":
+            logger.info(
+                "Running configured test-set cell proportion evaluation after %s in %s",
+                stage_name,
+                stage_dir,
+            )
+        else:
+            logger.info(
+                "Running full configured test-set inference after %s in %s",
+                stage_name,
+                stage_dir,
+            )
+        predictor = VAEDeconPredictor(
+            model_dir=str(stage_dir),
+            config=inference_config,
+            device=self.device,
+        )
+        predictor.predict_configured_test_sets(
+            output_dir=str(output_dir),
+            dataset_type="test",
+            visualize=True,
+        )
+        return output_dir
+
     def _promote_stage_outputs_to_final_model(
         self,
         *,
@@ -995,6 +1047,10 @@ class VAEDeconTrainer:
 
             best_ckpt_path, last_ckpt_path = self._resolve_stage_checkpoint_paths(stage_dir)
             executed_stage_best_checkpoints[stage_cfg.name] = best_ckpt_path
+            post_stage_test_results_dir = self._run_post_stage_test_set_prediction(
+                stage_name=stage_cfg.name,
+                stage_dir=stage_dir,
+            )
             stage_summary_rows.append(
                 {
                     "stage_name": stage_cfg.name,
@@ -1010,6 +1066,11 @@ class VAEDeconTrainer:
                     "min_delta": float(stage_cfg.early_stopping.min_delta),
                     "train_modules": ",".join(stage_cfg.train_modules),
                     "freeze_modules": ",".join(stage_cfg.freeze_modules),
+                    "test_results_dir": (
+                        str(post_stage_test_results_dir)
+                        if post_stage_test_results_dir is not None
+                        else ""
+                    ),
                 }
             )
 

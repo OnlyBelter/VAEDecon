@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from vaedecon.configs import VAEDeconConfig
+import vaedecon.workflow.inference as inference_workflow
 from vaedecon.workflow.train import VAEDeconTrainer
 
 
@@ -61,6 +62,9 @@ def _base_staged_training_dict() -> dict:
 def _base_staged_config_dict(tmp_path: Path) -> dict:
     predictor_alias = "cell_prop_predictor"
     return {
+        "data": {
+            "sct_file_path": [str(tmp_path / "train_sct.h5ad")],
+        },
         "training": {
             "output_dir": str(tmp_path),
             "naming_postfix": "staged-training-test",
@@ -70,6 +74,8 @@ def _base_staged_config_dict(tmp_path: Path) -> dict:
         },
         "model": {
             "predict_cell_prop": True,
+            "cell_prop_activation_function": "sigmoid",
+            "cancer_cell_type_name": "Cancer Cells",
             "encoders": ["EncoderMLP"],
             "encoder_aliases": ["mlp_main"],
             "cell_prop_predictor_cls": "DeSideCellPropPredictor",
@@ -232,3 +238,125 @@ def test_load_cell_prop_predictor_checkpoint_updates_only_predictor_weights(tmp_
     assert torch.allclose(dummy_model.cell_prop_predictor.weight, torch.full_like(dummy_model.cell_prop_predictor.weight, 2.0))
     assert torch.allclose(dummy_model.cell_prop_predictor.bias, torch.full_like(dummy_model.cell_prop_predictor.bias, -1.0))
     assert torch.allclose(dummy_model.encoders[0].weight, original_encoder_weight)
+
+
+def test_post_stage_prediction_uses_cell_prop_focused_inference_for_stage1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config_dict = _base_staged_config_dict(tmp_path)
+    config_dict["data"]["test_sets"] = {
+        "Test_set1": {
+            "test_set_file_path": str(tmp_path / "test_set.csv"),
+        }
+    }
+    config = VAEDeconConfig.from_dict(config_dict)
+    trainer = VAEDeconTrainer(config=config)
+    stage_dir = tmp_path / "stage_cell_prop_predictor_pretrain"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    captured: dict[str, object] = {}
+
+    class DummyPredictor:
+        def __init__(self, model_dir, config, device):
+            captured["model_dir"] = model_dir
+            captured["config"] = config
+            captured["device"] = device
+
+        def predict_configured_test_sets(self, output_dir=None, dataset_type="test", visualize=True):
+            captured["output_dir"] = output_dir
+            captured["dataset_type"] = dataset_type
+            captured["visualize"] = visualize
+            return {}
+
+    monkeypatch.setattr(inference_workflow, "VAEDeconPredictor", DummyPredictor)
+
+    result = trainer._run_post_stage_test_set_prediction(
+        stage_name="cell_prop_predictor_pretrain",
+        stage_dir=stage_dir,
+    )
+
+    assert result == stage_dir / "test_results"
+    assert captured["model_dir"] == str(stage_dir)
+    assert captured["device"] == trainer.device
+    assert captured["output_dir"] == str(stage_dir / "test_results")
+    assert captured["dataset_type"] == "test"
+    assert captured["visualize"] is True
+    stage_config = captured["config"]
+    assert stage_config.model.model_dir == stage_dir
+    assert stage_config.evaluation.save_reconstructed_gep is False
+    assert stage_config.evaluation.plot_single_cell_gep is False
+    assert stage_config.evaluation.plot_bulk_gep is False
+    assert stage_config.evaluation.plot_latent_space is False
+
+
+@pytest.mark.parametrize("stage_name", ["reconstruction_training", "joint_finetune"])
+def test_post_stage_prediction_uses_full_inference_for_later_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage_name: str,
+):
+    config_dict = _base_staged_config_dict(tmp_path)
+    config_dict["data"]["test_sets"] = {
+        "Test_set1": {
+            "test_set_file_path": str(tmp_path / "test_set.csv"),
+        }
+    }
+    config = VAEDeconConfig.from_dict(config_dict)
+    trainer = VAEDeconTrainer(config=config)
+    stage_dir = tmp_path / f"stage_{stage_name}"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    captured: dict[str, object] = {}
+
+    class DummyPredictor:
+        def __init__(self, model_dir, config, device):
+            captured["model_dir"] = model_dir
+            captured["config"] = config
+            captured["device"] = device
+
+        def predict_configured_test_sets(self, output_dir=None, dataset_type="test", visualize=True):
+            captured["output_dir"] = output_dir
+            captured["dataset_type"] = dataset_type
+            captured["visualize"] = visualize
+            return {}
+
+    monkeypatch.setattr(inference_workflow, "VAEDeconPredictor", DummyPredictor)
+
+    result = trainer._run_post_stage_test_set_prediction(
+        stage_name=stage_name,
+        stage_dir=stage_dir,
+    )
+
+    assert result == stage_dir / "test_results"
+    assert captured["model_dir"] == str(stage_dir)
+    assert captured["device"] == trainer.device
+    assert captured["output_dir"] == str(stage_dir / "test_results")
+    assert captured["dataset_type"] == "test"
+    assert captured["visualize"] is True
+    stage_config = captured["config"]
+    assert stage_config.model.model_dir == stage_dir
+    assert stage_config.evaluation.save_reconstructed_gep is True
+    assert stage_config.evaluation.plot_single_cell_gep is True
+    assert stage_config.evaluation.plot_bulk_gep is True
+    assert stage_config.evaluation.plot_latent_space is True
+
+
+def test_post_stage_prediction_skips_when_no_test_set_is_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    trainer = VAEDeconTrainer(config=config)
+    stage_dir = tmp_path / "stage_cell_prop_predictor_pretrain"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+
+    def _unexpected_predictor(*args, **kwargs):
+        raise AssertionError("VAEDeconPredictor should not be constructed without configured test sets")
+
+    monkeypatch.setattr(inference_workflow, "VAEDeconPredictor", _unexpected_predictor)
+
+    result = trainer._run_post_stage_test_set_prediction(
+        stage_name="cell_prop_predictor_pretrain",
+        stage_dir=stage_dir,
+    )
+
+    assert result is None
