@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pandas as pd
 import pytest
 import torch
 
@@ -225,6 +226,40 @@ def test_stage1_monitor_is_forced_to_val_cell_prop_loss(tmp_path: Path):
 
     assert loaded.training.staged_training is not None
     assert loaded.training.staged_training.stages[0].early_stopping.monitor == "val_cell_prop_loss"
+
+
+def test_stage1_training_config_always_logs_cell_prop_loss(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    config.training.prog_bar_metrics = ["loss", "kld"]
+    trainer = VAEDeconTrainer(config=config)
+
+    stage_training_config = trainer._build_stage_training_config(
+        config.training,
+        stage_cfg=config.training.staged_training.stages[0],
+    )
+
+    assert "cell_prop_loss" in stage_training_config.prog_bar_metrics
+
+
+def test_stage1_loss_plot_is_saved_from_losses_csv(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    trainer = VAEDeconTrainer(config=config)
+    stage_dir = tmp_path / "stage_cell_prop_predictor_pretrain"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "epoch": [0, 1, 2],
+            "train_cell_prop_loss_epoch": [5.0, 2.5, 1.5],
+            "val_cell_prop_loss": [6.0, 3.0, 2.0],
+        }
+    ).to_csv(stage_dir / "losses.csv", index=False)
+
+    trainer._plot_stage_training_history(
+        stage_name="cell_prop_predictor_pretrain",
+        stage_dir=stage_dir,
+    )
+
+    assert (stage_dir / "loss.png").exists()
 
 
 def test_load_cell_prop_predictor_checkpoint_updates_only_predictor_weights(tmp_path: Path):

@@ -831,6 +831,11 @@ class VAEDeconTrainer:
         )
         stage_training_config.n_early_stopping_patience = int(stage_cfg.early_stopping.patience)
         stage_training_config.staged_training = None
+        if stage_cfg.name == "cell_prop_predictor_pretrain":
+            prog_bar_metrics = list(stage_training_config.prog_bar_metrics)
+            if "cell_prop_loss" not in prog_bar_metrics:
+                prog_bar_metrics.append("cell_prop_loss")
+            stage_training_config.prog_bar_metrics = prog_bar_metrics
         return stage_training_config
 
     @staticmethod
@@ -902,6 +907,41 @@ class VAEDeconTrainer:
             visualize=True,
         )
         return output_dir
+
+    @staticmethod
+    def _plot_stage_training_history(
+        *,
+        stage_name: str,
+        stage_dir: Path,
+    ) -> None:
+        losses_path = stage_dir / "losses.csv"
+        if not losses_path.exists():
+            logger.info(
+                "Skipping loss plot for %s because %s does not exist.",
+                stage_name,
+                losses_path,
+            )
+            return
+
+        try:
+            history_df = pd.read_csv(losses_path)
+            from ..plot.plot_nn import plot_loss
+
+            metric_pairs = None
+            if stage_name == "cell_prop_predictor_pretrain":
+                metric_pairs = [
+                    ("train_cell_prop_loss_epoch", "train loss"),
+                    ("val_cell_prop_loss", "val loss"),
+                ]
+
+            plot_loss(
+                history_df=history_df,
+                output_dir=stage_dir,
+                metric_pairs=metric_pairs,
+            )
+            logger.info("Saved loss curve for %s to %s", stage_name, stage_dir / "loss.png")
+        except Exception as exc:
+            logger.warning("Could not plot loss curve for %s: %s", stage_name, exc)
 
     def _promote_stage_outputs_to_final_model(
         self,
@@ -1049,6 +1089,10 @@ class VAEDeconTrainer:
                 module_mode_overrides=module_mode_overrides,
             )
             stage_trainer.train()
+            self._plot_stage_training_history(
+                stage_name=stage_cfg.name,
+                stage_dir=stage_dir,
+            )
             if stage_cfg.name == "cell_prop_predictor_pretrain":
                 self._export_cell_prop_predictor_checkpoint(
                     model=model,

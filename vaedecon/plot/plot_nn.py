@@ -30,6 +30,7 @@ def plot_loss(
     agg_func="last",
     figsize=(8, 6),
     log_y: bool = True,
+    metric_pairs=None,
 ):
     """
     Plot loss curves from a metrics DataFrame.
@@ -55,6 +56,9 @@ def plot_loss(
             Figure size.
         log_y (bool):
             Whether to use a log scale on the y-axis.
+        metric_pairs (list[tuple[str, str]] | None):
+            Optional explicit metric columns and legend labels to plot.
+            When omitted, the default loss columns are used.
 
     Returns:
         (fig, ax) if output_dir is None, otherwise None.
@@ -67,7 +71,7 @@ def plot_loss(
 
     df = history_df.copy()
 
-    candidate_metrics = [
+    candidate_metrics = metric_pairs if metric_pairs is not None else [
         ("loss", "loss"),
         ("train_loss_epoch", "train loss"),
         ("train_loss", "train loss"),
