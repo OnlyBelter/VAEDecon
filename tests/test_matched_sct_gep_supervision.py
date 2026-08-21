@@ -282,7 +282,7 @@ def test_matched_sct_gep_loss_masks_low_prop_cell_types():
         cell_prop_threshold=0.1,
     )
 
-    assert loss_with_active_error.item() > 0
+    assert torch.allclose(loss_with_active_error, torch.tensor([1.0], dtype=torch.float32))
 
 
 def test_loss_function_skips_matched_sct_gep_supervision_during_inference():

@@ -1300,7 +1300,8 @@ class VAE(BaseAE):
         """Masked log-MSE between inferred cell-type GEPs and matched true sctGEPs."""
         recon_x_all_types_log = to_log_space(recon_x_all_types_cpm, self.scaling_factor)
         active_cell_type_mask = true_sct_gep_present_mask & (true_cell_prop >= cell_prop_threshold)
-        active_gene_mask = active_cell_type_mask.unsqueeze(1).to(dtype=recon_x_all_types_log.dtype)
+        active_gene_mask = active_cell_type_mask.unsqueeze(1).expand(-1, recon_x_all_types_log.shape[1], -1)
+        active_gene_mask = active_gene_mask.to(dtype=recon_x_all_types_log.dtype)
         diff2 = (recon_x_all_types_log - true_sct_gep).pow(2) * active_gene_mask
         denom = active_gene_mask.sum(dim=(1, 2)).clamp_min(1.0)
         return diff2.sum(dim=(1, 2)) / denom
@@ -1316,7 +1317,8 @@ class VAE(BaseAE):
         """Masked scaled-log MSE between predicted and true mean-centered SCT residuals."""
         true_residual_log = true_sct_gep - self.g_mean.unsqueeze(0)
         active_cell_type_mask = true_sct_gep_present_mask & (true_cell_prop >= cell_prop_threshold)
-        active_gene_mask = active_cell_type_mask.unsqueeze(1).to(dtype=pred_residual_log.dtype)
+        active_gene_mask = active_cell_type_mask.unsqueeze(1).expand(-1, pred_residual_log.shape[1], -1)
+        active_gene_mask = active_gene_mask.to(dtype=pred_residual_log.dtype)
         diff2 = (pred_residual_log - true_residual_log).pow(2) * active_gene_mask
         denom = active_gene_mask.sum(dim=(1, 2)).clamp_min(1.0)
         return diff2.sum(dim=(1, 2)) / denom

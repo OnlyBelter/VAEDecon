@@ -4,6 +4,23 @@ This changelog records notable user-facing changes in `VAEDecon`. It focuses
 on behavior, configuration, and workflow updates that affect training,
 inference, and evaluation.
 
+## August 21, 2026
+
+This update fixes the normalization of matched `sctGEP` supervision so the
+loss scale reflects the average error per supervised gene-cell-type element.
+
+### Matched `sctGEP` loss normalization
+
+Matched `sctGEP` supervision no longer divides only by the number of active
+cell types when computing masked MSE.
+
+- Fixed both the direct matched-`sctGEP` loss and the mean-centered residual
+  supervision loss to average over all active `(gene, cell_type)` elements.
+- This makes `cell_type_sct_gep_loss` easier to interpret across datasets and
+  prevents its magnitude from growing in proportion to the number of genes.
+- Updated regression tests to lock in the corrected normalization behavior for
+  both supervision paths.
+
 ## August 20, 2026
 
 This update adds a dedicated DeSide-style predictor branch for cell

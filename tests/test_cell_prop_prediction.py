@@ -968,7 +968,7 @@ def test_matched_sct_gep_residual_supervision_loss_uses_true_minus_mean_with_mas
         cell_prop_threshold=0.1,
     )
 
-    expected = torch.tensor([3.0, 3.0], dtype=torch.float32)
+    expected = torch.tensor([1.0, 1.0], dtype=torch.float32)
     assert torch.allclose(loss, expected)
 
 
