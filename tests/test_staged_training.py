@@ -98,6 +98,15 @@ class DummyStageModel(torch.nn.Module):
         self.model_config = model_config
 
 
+class DummySaveModel(torch.nn.Module):
+    def __init__(self, model_config):
+        super().__init__()
+        self.model_config = model_config
+
+    def save(self, model_dir, training_config=None, data_config=None):
+        Path(model_dir, "saved_marker.txt").write_text("saved", encoding="utf-8")
+
+
 def test_staged_training_config_accepts_selected_stage_with_init_checkpoint(tmp_path: Path):
     config_dict = _base_staged_config_dict(tmp_path)
     config_dict["training"]["staged_training"]["run_stages"] = ["reconstruction_training"]
@@ -360,3 +369,35 @@ def test_post_stage_prediction_skips_when_no_test_set_is_configured(
     )
 
     assert result is None
+
+
+def test_promote_stage_outputs_skips_test_results_in_final_model(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    trainer = VAEDeconTrainer(config=config)
+    stage_dir = tmp_path / "stage_joint_finetune"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    (stage_dir / "losses.csv").write_text("epoch,val_loss\n0,1.0\n", encoding="utf-8")
+    (stage_dir / "test_results").mkdir()
+    (stage_dir / "test_results" / "stage_result.txt").write_text("stage3", encoding="utf-8")
+
+    trainer.model_dir.mkdir(parents=True, exist_ok=True)
+    (trainer.model_dir / "test_results").mkdir(exist_ok=True)
+    (trainer.model_dir / "test_results" / "stale.txt").write_text("old", encoding="utf-8")
+
+    model = DummySaveModel(model_config=config.model.model_copy(deep=True))
+    trainer._promote_stage_outputs_to_final_model(
+        final_stage_dir=stage_dir,
+        model=model,
+        base_training_config=config.training.model_copy(deep=True),
+        stage_summary_rows=[
+            {
+                "stage_name": "joint_finetune",
+                "stage_dir": str(stage_dir),
+                "test_results_dir": str(stage_dir / "test_results"),
+            }
+        ],
+    )
+
+    assert (trainer.model_dir / "losses.csv").exists()
+    assert not (trainer.model_dir / "test_results").exists()
+    assert (trainer.model_dir / "saved_marker.txt").exists()

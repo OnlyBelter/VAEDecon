@@ -916,13 +916,23 @@ class VAEDeconTrainer:
         for pattern in removable_patterns:
             for path in self.model_dir.glob(pattern):
                 path.unlink()
-        for path in [self.model_dir / "checkpoint_paths.json", self.model_dir / "training_logs"]:
+        for path in [
+            self.model_dir / "checkpoint_paths.json",
+            self.model_dir / "training_logs",
+            self.model_dir / "test_results",
+        ]:
             if path.is_dir():
                 shutil.rmtree(path, ignore_errors=True)
             elif path.exists():
                 path.unlink()
 
-        skip_names = {"model_config.json", "training_config.json", "data_config.json", "environment.json"}
+        skip_names = {
+            "model_config.json",
+            "training_config.json",
+            "data_config.json",
+            "environment.json",
+            "test_results",
+        }
         for item in final_stage_dir.iterdir():
             if item.name in skip_names:
                 continue
