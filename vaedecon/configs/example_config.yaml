@@ -164,8 +164,8 @@ model:
   encoder_aliases: ['resmlp_main']  # Optional aliases aligned with `encoders`; routing can target a specific alias or use `fused`.
   encoder_output_routing:
     cell_prop_source: 'fused'  # 'fused' keeps the default VAE behavior; set to an encoder alias to route from one branch directly.
-    latent_posterior_source: 'fused'
-    decoder_context_source: 'fused'
+    latent_posterior_source: 'fused'  # Chooses which encoder provides the latent posterior (mu/logvar); use 'fused' to combine all encoders, or an alias such as 'resmlp_main' to use one branch directly.
+    decoder_context_source: 'fused'  # Chooses which bulk-level context vector conditions the decoder; use 'fused' to combine encoder context features, or an encoder/predictor alias to supply one branch directly.
   cell_prop_predictor_cls: null  # Set to 'DeSideCellPropPredictor' to add a DeSide-style cell-proportion/context branch without latent posterior outputs.
   cell_prop_predictor_alias: 'cell_prop_predictor'
   # Example: keep the latent posterior in the main encoder, but let the DeSide branch drive cell proportions and decoder context.
