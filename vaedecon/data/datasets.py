@@ -1276,7 +1276,7 @@ def find_sct_gep_of_bulk_sample(
             # Note: n_to_select is #bulk samples selected, not #single cells.
             out_file = result_dir_path / f"sct_gep_{cell_type_target}_from_{n_to_select}_bulksamples.csv"
             try:
-                specific_df.T.to_csv(out_file)  # genes x cells format
+                specific_df.T.to_csv(out_file, float_format='%g')  # genes x cells format
                 logger.info(f"Saved {cell_type_target}: {specific_df.shape[0]} cells -> {out_file}")
             except Exception as e:
                 logger.error(f"Error saving {cell_type_target} output: {e}")

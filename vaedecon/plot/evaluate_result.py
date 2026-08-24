@@ -1807,7 +1807,7 @@ def plot_single_cell_gep(
                 recon_sc_gep_ct, index=query_ids, columns=gene_list
             )
             recon_sc_gep_ct_pd = non_log2log_cpm(recon_sc_gep_ct_pd, transpose=False)
-            recon_sc_gep_ct_pd.T.to_csv(result_file_path)
+            recon_sc_gep_ct_pd.T.to_csv(result_file_path, float_format='%g')
         y_pred_df = pd.read_csv(result_file_path, index_col=0)
         y_pred_df = y_pred_df.loc[:, query_ids]
         legend_label_map = _build_selected_sample_legend_label_map(

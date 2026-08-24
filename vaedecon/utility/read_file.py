@@ -464,7 +464,7 @@ def get_gene_mean_std_across_cell_types(sct_dataset_fp: str, result_fp, gene_lis
             ct2ave = np.log2(ct2ave + 1)
         if scaling_by_constant is True:
             ct2ave = ct2ave / scaling_factor
-        ct2ave.to_csv(result_fp, float_format='%.6f')
+        ct2ave.to_csv(result_fp, float_format='%g')
 
 
 def compute_gene_mean_std_from_pooled_sc_h5ad(
@@ -562,7 +562,7 @@ def compute_gene_mean_std_from_pooled_sc_h5ad(
 
     result_fp = Path(result_fp)
     result_fp.parent.mkdir(parents=True, exist_ok=True)
-    ct2ave.to_csv(result_fp, float_format='%.6f')
+    ct2ave.to_csv(result_fp, float_format='%g')
 
 
 def compute_training_sct_cross_sample_gene_var(
@@ -683,7 +683,7 @@ def compute_training_sct_cross_sample_gene_var(
 
     result_fp = Path(result_fp)
     result_fp.parent.mkdir(parents=True, exist_ok=True)
-    var_df.to_csv(result_fp, float_format='%.6f')
+    var_df.to_csv(result_fp, float_format='%g')
     logger.info(f"Saved training SCT cross-sample gene variance to {result_fp}")
 
 
@@ -790,7 +790,7 @@ def load_or_compute_gene_mean_std(
         else:
             ct2ave = np.log2(ct2ave + 1)
         out_fp.parent.mkdir(parents=True, exist_ok=True)
-        ct2ave.to_csv(out_fp, float_format='%.6f')
+        ct2ave.to_csv(out_fp, float_format='%g')
 
     # load and return
     df = pd.read_csv(out_fp, index_col=0)

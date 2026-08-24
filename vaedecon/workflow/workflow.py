@@ -453,7 +453,10 @@ def evaluate_model(
             mu = mu.reshape(-1, 1)
         mu_columns = [f"mu_{i}" for i in range(mu.shape[1])]
         mu_df = pd.DataFrame(mu, index=test_set.get_sample_ids(), columns=mu_columns)
-        mu_df.to_csv(os.path.join(sc_gep_result_dir, "mu_embeddings.csv"))
+        mu_df.to_csv(
+            os.path.join(sc_gep_result_dir, "mu_embeddings.csv"),
+            float_format='%g',
+        )
     if pred_cell_prop_all is not None:
         pred_cell_prop_df = pd.DataFrame(
             pred_cell_prop_all,
@@ -463,7 +466,7 @@ def evaluate_model(
         pred_cell_prop_file_path = os.path.join(
             test_set_result_dir, "predicted_cell_prop.csv"
         )
-        pred_cell_prop_df.to_csv(pred_cell_prop_file_path)
+        pred_cell_prop_df.to_csv(pred_cell_prop_file_path, float_format='%g')
     if save_reconstructed_geps:
         recon_geps = pred_all_dict["recon_x_all_types"].detach().cpu().numpy()  # in TPM format
         for i, ct in enumerate(cell_types):
