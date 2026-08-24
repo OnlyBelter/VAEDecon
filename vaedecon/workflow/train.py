@@ -6,6 +6,7 @@ import json
 import os
 import logging
 import shutil
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
@@ -1290,6 +1291,33 @@ def _save_config(
         logger.warning(f"Could not save config: {exc}")
 
 
+def _save_training_error_report(
+    *,
+    model_dir: Path,
+    error: Exception,
+) -> None:
+    """Persist the latest training exception to the run directory."""
+    error_text = (
+        f"Training failed at {datetime.now().isoformat(timespec='seconds')}\n"
+        f"Exception type: {type(error).__name__}\n"
+        f"Message: {error}\n\n"
+        "Traceback:\n"
+        f"{traceback.format_exc()}"
+    )
+
+    candidate_paths = [
+        model_dir / "training_error.txt",
+        model_dir.parent / "training_error.txt",
+    ]
+    for path in candidate_paths:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(error_text, encoding="utf-8")
+            logger.error("Saved training error report to %s", path)
+        except Exception as save_exc:
+            logger.warning("Could not save training error report to %s: %s", path, save_exc)
+
+
 def train_vaedecon(
         config: Optional[VAEDeconConfig] = None,
         config_file: Optional[str] = None
@@ -1392,7 +1420,14 @@ def train_vaedecon(
 
     # Train model
     trainer = VAEDeconTrainer(config)
-    trained_config = trainer.train()
+    try:
+        trained_config = trainer.train()
+    except Exception as exc:
+        _save_training_error_report(
+            model_dir=model_dir,
+            error=exc,
+        )
+        raise
 
     # ── Cleanup processed data ────────────────────────────────────────────
     # Reuse the path already computed inside the trainer

@@ -89,6 +89,84 @@ def _resolve_linear_schedule_value(schedule: Any, epoch: int) -> float:
     return start_value + progress * (end_value - start_value)
 
 
+def _format_sample_id_preview(sample_ids: Any, limit: int = 5) -> str:
+    """Return a short sample-id preview for debug messages."""
+    if sample_ids is None:
+        return ""
+    if isinstance(sample_ids, (list, tuple)):
+        preview = [str(sample_id) for sample_id in sample_ids[:limit]]
+        suffix = "..." if len(sample_ids) > limit else ""
+        return f"[{', '.join(preview)}]{suffix}"
+    return str(sample_ids)
+
+
+def _summarize_batch_for_non_finite_error(batch: Optional[Dict[str, Any]]) -> str:
+    """Build a compact batch summary for non-finite loss errors."""
+    if not isinstance(batch, dict):
+        return "batch=<unavailable>"
+
+    parts: list[str] = []
+    sample_preview = _format_sample_id_preview(batch.get("sample_id", batch.get("sample_ids")))
+    if sample_preview:
+        parts.append(f"sample_ids={sample_preview}")
+
+    for tensor_key in ("x", "y", "true_sct_gep", "true_sct_gep_present_mask"):
+        tensor_value = batch.get(tensor_key)
+        if torch.is_tensor(tensor_value):
+            parts.append(f"{tensor_key}.shape={tuple(tensor_value.shape)}")
+
+    return ", ".join(parts) if parts else "batch=<no compact summary available>"
+
+
+def _collect_non_finite_output_terms(output: Any) -> list[str]:
+    """Return descriptions for output entries containing NaN/Inf."""
+    if output is None or not hasattr(output, "items"):
+        return []
+
+    issues: list[str] = []
+    for name, value in output.items():
+        if value is None:
+            continue
+
+        if torch.is_tensor(value):
+            finite_mask = torch.isfinite(value)
+            if bool(finite_mask.all()):
+                continue
+            nan_count = int(torch.isnan(value).sum().item())
+            inf_count = int(torch.isinf(value).sum().item())
+            issues.append(
+                f"{name}(shape={tuple(value.shape)}, nan={nan_count}, inf={inf_count})"
+            )
+            continue
+
+        if isinstance(value, (float, int, np.floating, np.integer)) and not np.isfinite(float(value)):
+            issues.append(f"{name}(value={value})")
+
+    return issues
+
+
+def _raise_if_non_finite_output(
+    *,
+    output: Any,
+    batch: Optional[Dict[str, Any]],
+    step: str,
+    epoch: int,
+    global_step: int,
+    batch_idx: int,
+) -> None:
+    """Fail fast with actionable context when model outputs become non-finite."""
+    issues = _collect_non_finite_output_terms(output)
+    if not issues:
+        return
+
+    batch_summary = _summarize_batch_for_non_finite_error(batch)
+    raise RuntimeError(
+        f"Non-finite model output detected during {step} step at epoch={epoch}, "
+        f"global_step={global_step}, batch_idx={batch_idx}. "
+        f"Offending terms: {', '.join(issues)}. {batch_summary}"
+    )
+
+
 def _apply_aux_loss_schedules(model: BaseAE, training_config: TrainingConfig, epoch: int) -> None:
     """Apply configured epoch-based auxiliary schedules to the live model config."""
     schedules = getattr(training_config, "aux_loss_schedules", None) or {}
@@ -548,6 +626,14 @@ class PLTrainer(L.LightningModule):
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Performs a single training step."""
         output = self(batch)
+        _raise_if_non_finite_output(
+            output=output,
+            batch=batch,
+            step="train",
+            epoch=int(self.current_epoch),
+            global_step=int(self.global_step),
+            batch_idx=int(batch_idx),
+        )
         self.log_learning_rate()
 
         # lo = self.model.model_config.loss_coefficient
@@ -685,6 +771,14 @@ class PLTrainer(L.LightningModule):
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Performs a single validation step."""
         output = self(batch)
+        _raise_if_non_finite_output(
+            output=output,
+            batch=batch,
+            step="validation",
+            epoch=int(self.current_epoch),
+            global_step=int(self.global_step),
+            batch_idx=int(batch_idx),
+        )
 
         self.loss_monitor(
             step="val",

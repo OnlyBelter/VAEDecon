@@ -7,6 +7,7 @@ import torch
 
 from vaedecon.configs import VAEDeconConfig, LossCoefficient
 from vaedecon.workflow.inference import VAEDeconPredictor
+import vaedecon.workflow.train as train_workflow
 from vaedecon.workflow.train import VAEDeconTrainer, train_vaedecon
 
 
@@ -602,7 +603,43 @@ def test_train_vaedecon_reuses_saved_config_with_test_sets_when_checkpoint_exist
     assert returned_cfg.data.test_set_file_path == Path(tmp_path / "debug_subset.h5ad")
 
 
-def test_compute_training_sct_cross_sample_gene_var_roundtrip(tmp_path: Path, monkeypatch):
+def test_train_vaedecon_saves_training_error_report_when_trainer_raises(tmp_path: Path, monkeypatch):
+    model_dir = tmp_path / "failing_run" / "final_model"
+    cfg = VAEDeconConfig.from_dict(
+        {
+            "training": {
+                "output_dir": str(tmp_path / "failing_run"),
+                "naming_postfix": "failing_run",
+            },
+            "model": {
+                "model_dir": model_dir,
+            },
+        }
+    )
+
+    class _ExplodingTrainer:
+        def __init__(self, config):
+            self.config = config
+
+        def train(self):
+            raise RuntimeError("synthetic failure for persistence test")
+
+    monkeypatch.setattr(train_workflow, "VAEDeconTrainer", _ExplodingTrainer)
+
+    with pytest.raises(RuntimeError, match="synthetic failure for persistence test"):
+        train_vaedecon(config=cfg)
+
+    model_error = model_dir / "training_error.txt"
+    root_error = model_dir.parent / "training_error.txt"
+    assert model_error.exists()
+    assert root_error.exists()
+    model_text = model_error.read_text(encoding="utf-8")
+    assert "RuntimeError" in model_text
+    assert "synthetic failure for persistence test" in model_text
+    assert "Traceback:" in model_text
+
+
+def test_compute_training_sct_cross_sample_gene_var_roundtrip(tmp_path: Path):
     """Smoke test for the variance CSV export: verify shape, columns, gene index order."""
     pytest.importorskip("anndata")
     import anndata as an

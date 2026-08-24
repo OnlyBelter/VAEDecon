@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.distributions import Dirichlet, kl_divergence
 
 from vaedecon.models.base import (
+    ModelOutput,
     build_cell_prop_from_head_output,
     dirichlet_mean,
     has_usable_labels,
@@ -16,6 +17,7 @@ from vaedecon.models.vae.vae_model import VAE
 from vaedecon.trainers.base_trainer import (
     _initialize_adaptive_aux_loss_schedule,
     _apply_aux_loss_schedules,
+    _raise_if_non_finite_output,
     _resolve_linear_schedule_value,
     _step_adaptive_aux_loss_schedule,
 )
@@ -977,13 +979,13 @@ def test_loss_function_uses_direct_residual_supervision_in_mean_centered_mode():
     dummy.model_config.learn_gep_residual = True
     dummy.model_config.learn_gep_residual_mode = "mean_centered"
     dummy.model_config.loss_coefficient.cell_type_sct_gep_weight = 1.0
-    dummy._matched_sct_gep_residual_supervision_loss = lambda **kwargs: torch.full(
+    dummy._matched_sct_gep_residual_supervision_loss = lambda **_kwargs: torch.full(
         (2,),
         3.0,
         dtype=torch.float32,
     )
 
-    def _wrong_helper(**kwargs):
+    def _wrong_helper(**_kwargs):
         raise AssertionError("Expected mean_centered mode to use direct residual supervision.")
 
     dummy._matched_sct_gep_supervision_loss = _wrong_helper
@@ -1013,6 +1015,54 @@ def test_loss_function_uses_direct_residual_supervision_in_mean_centered_mode():
     )
 
     assert torch.isclose(loss_terms.cell_type_sct_gep, torch.tensor(3.0, dtype=torch.float32))
+
+
+def test_raise_if_non_finite_output_allows_finite_terms():
+    output = ModelOutput(
+        loss=torch.tensor(1.0, dtype=torch.float32),
+        recon_loss_conv=torch.tensor(2.0, dtype=torch.float32),
+    )
+
+    _raise_if_non_finite_output(
+        output=output,
+        batch={
+            "sample_id": ["sample_a", "sample_b"],
+            "x": torch.zeros((2, 3), dtype=torch.float32),
+        },
+        step="train",
+        epoch=4,
+        global_step=12,
+        batch_idx=3,
+    )
+
+
+def test_raise_if_non_finite_output_reports_offending_terms_and_batch_context():
+    output = ModelOutput(
+        loss=torch.tensor(float("nan"), dtype=torch.float32),
+        inter_sample_similarity_loss=torch.tensor(float("inf"), dtype=torch.float32),
+        recon_loss_conv=torch.tensor(2.0, dtype=torch.float32),
+    )
+
+    with pytest.raises(RuntimeError, match="Non-finite model output detected during train step") as exc_info:
+        _raise_if_non_finite_output(
+            output=output,
+            batch={
+                "sample_id": ["sample_a", "sample_b"],
+                "x": torch.zeros((2, 3), dtype=torch.float32),
+                "y": torch.zeros((2, 2), dtype=torch.float32),
+            },
+            step="train",
+            epoch=4,
+            global_step=12,
+            batch_idx=3,
+        )
+
+    message = str(exc_info.value)
+    assert "loss(shape=(), nan=1, inf=0)" in message
+    assert "inter_sample_similarity_loss(shape=(), nan=0, inf=1)" in message
+    assert "sample_ids=[sample_a, sample_b]" in message
+    assert "x.shape=(2, 3)" in message
+    assert "y.shape=(2, 2)" in message
 
 
 def test_loss_function_rejects_z_score_kl_in_mean_centered_mode():
