@@ -66,6 +66,7 @@ class LossTerms:
     hierarchical_code: torch.Tensor = torch.tensor(0.0)
     cross_sample_gene_var_loss: torch.Tensor = torch.tensor(0.0)
     per_sample_residual_var_loss: torch.Tensor = torch.tensor(0.0)
+    inter_sample_similarity_loss: torch.Tensor = torch.tensor(0.0)
 
 
 class VAE(BaseAE):
@@ -942,6 +943,7 @@ class VAE(BaseAE):
             low_mean_std_gene_loss=loss_terms.low_mean_std_gene_loss,
             cross_sample_gene_var_loss=loss_terms.cross_sample_gene_var_loss,
             per_sample_residual_var_loss=loss_terms.per_sample_residual_var_loss,
+            inter_sample_similarity_loss=loss_terms.inter_sample_similarity_loss,
             cell_type_sct_gep_loss=loss_terms.cell_type_sct_gep,
             cell_type_existence_loss=loss_terms.cell_type_existence,
             mu=mu_mean,
@@ -1138,6 +1140,38 @@ class VAE(BaseAE):
         else:
             per_sample_residual_var_loss = torch.zeros((batch_size,), device=device)
 
+        inter_sample_similarity_weight = float(getattr(lo, "inter_sample_similarity_weight", 0.0) or 0.0)
+        if inter_sample_similarity_weight > 0:
+            if residual_mode != "mean_centered" or recon_residual_log is None:
+                raise ValueError(
+                    "inter_sample_similarity_weight > 0 requires recon_residual_log and "
+                    "learn_gep_residual_mode='mean_centered'."
+                )
+            supervision_ready = (
+                true_sct_gep is not None
+                and true_sct_gep_present_mask is not None
+                and labels_available
+            )
+            if supervision_ready:
+                inter_sample_similarity_loss = self._inter_sample_similarity_loss(
+                    pred_residual_log=recon_residual_log,
+                    true_sct_gep=true_sct_gep,
+                    true_sct_gep_present_mask=true_sct_gep_present_mask,
+                    true_cell_prop=y,
+                    cell_prop_threshold=float(
+                        getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
+                    ),
+                )
+            elif self.training:
+                raise ValueError(
+                    "Inter-sample similarity supervision requires true_sct_gep, "
+                    "true_sct_gep_present_mask, and true cell-proportion labels during training."
+                )
+            else:
+                inter_sample_similarity_loss = torch.zeros((batch_size,), device=device)
+        else:
+            inter_sample_similarity_loss = torch.zeros((batch_size,), device=device)
+
         cell_type_sct_gep_weight = float(getattr(lo, "cell_type_sct_gep_weight", 0.0) or 0.0)
         if cell_type_sct_gep_weight > 0:
             if residual_mode == "mean_centered":
@@ -1270,6 +1304,7 @@ class VAE(BaseAE):
             + lo.z_score_kl_weight * z_score_kl_loss
             + cross_sample_gene_var_weight * cross_var_loss_per_sample
             + per_sample_residual_var_weight * per_sample_residual_var_loss
+            + inter_sample_similarity_weight * inter_sample_similarity_loss
             + cell_type_sct_gep_weight * cell_type_sct_gep_loss
             + cell_type_existence_weight * cell_type_existence_loss
             # + z_score_reg_weight * (1 / mean_z_scores)
@@ -1293,6 +1328,7 @@ class VAE(BaseAE):
             low_mean_std_gene_loss=low_mean_std_gene_loss_per_sample.mean(),
             cross_sample_gene_var_loss=cross_var_loss_per_sample.mean(),
             per_sample_residual_var_loss=per_sample_residual_var_loss.mean(),
+            inter_sample_similarity_loss=inter_sample_similarity_loss.mean(),
         )
 
     # -------------------------------------------------------------------------
@@ -1415,6 +1451,76 @@ class VAE(BaseAE):
         masked = log_diff * valid_mask.to(dtype=pred_var.dtype)
         denom = valid_mask.to(dtype=pred_var.dtype).sum(dim=1).clamp_min(1.0)
         return masked.sum(dim=1) / denom
+
+    def _pairwise_ccc_matrix(
+        self,
+        residuals: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute a differentiable sample-sample CCC matrix for residual vectors.
+
+        Args:
+            residuals: Tensor of shape (B_active, G)
+
+        Returns:
+            Tensor of shape (B_active, B_active)
+        """
+        means = residuals.mean(dim=1, keepdim=True)  # (B, 1)
+        centered = residuals - means
+        n_genes = residuals.shape[1]
+        if n_genes <= 1:
+            return torch.eye(residuals.shape[0], device=residuals.device, dtype=residuals.dtype)
+
+        cov = centered @ centered.transpose(0, 1) / float(n_genes - 1)  # (B, B)
+        var = centered.pow(2).sum(dim=1, keepdim=True) / float(n_genes - 1)  # (B, 1)
+        mean_diff2 = (means - means.transpose(0, 1)).pow(2)  # (B, B)
+        denom = var + var.transpose(0, 1) + mean_diff2
+        ccc = 2.0 * cov / denom.clamp_min(EPS)
+        eye = torch.eye(ccc.shape[0], device=ccc.device, dtype=ccc.dtype)
+        return ccc * (1.0 - eye) + eye
+
+    def _inter_sample_similarity_loss(
+        self,
+        pred_residual_log: torch.Tensor,
+        true_sct_gep: torch.Tensor,
+        true_sct_gep_present_mask: torch.Tensor,
+        true_cell_prop: torch.Tensor,
+        cell_prop_threshold: float,
+    ) -> torch.Tensor:
+        """Match batch-local cell-type-wise inter-sample CCC matrices in residual space."""
+        true_residual_log = true_sct_gep - self.g_mean.unsqueeze(0)
+        active_mask = true_sct_gep_present_mask & (true_cell_prop >= cell_prop_threshold)  # (B, C)
+
+        per_sample_loss = torch.zeros(
+            (pred_residual_log.shape[0],),
+            device=pred_residual_log.device,
+            dtype=pred_residual_log.dtype,
+        )
+        active_cell_type_count = 0
+
+        for cell_type_idx in range(pred_residual_log.shape[2]):
+            sample_mask = active_mask[:, cell_type_idx]
+            n_active = int(sample_mask.sum().item())
+            if n_active < 2:
+                continue
+
+            pred_resid_ct = pred_residual_log[sample_mask, :, cell_type_idx]  # (B_active, G)
+            true_resid_ct = true_residual_log[sample_mask, :, cell_type_idx]  # (B_active, G)
+
+            pred_ccc = self._pairwise_ccc_matrix(pred_resid_ct)
+            true_ccc = self._pairwise_ccc_matrix(true_resid_ct)
+
+            off_diag_mask = ~torch.eye(n_active, device=pred_ccc.device, dtype=torch.bool)
+            if not off_diag_mask.any():
+                continue
+
+            cell_type_loss = (pred_ccc - true_ccc).abs()[off_diag_mask].mean()
+            per_sample_loss = per_sample_loss + cell_type_loss
+            active_cell_type_count += 1
+
+        if active_cell_type_count == 0:
+            return per_sample_loss
+
+        return per_sample_loss / float(active_cell_type_count)
 
     def _matched_sct_gep_supervision_loss(
         self,

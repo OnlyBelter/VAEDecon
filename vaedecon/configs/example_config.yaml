@@ -127,6 +127,7 @@ training:
     - recon_loss_conv
     - low_mean_std_gene_loss
     - z_score_kl_loss
+    - inter_sample_similarity_loss
     - hierarchical_code_loss
 
   # Option A: Warmup + Cosine
@@ -213,6 +214,7 @@ model:
     gene_mean_weight: 0
     gene_std_weight: 0
     cross_sample_gene_var_weight: 1.0  # Matches per-(gene, cell_type) cross-sample variance of recon GEPs to training-SCT targets.
+    inter_sample_similarity_weight: 0.0  # Set > 0 to preserve batch-local within-cell-type inter-sample residual similarity structure; currently requires learn_gep_residual_mode='mean_centered'.
     cell_type_sct_gep_weight: 0.0  # Set > 0 to enable masked matched-sctGEP supervision during training.
     cell_type_existence_weight: 0.0  # Set > 0 to supervise thresholded cell-type existence derived from predicted cell proportions.
     z_score_kl_weight: 0.1  # Must be 0 when learn_gep_residual_mode='mean_centered'.

@@ -148,6 +148,17 @@ def test_loss_coefficient_defaults_and_validation_per_sample_residual_var_weight
         LossCoefficient(per_sample_residual_var_weight=-1.0)
 
 
+def test_loss_coefficient_defaults_and_validation_inter_sample_similarity_weight():
+    lo = LossCoefficient()
+    assert lo.inter_sample_similarity_weight == 0.0
+
+    lo = LossCoefficient(inter_sample_similarity_weight=2.5)
+    assert lo.inter_sample_similarity_weight == 2.5
+
+    with pytest.raises(Exception):
+        LossCoefficient(inter_sample_similarity_weight=-1.0)
+
+
 def test_trainer_cross_sample_gene_var_output_path_naming(tmp_path: Path):
     config = VAEDeconConfig.from_dict(
         {

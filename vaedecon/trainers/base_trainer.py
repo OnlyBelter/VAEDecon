@@ -528,6 +528,7 @@ class PLTrainer(L.LightningModule):
                 "z_score_kl_loss",
                 "cross_sample_gene_var_loss",
                 "per_sample_residual_var_loss",
+                "inter_sample_similarity_loss",
                 "repulsion_loss",
                 "attractor_loss",
             }

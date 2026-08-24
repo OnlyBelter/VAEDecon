@@ -22,6 +22,7 @@ class LossCoefficient(BaseModel):
     gene_mean_std_weight: Optional[float] = None
     cross_sample_gene_var_weight: float = 0.0
     per_sample_residual_var_weight: float = 0.0
+    inter_sample_similarity_weight: float = 0.0
     cell_type_sct_gep_weight: float = 0.0
     cell_type_existence_weight: float = 0.0
     z_score_reg_weight: float = 0.0
@@ -42,6 +43,7 @@ class LossCoefficient(BaseModel):
         "gene_mean_std_weight",
         "cross_sample_gene_var_weight",
         "per_sample_residual_var_weight",
+        "inter_sample_similarity_weight",
         "cell_type_sct_gep_weight",
         "cell_type_existence_weight",
         "z_score_reg_weight",
@@ -873,6 +875,7 @@ class TrainingConfig(BaseTrainerConfig):
             "low_mean_std_gene_loss",
             "z_score_kl_loss",
             "per_sample_residual_var_loss",
+            "inter_sample_similarity_loss",
             "repulsion_loss",
             "attractor_loss",
         ],
@@ -1706,6 +1709,21 @@ class ModelConfig(BaseModelConfig):
 
         return self
 
+    @model_validator(mode='after')
+    def validate_inter_sample_similarity_consistency(self):
+        """Ensure inter-sample similarity supervision has compatible settings."""
+        weight = float(getattr(self.loss_coefficient, "inter_sample_similarity_weight", 0.0) or 0.0)
+        if weight <= 0:
+            return self
+
+        if not self.learn_gep_residual or self.learn_gep_residual_mode != "mean_centered":
+            raise ValueError(
+                "loss_coefficient['inter_sample_similarity_weight'] > 0 requires "
+                "learn_gep_residual=True and learn_gep_residual_mode='mean_centered'."
+            )
+
+        return self
+
     # ==================== Helper Methods ====================
 
     def get_encoder_architecture(self) -> List[Tuple[int, float]]:
@@ -1746,6 +1764,7 @@ class ModelConfig(BaseModelConfig):
                 "gene_std_weight": self.loss_coefficient.gene_std_weight,
                 "cross_sample_gene_var_weight": self.loss_coefficient.cross_sample_gene_var_weight,
                 "per_sample_residual_var_weight": self.loss_coefficient.per_sample_residual_var_weight,
+                "inter_sample_similarity_weight": self.loss_coefficient.inter_sample_similarity_weight,
                 "cell_type_sct_gep_weight": self.loss_coefficient.cell_type_sct_gep_weight,
                 "cell_type_existence_weight": self.loss_coefficient.cell_type_existence_weight,
                 "z_score_kl_weight": self.loss_coefficient.z_score_kl_weight,

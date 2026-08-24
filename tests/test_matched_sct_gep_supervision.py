@@ -403,3 +403,94 @@ def test_per_sample_residual_variance_loss_matches_log_variance_targets():
         torch.tensor([0.0, np.log(9.0 / 4.0)], dtype=torch.float32),
         atol=1e-6,
     )
+
+
+def test_inter_sample_similarity_loss_zero_when_prediction_matches_truth():
+    vae = VAE.__new__(VAE)
+    vae.g_mean = torch.zeros((2, 2), dtype=torch.float32)
+
+    pred_residual_log = torch.tensor(
+        [
+            [[0.0, 0.0], [1.0, 2.0]],
+            [[1.0, 1.0], [2.0, 3.0]],
+            [[2.0, 5.0], [4.0, 7.0]],
+        ],
+        dtype=torch.float32,
+    )
+    true_sct_gep = pred_residual_log.clone()
+    true_sct_gep_present_mask = torch.tensor(
+        [
+            [True, True],
+            [True, False],
+            [True, True],
+        ],
+        dtype=torch.bool,
+    )
+    true_cell_prop = torch.tensor(
+        [
+            [0.2, 0.2],
+            [0.2, 0.001],
+            [0.2, 0.2],
+        ],
+        dtype=torch.float32,
+    )
+
+    loss = vae._inter_sample_similarity_loss(
+        pred_residual_log=pred_residual_log,
+        true_sct_gep=true_sct_gep,
+        true_sct_gep_present_mask=true_sct_gep_present_mask,
+        true_cell_prop=true_cell_prop,
+        cell_prop_threshold=0.01,
+    )
+
+    assert torch.allclose(loss, torch.zeros(3, dtype=torch.float32), atol=1e-6)
+
+
+def test_inter_sample_similarity_loss_masks_low_prop_and_skips_singleton_cell_types():
+    vae = VAE.__new__(VAE)
+    vae.g_mean = torch.zeros((2, 2), dtype=torch.float32)
+
+    true_sct_gep = torch.tensor(
+        [
+            [[1.0, 0.0], [2.0, 1.0]],
+            [[2.0, 2.0], [0.0, 1.0]],
+            [[0.0, 3.0], [1.0, 4.0]],
+        ],
+        dtype=torch.float32,
+    )
+    pred_residual_log = true_sct_gep.clone()
+    pred_residual_log[:, :, 0] = torch.tensor(
+        [
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 2.0],
+        ],
+        dtype=torch.float32,
+    )
+    true_sct_gep_present_mask = torch.tensor(
+        [
+            [True, True],
+            [True, False],
+            [True, True],
+        ],
+        dtype=torch.bool,
+    )
+    true_cell_prop = torch.tensor(
+        [
+            [0.2, 0.2],
+            [0.2, 0.001],
+            [0.2, 0.2],
+        ],
+        dtype=torch.float32,
+    )
+
+    loss = vae._inter_sample_similarity_loss(
+        pred_residual_log=pred_residual_log,
+        true_sct_gep=true_sct_gep,
+        true_sct_gep_present_mask=true_sct_gep_present_mask,
+        true_cell_prop=true_cell_prop,
+        cell_prop_threshold=0.01,
+    )
+
+    assert torch.all(loss > 0)
+    assert loss.shape == (3,)

@@ -129,6 +129,40 @@ def test_per_sample_residual_var_weight_allows_mean_centered_training_config():
     assert loaded.model.loss_coefficient.per_sample_residual_var_weight == 1.0
 
 
+def test_inter_sample_similarity_weight_requires_mean_centered_residual_mode():
+    with pytest.raises(
+        ValueError,
+        match="inter_sample_similarity_weight",
+    ):
+        VAEDeconConfig.from_dict(
+            {
+                "model": {
+                    "learn_gep_residual": True,
+                    "learn_gep_residual_mode": "zscore",
+                    "loss_coefficient": {
+                        "inter_sample_similarity_weight": 1.0,
+                    },
+                }
+            }
+        )
+
+
+def test_inter_sample_similarity_weight_allows_mean_centered_training_config():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "learn_gep_residual": True,
+                "learn_gep_residual_mode": "mean_centered",
+                "loss_coefficient": {
+                    "inter_sample_similarity_weight": 1.0,
+                },
+            }
+        }
+    )
+
+    assert loaded.model.loss_coefficient.inter_sample_similarity_weight == 1.0
+
+
 def test_encoder_output_routing_defaults_generate_encoder_aliases():
     loaded = VAEDeconConfig.from_dict(
         {
