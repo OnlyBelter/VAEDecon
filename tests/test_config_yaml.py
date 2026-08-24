@@ -95,6 +95,40 @@ def test_mean_centered_mode_rejects_z_score_regularizers(weight_name: str):
         )
 
 
+def test_per_sample_residual_var_weight_requires_mean_centered_residual_mode():
+    with pytest.raises(
+        ValueError,
+        match="per_sample_residual_var_weight",
+    ):
+        VAEDeconConfig.from_dict(
+            {
+                "model": {
+                    "learn_gep_residual": True,
+                    "learn_gep_residual_mode": "zscore",
+                    "loss_coefficient": {
+                        "per_sample_residual_var_weight": 1.0,
+                    },
+                }
+            }
+        )
+
+
+def test_per_sample_residual_var_weight_allows_mean_centered_training_config():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "learn_gep_residual": True,
+                "learn_gep_residual_mode": "mean_centered",
+                "loss_coefficient": {
+                    "per_sample_residual_var_weight": 1.0,
+                },
+            }
+        }
+    )
+
+    assert loaded.model.loss_coefficient.per_sample_residual_var_weight == 1.0
+
+
 def test_encoder_output_routing_defaults_generate_encoder_aliases():
     loaded = VAEDeconConfig.from_dict(
         {

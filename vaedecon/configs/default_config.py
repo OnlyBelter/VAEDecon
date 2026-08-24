@@ -21,6 +21,7 @@ class LossCoefficient(BaseModel):
     gene_std_weight: float = 0.0
     gene_mean_std_weight: Optional[float] = None
     cross_sample_gene_var_weight: float = 0.0
+    per_sample_residual_var_weight: float = 0.0
     cell_type_sct_gep_weight: float = 0.0
     cell_type_existence_weight: float = 0.0
     z_score_reg_weight: float = 0.0
@@ -40,6 +41,7 @@ class LossCoefficient(BaseModel):
         "gene_std_weight",
         "gene_mean_std_weight",
         "cross_sample_gene_var_weight",
+        "per_sample_residual_var_weight",
         "cell_type_sct_gep_weight",
         "cell_type_existence_weight",
         "z_score_reg_weight",
@@ -870,6 +872,7 @@ class TrainingConfig(BaseTrainerConfig):
             "recon_loss_conv",
             "low_mean_std_gene_loss",
             "z_score_kl_loss",
+            "per_sample_residual_var_loss",
             "repulsion_loss",
             "attractor_loss",
         ],
@@ -1178,6 +1181,14 @@ class ModelConfig(BaseModelConfig):
             "under model_dir/training_sct_cross_sample_gene_variances.csv."
         ),
     )
+    training_sct_per_sample_residual_var_fp: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Path to training matched-SCT per-sample residual variance CSV used by "
+            "loss_coefficient.per_sample_residual_var_weight. Usually saved "
+            "under model_dir/training_sct_per_sample_residual_variance_*.csv."
+        ),
+    )
     model_dir: Path | str = Field(
         default=None,
         description="Directory to save model checkpoints and outputs"
@@ -1334,7 +1345,7 @@ class ModelConfig(BaseModelConfig):
 
     @field_validator(
         'input_gene_list_fp', 'cell_type_fp', 'gene_mean_std_fp',
-        'training_sct_cross_sample_gene_var_fp',
+        'training_sct_cross_sample_gene_var_fp', 'training_sct_per_sample_residual_var_fp',
         check_fields=False,
         mode='before',
     )
@@ -1680,6 +1691,21 @@ class ModelConfig(BaseModelConfig):
 
         return self
 
+    @model_validator(mode='after')
+    def validate_per_sample_residual_var_consistency(self):
+        """Ensure per-sample residual variance supervision has compatible settings."""
+        weight = float(getattr(self.loss_coefficient, "per_sample_residual_var_weight", 0.0) or 0.0)
+        if weight <= 0:
+            return self
+
+        if not self.learn_gep_residual or self.learn_gep_residual_mode != "mean_centered":
+            raise ValueError(
+                "loss_coefficient['per_sample_residual_var_weight'] > 0 requires "
+                "learn_gep_residual=True and learn_gep_residual_mode='mean_centered'."
+            )
+
+        return self
+
     # ==================== Helper Methods ====================
 
     def get_encoder_architecture(self) -> List[Tuple[int, float]]:
@@ -1719,6 +1745,7 @@ class ModelConfig(BaseModelConfig):
                 "gene_mean_weight": self.loss_coefficient.gene_mean_weight,
                 "gene_std_weight": self.loss_coefficient.gene_std_weight,
                 "cross_sample_gene_var_weight": self.loss_coefficient.cross_sample_gene_var_weight,
+                "per_sample_residual_var_weight": self.loss_coefficient.per_sample_residual_var_weight,
                 "cell_type_sct_gep_weight": self.loss_coefficient.cell_type_sct_gep_weight,
                 "cell_type_existence_weight": self.loss_coefficient.cell_type_existence_weight,
                 "z_score_kl_weight": self.loss_coefficient.z_score_kl_weight,

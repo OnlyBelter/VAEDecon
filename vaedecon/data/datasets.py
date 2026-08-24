@@ -1056,6 +1056,7 @@ class GEPDataset(Dataset):
             labels=y,
             true_sct_gep=true_sct_gep,
             true_sct_gep_present_mask=true_sct_gep_present_mask,
+            sample_id=str(self.sample_ids[index]),
         )
 
     # -------------------------------------------------------------------------
@@ -1082,6 +1083,7 @@ class GEPDataset(Dataset):
             "labels": y,
             "true_sct_gep": true_sct_gep,
             "true_sct_gep_present_mask": true_sct_gep_present_mask,
+            "sample_id": [str(self.sample_ids[idx]) for idx in indices],
         }
 
     def save_gene_list(self, file_path: Union[str, Path]) -> None:

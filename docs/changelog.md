@@ -4,6 +4,28 @@ This changelog records notable user-facing changes in `VAEDecon`. It focuses
 on behavior, configuration, and workflow updates that affect training,
 inference, and evaluation.
 
+## August 24, 2026
+
+This update adds a new anti-collapse auxiliary loss and the supporting
+training artifact for per-sample residual-variance supervision.
+
+### Per-sample residual variance supervision
+
+The model can now supervise sample-specific residual amplitude within each
+cell type when using mean-centered residual learning.
+
+- Added `loss_coefficient.per_sample_residual_var_weight` to
+  `LossCoefficient`.
+- Added `training_sct_per_sample_residual_var_fp` to `ModelConfig`.
+- Exported
+  `training_sct_per_sample_residual_variance_log2p1[_scaled_by_<factor>].csv`
+  during training when the new weight is enabled.
+- Added dataset `sample_id` propagation so batches can align back to the
+  precomputed per-sample targets.
+- Added `per_sample_residual_var_loss` logging and progress-bar support.
+- Added focused tests for config validation, target generation, and exact
+  loss behavior.
+
 ## August 21, 2026
 
 This update fixes the normalization of matched `sctGEP` supervision so the

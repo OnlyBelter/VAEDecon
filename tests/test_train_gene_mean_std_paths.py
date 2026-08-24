@@ -22,6 +22,18 @@ class _DummyDebugDataset:
         return self._sample_ids
 
 
+class _DummyMatchedSCTDataset:
+    def __init__(self, *, sample_ids, gene_list, cell_types, true_sct_gep, true_sct_gep_present_mask):
+        self._sample_ids = [str(sample_id) for sample_id in sample_ids]
+        self.gene_list = list(gene_list)
+        self.cell_types = list(cell_types)
+        self.true_sct_gep = np.asarray(true_sct_gep, dtype=np.float32)
+        self.true_sct_gep_present_mask = np.asarray(true_sct_gep_present_mask, dtype=bool)
+
+    def get_sample_ids(self):
+        return self._sample_ids
+
+
 def test_trainer_prefers_dedicated_sct_reference_for_gene_mean_std(tmp_path: Path):
     config = VAEDeconConfig.from_dict(
         {
@@ -125,6 +137,17 @@ def test_loss_coefficient_defaults_and_validation_cross_sample_gene_var_weight()
         LossCoefficient(cross_sample_gene_var_weight=-1.0)
 
 
+def test_loss_coefficient_defaults_and_validation_per_sample_residual_var_weight():
+    lo = LossCoefficient()
+    assert lo.per_sample_residual_var_weight == 0.0
+
+    lo = LossCoefficient(per_sample_residual_var_weight=2.5)
+    assert lo.per_sample_residual_var_weight == 2.5
+
+    with pytest.raises(Exception):
+        LossCoefficient(per_sample_residual_var_weight=-1.0)
+
+
 def test_trainer_cross_sample_gene_var_output_path_naming(tmp_path: Path):
     config = VAEDeconConfig.from_dict(
         {
@@ -144,6 +167,93 @@ def test_trainer_cross_sample_gene_var_output_path_naming(tmp_path: Path):
     assert trainer._build_training_sct_cross_sample_gene_var_output_path() == (
         tmp_path / "final_model" / "training_sct_cross_sample_gene_variances_log2p1_scaled_by_20.0.csv"
     )
+
+
+def test_trainer_per_sample_residual_var_output_path_naming(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "sct_gep_file_path": "./datasets/test_set_sct_gep.h5ad",
+                "scaling_by_constant": True,
+                "scaling_factor": 20.0,
+            },
+            "model": {
+                "model_dir": tmp_path / "final_model",
+                "learn_gep_residual": True,
+                "learn_gep_residual_mode": "mean_centered",
+                "loss_coefficient": {"per_sample_residual_var_weight": 0.0},
+            },
+        }
+    )
+    trainer = VAEDeconTrainer(config=config)
+    assert trainer._build_training_sct_per_sample_residual_var_output_path() == (
+        tmp_path / "final_model" / "training_sct_per_sample_residual_variance_log2p1_scaled_by_20.0.csv"
+    )
+
+
+def test_trainer_saves_per_sample_residual_variance_targets(tmp_path: Path):
+    model_dir = tmp_path / "final_model"
+    gene_mean_std_fp = model_dir / "gene_mean_std_log2p1_scaled_by_20.0.csv"
+    gene_mean_std_fp.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "CT1_avg": [1.0, 2.0],
+            "CT1_std": [0.1, 0.2],
+            "CT2_avg": [0.0, 0.0],
+            "CT2_std": [0.1, 0.1],
+        },
+        index=["g1", "g2"],
+    ).to_csv(gene_mean_std_fp, float_format="%g")
+
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "sct_gep_file_path": "./datasets/test_set_sct_gep.h5ad",
+                "scaling_by_constant": True,
+                "scaling_factor": 20.0,
+            },
+            "model": {
+                "model_dir": model_dir,
+                "learn_gep_residual": True,
+                "learn_gep_residual_mode": "mean_centered",
+                "loss_coefficient": {"per_sample_residual_var_weight": 1.0},
+            },
+        }
+    )
+    trainer = VAEDeconTrainer(config=config)
+    trainer.config.model.gene_mean_std_fp = gene_mean_std_fp
+
+    dataset = _DummyMatchedSCTDataset(
+        sample_ids=["sample_1", "sample_2"],
+        gene_list=["g1", "g2"],
+        cell_types=["CT1", "CT2"],
+        true_sct_gep=np.array(
+            [
+                [[2.0, 0.0], [4.0, 0.0]],
+                [[1.0, 1.0], [2.0, 3.0]],
+            ],
+            dtype=np.float32,
+        ),
+        true_sct_gep_present_mask=np.array(
+            [
+                [True, False],
+                [True, True],
+            ],
+            dtype=bool,
+        ),
+    )
+
+    out_fp = trainer._prepare_and_save_training_sct_per_sample_residual_var(dataset)
+    out_df = pd.read_csv(out_fp, index_col=0)
+
+    assert list(out_df.index) == ["sample_1", "sample_2"]
+    assert list(out_df.columns) == ["CT1", "CT2"]
+    assert out_df.loc["sample_1", "CT1"] == pytest.approx(0.25)
+    assert pd.isna(out_df.loc["sample_1", "CT2"])
+    assert out_df.loc["sample_2", "CT1"] == pytest.approx(0.0)
+    assert out_df.loc["sample_2", "CT2"] == pytest.approx(1.0)
 
 
 def test_trainer_rejects_unused_training_target_sets_early(tmp_path: Path):

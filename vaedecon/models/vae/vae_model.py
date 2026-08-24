@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import logging
-from typing import Optional, List, Tuple, Literal
+from typing import Optional, List, Tuple, Literal, Dict, Sequence
 
 import torch
 import torch.nn as nn
@@ -65,6 +65,7 @@ class LossTerms:
     low_mean_std_gene_loss: torch.Tensor = torch.tensor(0.0)  # Optional term to prevent collapse of low-mean/std genes
     hierarchical_code: torch.Tensor = torch.tensor(0.0)
     cross_sample_gene_var_loss: torch.Tensor = torch.tensor(0.0)
+    per_sample_residual_var_loss: torch.Tensor = torch.tensor(0.0)
 
 
 class VAE(BaseAE):
@@ -242,6 +243,36 @@ class VAE(BaseAE):
         else:
             g_cross_var = torch.zeros((g_mean_np.shape[0], len(self.cell_types)), dtype=torch.float32)
         self.register_buffer("g_cross_sample_gene_var", g_cross_var)
+
+        per_sample_residual_var_fp = getattr(model_config, "training_sct_per_sample_residual_var_fp", None)
+        per_sample_residual_var_weight = float(
+            getattr(getattr(model_config, "loss_coefficient", None), "per_sample_residual_var_weight", 0.0) or 0.0
+        )
+        self.training_sct_per_sample_residual_var_by_sample: Dict[str, np.ndarray] = {}
+        if per_sample_residual_var_weight > 0.0:
+            if per_sample_residual_var_fp is None or not os.path.exists(per_sample_residual_var_fp):
+                raise FileNotFoundError(
+                    "loss_coefficient.per_sample_residual_var_weight > 0 requires a valid "
+                    f"training_sct_per_sample_residual_var_fp; got {per_sample_residual_var_fp}"
+                )
+            per_sample_df = pd.read_csv(per_sample_residual_var_fp, index_col=0)
+            if per_sample_df.index.has_duplicates:
+                duplicate_ids = per_sample_df.index[per_sample_df.index.duplicated()].unique().tolist()
+                raise RuntimeError(
+                    "training_sct_per_sample_residual_var_fp contains duplicated sample IDs: "
+                    f"{duplicate_ids[:5]}"
+                )
+            try:
+                per_sample_df = per_sample_df.loc[:, self.cell_types]
+            except KeyError as exc:
+                raise RuntimeError(
+                    "training_sct_per_sample_residual_var_fp columns do not match cell types "
+                    f"(expected {self.cell_types}, got {per_sample_df.columns.tolist()})"
+                ) from exc
+            self.training_sct_per_sample_residual_var_by_sample = {
+                str(sample_id): row.to_numpy(dtype=np.float32, copy=False)
+                for sample_id, row in per_sample_df.iterrows()
+            }
 
         hierarchical_targets = []
         missing = []
@@ -664,6 +695,13 @@ class VAE(BaseAE):
             true_sct_gep_present_mask = true_sct_gep_present_mask.to(device=device, dtype=torch.bool)
         else:
             true_sct_gep_present_mask = None
+        sample_ids = inputs.get("sample_id")
+        if sample_ids is None:
+            batch_sample_ids = None
+        elif isinstance(sample_ids, str):
+            batch_sample_ids = [sample_ids]
+        else:
+            batch_sample_ids = [str(sample_id) for sample_id in sample_ids]
 
         # ================== Random Gene Masking ==================
         # Only apply masking during training, not validation/testing.
@@ -886,6 +924,7 @@ class VAE(BaseAE):
             recon_residual_log=recon_residual_log,
             true_sct_gep=true_sct_gep,
             true_sct_gep_present_mask=true_sct_gep_present_mask,
+            sample_ids=batch_sample_ids,
         )
 
         return ModelOutput(
@@ -902,6 +941,7 @@ class VAE(BaseAE):
             z_score_kl_loss=loss_terms.z_score_kl_loss,
             low_mean_std_gene_loss=loss_terms.low_mean_std_gene_loss,
             cross_sample_gene_var_loss=loss_terms.cross_sample_gene_var_loss,
+            per_sample_residual_var_loss=loss_terms.per_sample_residual_var_loss,
             cell_type_sct_gep_loss=loss_terms.cell_type_sct_gep,
             cell_type_existence_loss=loss_terms.cell_type_existence,
             mu=mu_mean,
@@ -940,6 +980,7 @@ class VAE(BaseAE):
         recon_residual_log: Optional[torch.Tensor] = None,
         true_sct_gep: Optional[torch.Tensor] = None,
         true_sct_gep_present_mask: Optional[torch.Tensor] = None,
+        sample_ids: Optional[Sequence[str]] = None,
     ) -> LossTerms:
         """
         Compute all objective terms and aggregate total loss.
@@ -1063,6 +1104,39 @@ class VAE(BaseAE):
             )
         else:
             cross_var_loss_per_sample = torch.zeros((batch_size,), device=device)
+
+        per_sample_residual_var_weight = float(getattr(lo, "per_sample_residual_var_weight", 0.0) or 0.0)
+        if per_sample_residual_var_weight > 0:
+            if residual_mode != "mean_centered" or recon_residual_log is None:
+                raise ValueError(
+                    "per_sample_residual_var_weight > 0 requires recon_residual_log and "
+                    "learn_gep_residual_mode='mean_centered'."
+                )
+            supervision_ready = (
+                true_sct_gep_present_mask is not None
+                and labels_available
+                and sample_ids is not None
+                and len(sample_ids) == batch_size
+            )
+            if supervision_ready:
+                per_sample_residual_var_loss = self._per_sample_residual_variance_loss(
+                    pred_residual_log=recon_residual_log,
+                    sample_ids=sample_ids,
+                    true_sct_gep_present_mask=true_sct_gep_present_mask,
+                    true_cell_prop=y,
+                    cell_prop_threshold=float(
+                        getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
+                    ),
+                )
+            elif self.training:
+                raise ValueError(
+                    "Per-sample residual variance supervision requires sample_ids, "
+                    "true_sct_gep_present_mask, and true cell-proportion labels during training."
+                )
+            else:
+                per_sample_residual_var_loss = torch.zeros((batch_size,), device=device)
+        else:
+            per_sample_residual_var_loss = torch.zeros((batch_size,), device=device)
 
         cell_type_sct_gep_weight = float(getattr(lo, "cell_type_sct_gep_weight", 0.0) or 0.0)
         if cell_type_sct_gep_weight > 0:
@@ -1195,6 +1269,7 @@ class VAE(BaseAE):
             # + lo.gene_std_weight * gs_loss
             + lo.z_score_kl_weight * z_score_kl_loss
             + cross_sample_gene_var_weight * cross_var_loss_per_sample
+            + per_sample_residual_var_weight * per_sample_residual_var_loss
             + cell_type_sct_gep_weight * cell_type_sct_gep_loss
             + cell_type_existence_weight * cell_type_existence_loss
             # + z_score_reg_weight * (1 / mean_z_scores)
@@ -1217,6 +1292,7 @@ class VAE(BaseAE):
             z_score_kl_loss=z_score_kl_loss.mean(),
             low_mean_std_gene_loss=low_mean_std_gene_loss_per_sample.mean(),
             cross_sample_gene_var_loss=cross_var_loss_per_sample.mean(),
+            per_sample_residual_var_loss=per_sample_residual_var_loss.mean(),
         )
 
     # -------------------------------------------------------------------------
@@ -1288,6 +1364,57 @@ class VAE(BaseAE):
 
         B = recon_x_all_types_log.shape[0]
         return scalar.expand(B)
+
+    def _lookup_per_sample_residual_var_targets(
+        self,
+        sample_ids: Sequence[str],
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Return batch-aligned per-sample residual variance targets with shape (B, C)."""
+        target_rows: list[np.ndarray] = []
+        missing_sample_ids: list[str] = []
+        for sample_id in sample_ids:
+            target_row = self.training_sct_per_sample_residual_var_by_sample.get(str(sample_id))
+            if target_row is None:
+                missing_sample_ids.append(str(sample_id))
+                target_rows.append(np.full((len(self.cell_types),), np.nan, dtype=np.float32))
+            else:
+                target_rows.append(target_row)
+        if missing_sample_ids and self.training:
+            raise ValueError(
+                "Missing per-sample residual variance targets for batch sample IDs: "
+                f"{missing_sample_ids[:5]}"
+            )
+        target_np = np.stack(target_rows, axis=0).astype(np.float32, copy=False)
+        return torch.as_tensor(target_np, device=device, dtype=dtype)
+
+    def _per_sample_residual_variance_loss(
+        self,
+        pred_residual_log: torch.Tensor,
+        sample_ids: Sequence[str],
+        true_sct_gep_present_mask: torch.Tensor,
+        true_cell_prop: torch.Tensor,
+        cell_prop_threshold: float,
+    ) -> torch.Tensor:
+        """Masked log-L1 loss on per-sample, per-cell-type residual variance across genes."""
+        pred_var = pred_residual_log.var(dim=1, unbiased=False)
+        target_var = self._lookup_per_sample_residual_var_targets(
+            sample_ids,
+            device=pred_var.device,
+            dtype=pred_var.dtype,
+        )
+        active_mask = true_sct_gep_present_mask & (true_cell_prop >= cell_prop_threshold)
+        valid_mask = active_mask & torch.isfinite(target_var)
+        safe_target_var = torch.where(valid_mask, target_var, torch.ones_like(target_var))
+        log_diff = (
+            torch.log(pred_var.clamp_min(EPS))
+            - torch.log(safe_target_var.clamp_min(EPS))
+        ).abs()
+        masked = log_diff * valid_mask.to(dtype=pred_var.dtype)
+        denom = valid_mask.to(dtype=pred_var.dtype).sum(dim=1).clamp_min(1.0)
+        return masked.sum(dim=1) / denom
 
     def _matched_sct_gep_supervision_loss(
         self,

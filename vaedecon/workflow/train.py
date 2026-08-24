@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 
+import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Subset, random_split
@@ -171,6 +172,9 @@ class VAEDeconTrainer:
         cross_var_fp = self._prepare_and_save_training_sct_cross_sample_gene_var()
         if cross_var_fp is not None:
             self.config.model.training_sct_cross_sample_gene_var_fp = cross_var_fp
+        per_sample_var_fp = self._prepare_and_save_training_sct_per_sample_residual_var(dataset)
+        if per_sample_var_fp is not None:
+            self.config.model.training_sct_per_sample_residual_var_fp = per_sample_var_fp
 
         return dataset, train_set, val_set
 
@@ -469,6 +473,13 @@ class VAEDeconTrainer:
             return model_dir / f"training_sct_cross_sample_gene_variances_log2p1_scaled_by_{scaling_factor}.csv"
         return model_dir / "training_sct_cross_sample_gene_variances_log2p1.csv"
 
+    def _build_training_sct_per_sample_residual_var_output_path(self) -> Path:
+        model_dir = Path(self.config.model.model_dir)
+        scaling_factor = self.config.data.scaling_factor
+        if self.config.data.scaling_by_constant:
+            return model_dir / f"training_sct_per_sample_residual_variance_log2p1_scaled_by_{scaling_factor}.csv"
+        return model_dir / "training_sct_per_sample_residual_variance_log2p1.csv"
+
     def _prepare_and_save_training_sct_cross_sample_gene_var(self) -> Optional[Path]:
         """Compute and save SCT cross-sample gene variance CSV if the new loss is enabled."""
         weight = getattr(getattr(self.config.model, "loss_coefficient", None), "cross_sample_gene_var_weight", 0.0) or 0.0
@@ -498,6 +509,61 @@ class VAEDeconTrainer:
             logger.info(f"Using existing training SCT cross-sample gene variance CSV at {out_fp}")
         return out_fp
 
+    def _prepare_and_save_training_sct_per_sample_residual_var(
+        self,
+        dataset: GEPDataset,
+    ) -> Optional[Path]:
+        """Compute and save matched-SCT per-sample residual variance CSV if the new loss is enabled."""
+        weight = float(
+            getattr(getattr(self.config.model, "loss_coefficient", None), "per_sample_residual_var_weight", 0.0) or 0.0
+        )
+        if weight <= 0:
+            return None
+
+        if not self.config.model.learn_gep_residual or self.config.model.learn_gep_residual_mode != "mean_centered":
+            raise ValueError(
+                "loss_coefficient.per_sample_residual_var_weight > 0 requires "
+                "learn_gep_residual=True and learn_gep_residual_mode='mean_centered'."
+            )
+
+        if dataset.true_sct_gep.size == 0 or dataset.true_sct_gep_present_mask.size == 0:
+            raise ValueError(
+                "loss_coefficient.per_sample_residual_var_weight > 0 requires dataset batches "
+                "to include matched true_sct_gep targets. Configure data.training_target_sets."
+            )
+
+        out_fp = self._build_training_sct_per_sample_residual_var_output_path()
+        if Path(out_fp).exists():
+            logger.info(f"Using existing training SCT per-sample residual variance CSV at {out_fp}")
+            return out_fp
+
+        gene_stats_df = pd.read_csv(self.config.model.gene_mean_std_fp, index_col=0)
+        avg_cols = [f"{ct}_avg" for ct in dataset.cell_types]
+        if any(col not in gene_stats_df.columns for col in avg_cols):
+            missing = [col for col in avg_cols if col not in gene_stats_df.columns]
+            raise ValueError(
+                "Could not compute per-sample residual variance targets because gene_mean_std "
+                f"is missing expected columns: {missing}"
+            )
+
+        g_mean = gene_stats_df.loc[dataset.gene_list, avg_cols].to_numpy(dtype=np.float32, copy=False)
+        true_sct_gep = np.asarray(dataset.true_sct_gep, dtype=np.float32)
+        present_mask = np.asarray(dataset.true_sct_gep_present_mask, dtype=bool)
+
+        residual = true_sct_gep - g_mean[np.newaxis, :, :]
+        per_sample_var = np.var(residual, axis=1, ddof=0).astype(np.float32, copy=False)
+        per_sample_var[~present_mask] = np.nan
+
+        out_df = pd.DataFrame(
+            per_sample_var,
+            index=[str(sample_id) for sample_id in dataset.get_sample_ids()],
+            columns=dataset.cell_types,
+        )
+        out_fp.parent.mkdir(parents=True, exist_ok=True)
+        out_df.to_csv(out_fp, float_format='%g')
+        logger.info("Saved training SCT per-sample residual variance to %s", out_fp)
+        return out_fp
+
     def _create_model(self, model_config: ModelConfig):
         """Instantiate the VAE model using the cached ModelConfig."""
         logger.info("Creating model...")
@@ -521,6 +587,12 @@ class VAEDeconTrainer:
         input_dim = dataset.data.shape[1]  # same as n_genes in each GEP
         n_genes = input_dim
         gene_mean_std_fp = self._build_gene_mean_std_output_path()
+        per_sample_residual_var_fp = self.config.model.training_sct_per_sample_residual_var_fp
+        if (
+            float(getattr(self.config.model.loss_coefficient, "per_sample_residual_var_weight", 0.0) or 0.0) > 0
+            and per_sample_residual_var_fp is None
+        ):
+            per_sample_residual_var_fp = self._build_training_sct_per_sample_residual_var_output_path()
 
         return ModelConfig(
             name='ModelConfig',
@@ -533,6 +605,7 @@ class VAEDeconTrainer:
             cell_type_fp=self.config.model.cell_type_fp,
             gene_mean_std_fp=gene_mean_std_fp,
             training_sct_cross_sample_gene_var_fp=self.config.model.training_sct_cross_sample_gene_var_fp,
+            training_sct_per_sample_residual_var_fp=per_sample_residual_var_fp,
             # scaling_by_constant=self.config.data.scaling_by_constant,
             encoder_hidden_dims=self.config.model.encoder_hidden_dims,
             encoder_hidden_dims_pathway=self.config.model.encoder_hidden_dims_pathway,

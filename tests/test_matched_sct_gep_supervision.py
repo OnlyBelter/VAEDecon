@@ -363,3 +363,43 @@ def test_loss_function_skips_matched_sct_gep_supervision_during_inference():
         loss_terms.cell_type_sct_gep,
         torch.tensor(0.0, dtype=torch.float32),
     )
+
+
+def test_per_sample_residual_variance_loss_matches_log_variance_targets():
+    vae = VAE.__new__(VAE)
+    vae.training = True
+    vae.cell_types = ["CT1", "CT2"]
+    vae.training_sct_per_sample_residual_var_by_sample = {
+        "sample_1": np.array([1.0, 4.0], dtype=np.float32),
+        "sample_2": np.array([9.0, np.nan], dtype=np.float32),
+    }
+
+    pred_residual_log = torch.tensor(
+        [
+            [[0.0, 0.0], [2.0, 4.0]],
+            [[1.0, 2.0], [5.0, 2.0]],
+        ],
+        dtype=torch.float32,
+    )
+    true_sct_gep_present_mask = torch.tensor(
+        [
+            [True, True],
+            [True, False],
+        ],
+        dtype=torch.bool,
+    )
+    true_cell_prop = torch.ones((2, 2), dtype=torch.float32)
+
+    loss = vae._per_sample_residual_variance_loss(
+        pred_residual_log=pred_residual_log,
+        sample_ids=["sample_1", "sample_2"],
+        true_sct_gep_present_mask=true_sct_gep_present_mask,
+        true_cell_prop=true_cell_prop,
+        cell_prop_threshold=0.1,
+    )
+
+    assert torch.allclose(
+        loss,
+        torch.tensor([0.0, np.log(9.0 / 4.0)], dtype=torch.float32),
+        atol=1e-6,
+    )
