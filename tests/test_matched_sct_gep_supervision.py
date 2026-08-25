@@ -446,6 +446,30 @@ def test_inter_sample_similarity_loss_zero_when_prediction_matches_truth():
     assert torch.allclose(loss, torch.zeros(3, dtype=torch.float32), atol=1e-6)
 
 
+def test_pairwise_cosine_similarity_matrix_matches_expected_geometry():
+    vae = VAE.__new__(VAE)
+    residuals = torch.tensor(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    matrix = vae._pairwise_cosine_similarity_matrix(residuals)
+
+    expected = torch.tensor(
+        [
+            [1.0, 0.0, 1.0 / np.sqrt(2.0)],
+            [0.0, 1.0, 1.0 / np.sqrt(2.0)],
+            [1.0 / np.sqrt(2.0), 1.0 / np.sqrt(2.0), 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    assert torch.allclose(matrix, expected, atol=1e-6)
+
+
 def test_inter_sample_similarity_loss_masks_low_prop_and_skips_singleton_cell_types():
     vae = VAE.__new__(VAE)
     vae.g_mean = torch.zeros((2, 2), dtype=torch.float32)

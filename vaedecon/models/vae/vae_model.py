@@ -1471,11 +1471,11 @@ class VAE(BaseAE):
         denom = valid_mask.to(dtype=pred_var.dtype).sum(dim=1).clamp_min(1.0)
         return masked.sum(dim=1) / denom
 
-    def _pairwise_ccc_matrix(
+    def _pairwise_cosine_similarity_matrix(
         self,
         residuals: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute a differentiable sample-sample CCC matrix for residual vectors.
+        """Compute a differentiable sample-sample cosine similarity matrix.
 
         Args:
             residuals: Tensor of shape (B_active, G)
@@ -1483,19 +1483,13 @@ class VAE(BaseAE):
         Returns:
             Tensor of shape (B_active, B_active)
         """
-        means = residuals.mean(dim=1, keepdim=True)  # (B, 1)
-        centered = residuals - means
-        n_genes = residuals.shape[1]
-        if n_genes <= 1:
-            return torch.eye(residuals.shape[0], device=residuals.device, dtype=residuals.dtype)
+        if residuals.shape[0] == 0:
+            return torch.zeros((0, 0), device=residuals.device, dtype=residuals.dtype)
 
-        cov = centered @ centered.transpose(0, 1) / float(n_genes - 1)  # (B, B)
-        var = centered.pow(2).sum(dim=1, keepdim=True) / float(n_genes - 1)  # (B, 1)
-        mean_diff2 = (means - means.transpose(0, 1)).pow(2)  # (B, B)
-        denom = var + var.transpose(0, 1) + mean_diff2
-        ccc = 2.0 * cov / denom.clamp_min(EPS)
-        eye = torch.eye(ccc.shape[0], device=ccc.device, dtype=ccc.dtype)
-        return ccc * (1.0 - eye) + eye
+        normalized = F.normalize(residuals, p=2, dim=1, eps=EPS)
+        cosine = normalized @ normalized.transpose(0, 1)
+        eye = torch.eye(cosine.shape[0], device=cosine.device, dtype=cosine.dtype)
+        return cosine * (1.0 - eye) + eye
 
     def _inter_sample_similarity_loss(
         self,
@@ -1505,7 +1499,7 @@ class VAE(BaseAE):
         true_cell_prop: torch.Tensor,
         cell_prop_threshold: float,
     ) -> torch.Tensor:
-        """Match batch-local cell-type-wise inter-sample CCC matrices in residual space."""
+        """Match batch-local cell-type-wise inter-sample cosine geometry in residual space."""
         true_residual_log = true_sct_gep - self.g_mean.unsqueeze(0)
         active_mask = true_sct_gep_present_mask & (true_cell_prop >= cell_prop_threshold)  # (B, C)
 
@@ -1525,14 +1519,14 @@ class VAE(BaseAE):
             pred_resid_ct = pred_residual_log[sample_mask, :, cell_type_idx]  # (B_active, G)
             true_resid_ct = true_residual_log[sample_mask, :, cell_type_idx]  # (B_active, G)
 
-            pred_ccc = self._pairwise_ccc_matrix(pred_resid_ct)
-            true_ccc = self._pairwise_ccc_matrix(true_resid_ct)
+            pred_cosine = self._pairwise_cosine_similarity_matrix(pred_resid_ct)
+            true_cosine = self._pairwise_cosine_similarity_matrix(true_resid_ct)
 
-            off_diag_mask = ~torch.eye(n_active, device=pred_ccc.device, dtype=torch.bool)
+            off_diag_mask = ~torch.eye(n_active, device=pred_cosine.device, dtype=torch.bool)
             if not off_diag_mask.any():
                 continue
 
-            cell_type_loss = (pred_ccc - true_ccc).abs()[off_diag_mask].mean()
+            cell_type_loss = (pred_cosine - true_cosine).abs()[off_diag_mask].mean()
             per_sample_loss = per_sample_loss + cell_type_loss
             active_cell_type_count += 1
 
