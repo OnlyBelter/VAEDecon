@@ -936,6 +936,8 @@ class VAEDeconTrainer:
         *,
         stage_name: str,
         stage_dir: Path,
+        predictor_model_dir: Optional[Path] = None,
+        output_dir: Optional[Path] = None,
     ) -> Optional[Path]:
         has_named_test_sets = bool(getattr(self.config.data, "test_sets", {}))
         legacy_test_set_path = getattr(self.config.data, "test_set_file_path", "")
@@ -950,28 +952,29 @@ class VAEDeconTrainer:
         from .inference import VAEDeconPredictor
 
         inference_config = copy.deepcopy(self.config)
-        inference_config.model.model_dir = stage_dir
+        effective_model_dir = predictor_model_dir or stage_dir
+        inference_config.model.model_dir = effective_model_dir
         if stage_name == "cell_prop_predictor_pretrain":
             inference_config.evaluation.save_reconstructed_gep = False
             inference_config.evaluation.plot_single_cell_gep = False
             inference_config.evaluation.plot_bulk_gep = False
             inference_config.evaluation.plot_latent_space = False
 
-        output_dir = stage_dir / "test_results"
+        output_dir = output_dir or (stage_dir / "test_results")
         if stage_name == "cell_prop_predictor_pretrain":
             logger.info(
                 "Running configured test-set cell proportion evaluation after %s in %s",
                 stage_name,
-                stage_dir,
+                output_dir,
             )
         else:
             logger.info(
                 "Running full configured test-set inference after %s in %s",
                 stage_name,
-                stage_dir,
+                output_dir,
             )
         predictor = VAEDeconPredictor(
-            model_dir=str(stage_dir),
+            model_dir=str(effective_model_dir),
             config=inference_config,
             device=self.device,
         )
@@ -981,6 +984,25 @@ class VAEDeconTrainer:
             visualize=True,
         )
         return output_dir
+
+    @staticmethod
+    def _should_run_stage_local_test_set_prediction(stage_name: str) -> bool:
+        """Keep stage-local test results only for the earlier staged-training phases."""
+        return stage_name != "joint_finetune"
+
+    def _run_final_model_test_set_prediction(
+        self,
+        *,
+        final_stage_name: str,
+        final_stage_dir: Path,
+    ) -> Optional[Path]:
+        """Run the canonical final evaluation into final_model/test_results."""
+        return self._run_post_stage_test_set_prediction(
+            stage_name=final_stage_name,
+            stage_dir=final_stage_dir,
+            predictor_model_dir=self.model_dir,
+            output_dir=self.model_dir / "test_results",
+        )
 
     @staticmethod
     def _plot_stage_training_history(
@@ -1201,10 +1223,12 @@ class VAEDeconTrainer:
 
             best_ckpt_path, last_ckpt_path = self._resolve_stage_checkpoint_paths(stage_dir)
             executed_stage_best_checkpoints[stage_cfg.name] = best_ckpt_path
-            post_stage_test_results_dir = self._run_post_stage_test_set_prediction(
-                stage_name=stage_cfg.name,
-                stage_dir=stage_dir,
-            )
+            post_stage_test_results_dir = None
+            if self._should_run_stage_local_test_set_prediction(stage_cfg.name):
+                post_stage_test_results_dir = self._run_post_stage_test_set_prediction(
+                    stage_name=stage_cfg.name,
+                    stage_dir=stage_dir,
+                )
             stage_summary_rows.append(
                 {
                     "stage_name": stage_cfg.name,
@@ -1239,6 +1263,13 @@ class VAEDeconTrainer:
             base_training_config=base_training_config,
             stage_summary_rows=stage_summary_rows,
         )
+        self._run_final_model_test_set_prediction(
+            final_stage_name=stage_summary_rows[-1]["stage_name"],
+            final_stage_dir=final_stage_dir,
+        )
+        redundant_root_test_results_dir = self.result_dir / "test_results"
+        if redundant_root_test_results_dir.exists():
+            shutil.rmtree(redundant_root_test_results_dir, ignore_errors=True)
 
     def train(self) -> VAEDeconConfig:
         """

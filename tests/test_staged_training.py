@@ -407,6 +407,60 @@ def test_post_stage_prediction_uses_full_inference_for_later_stages(
     assert stage_config.evaluation.plot_latent_space is True
 
 
+def test_stage_local_test_prediction_is_skipped_for_joint_finetune(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    trainer = VAEDeconTrainer(config=config)
+
+    assert trainer._should_run_stage_local_test_set_prediction("cell_prop_predictor_pretrain") is True
+    assert trainer._should_run_stage_local_test_set_prediction("reconstruction_training") is True
+    assert trainer._should_run_stage_local_test_set_prediction("joint_finetune") is False
+
+
+def test_final_model_test_prediction_targets_final_model_test_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config_dict = _base_staged_config_dict(tmp_path)
+    config_dict["data"]["test_sets"] = {
+        "Test_set1": {
+            "test_set_file_path": str(tmp_path / "test_set.csv"),
+        }
+    }
+    config = VAEDeconConfig.from_dict(config_dict)
+    trainer = VAEDeconTrainer(config=config)
+    final_stage_dir = tmp_path / "stage_joint_finetune"
+    final_stage_dir.mkdir(parents=True, exist_ok=True)
+    captured: dict[str, object] = {}
+
+    class DummyPredictor:
+        def __init__(self, model_dir, config, device):
+            captured["model_dir"] = model_dir
+            captured["config"] = config
+            captured["device"] = device
+
+        def predict_configured_test_sets(self, output_dir=None, dataset_type="test", visualize=True):
+            captured["output_dir"] = output_dir
+            captured["dataset_type"] = dataset_type
+            captured["visualize"] = visualize
+            return {}
+
+    monkeypatch.setattr(inference_workflow, "VAEDeconPredictor", DummyPredictor)
+
+    result = trainer._run_final_model_test_set_prediction(
+        final_stage_name="joint_finetune",
+        final_stage_dir=final_stage_dir,
+    )
+
+    assert result == trainer.model_dir / "test_results"
+    assert captured["model_dir"] == str(trainer.model_dir)
+    assert captured["device"] == trainer.device
+    assert captured["output_dir"] == str(trainer.model_dir / "test_results")
+    assert captured["dataset_type"] == "test"
+    assert captured["visualize"] is True
+    final_config = captured["config"]
+    assert final_config.model.model_dir == trainer.model_dir
+
+
 def test_post_stage_prediction_skips_when_no_test_set_is_configured(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
