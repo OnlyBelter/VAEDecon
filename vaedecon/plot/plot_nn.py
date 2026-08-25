@@ -19,6 +19,184 @@ from sklearn.metrics import median_absolute_error
 set_fig_style()
 
 
+def _plot_metric_pairs_on_axis(
+    *,
+    ax,
+    df: pd.DataFrame,
+    x_col: str,
+    metric_pairs,
+    aggregate_same_x: bool,
+    agg_func: str,
+    log_y: bool,
+    x_label: str,
+    y_label: str,
+    title: str,
+):
+    """Plot a set of metric curves onto an existing axis."""
+    metrics_to_plot = [(col, label) for col, label in metric_pairs if col in df.columns]
+    if len(metrics_to_plot) == 0:
+        raise ValueError(
+            "None of the requested metric columns were found. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    if log_y:
+        ax.set_yscale("log", nonpositive="clip")
+
+    plotted_lines = []
+
+    for metric_col, metric_label in metrics_to_plot:
+        plot_df = df[[x_col, metric_col]].copy()
+        plot_df[metric_col] = pd.to_numeric(plot_df[metric_col], errors="coerce")
+        plot_df = plot_df.dropna(subset=[x_col, metric_col])
+
+        if len(plot_df) == 0:
+            continue
+
+        if aggregate_same_x:
+            if agg_func == "last":
+                plot_df = plot_df.groupby(x_col, as_index=False).last()
+            elif agg_func == "mean":
+                plot_df = plot_df.groupby(x_col, as_index=False).mean()
+            elif agg_func == "min":
+                plot_df = plot_df.groupby(x_col, as_index=False).min()
+            elif agg_func == "max":
+                plot_df = plot_df.groupby(x_col, as_index=False).max()
+            else:
+                raise ValueError(f"Unsupported agg_func: {agg_func}")
+
+        plot_df = plot_df.sort_values(by=x_col)
+
+        if log_y:
+            y = plot_df[metric_col].to_numpy(dtype=float)
+            if np.any(y <= 0):
+                plot_df[metric_col] = np.where(y > 0, y, np.nan)
+                plot_df = plot_df.dropna(subset=[metric_col])
+                if len(plot_df) == 0:
+                    continue
+
+        line, = ax.plot(
+            plot_df[x_col],
+            plot_df[metric_col],
+            marker="o",
+            markersize=4,
+            linewidth=2,
+            label=metric_label,
+        )
+
+        x_last = plot_df[x_col].iloc[-1]
+        y_last = plot_df[metric_col].iloc[-1]
+        plotted_lines.append((x_last, y_last, line.get_color()))
+
+        idx_min = plot_df[metric_col].idxmin()
+        x_min = plot_df.loc[idx_min, x_col]
+        y_min = plot_df.loc[idx_min, metric_col]
+        ax.axhline(y=y_min, linestyle="--", linewidth=0.8, alpha=0.5, color="gray")
+        ax.annotate(
+            f"min={y_min:.4g}",
+            xy=(x_min, y_min),
+            xytext=(-4, -14),
+            textcoords="offset points",
+            fontsize=7.5,
+            color="gray",
+            ha="center",
+        )
+
+    if log_y:
+        ax.yaxis.set_major_formatter(
+            matplotlib.ticker.FuncFormatter(
+                lambda val, _: f"{val:.4g}"
+            )
+        )
+        ax.yaxis.set_minor_locator(
+            matplotlib.ticker.LogLocator(base=10, subs=np.arange(2, 10) * 0.1, numticks=100)
+        )
+        ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+        ax.tick_params(axis="y", which="major", labelsize=10, length=6)
+        ax.tick_params(axis="y", which="minor", length=3)
+    else:
+        ax.yaxis.set_major_locator(matplotlib.ticker.AutoLocator())
+        ax.yaxis.set_minor_locator(matplotlib.ticker.AutoMinorLocator(5))
+        ax.yaxis.set_major_formatter(
+            matplotlib.ticker.FuncFormatter(
+                lambda val, _: f"{val:.4g}"
+            )
+        )
+        ax.tick_params(axis="y", which="major", labelsize=10, length=6)
+        ax.tick_params(axis="y", which="minor", length=3)
+
+    ax.grid(True, which="major", alpha=0.4, linestyle="-")
+    ax.grid(True, which="minor", alpha=0.15, linestyle=":")
+
+    for x_last, y_last, color in plotted_lines:
+        ax.annotate(
+            f"{y_last:.4g}",
+            xy=(x_last, y_last),
+            xytext=(6, 0),
+            textcoords="offset points",
+            fontsize=8,
+            color=color,
+            va="center",
+        )
+
+    ax.legend(loc="upper right", fontsize=9, framealpha=0.7)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_title(title)
+
+
+def plot_loss_panels(
+    history_df,
+    panel_metric_pairs,
+    output_dir: Path = None,
+    file_name=None,
+    x_col="epoch",
+    aggregate_same_x=True,
+    agg_func="last",
+    figsize=(12, 5),
+    log_y: bool = True,
+):
+    """Plot multiple loss panels into a single figure."""
+    if history_df is None or len(history_df) == 0:
+        raise ValueError("history_df is empty.")
+    if x_col not in history_df.columns:
+        raise ValueError(f"Column '{x_col}' not found in history_df.")
+    if not panel_metric_pairs:
+        raise ValueError("panel_metric_pairs cannot be empty.")
+
+    df = history_df.copy()
+    df[x_col] = pd.to_numeric(df[x_col], errors="coerce")
+
+    fig, axes = plt.subplots(1, len(panel_metric_pairs), figsize=figsize)
+    if len(panel_metric_pairs) == 1:
+        axes = [axes]
+
+    for ax, panel in zip(axes, panel_metric_pairs):
+        _plot_metric_pairs_on_axis(
+            ax=ax,
+            df=df,
+            x_col=x_col,
+            metric_pairs=panel["metric_pairs"],
+            aggregate_same_x=aggregate_same_x,
+            agg_func=agg_func,
+            log_y=log_y,
+            x_label=panel.get("x_label", "Epoch"),
+            y_label=panel.get("y_label", "Loss"),
+            title=panel.get("title", "Training History"),
+        )
+
+    fig.tight_layout()
+
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        save_name = file_name if file_name is not None else "loss.png"
+        fig.savefig(str(output_dir / save_name), dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        return None
+
+    return fig, axes
+
+
 def plot_loss(
     history_df,
     output_dir: Path = None,
@@ -80,140 +258,21 @@ def plot_loss(
         ("val_total_loss", "val total loss"),
     ]
 
-    metrics_to_plot = [(col, label) for col, label in candidate_metrics if col in df.columns]
-
-    if len(metrics_to_plot) == 0:
-        raise ValueError(
-            "None of the expected loss columns were found. "
-            f"Available columns: {list(df.columns)}"
-        )
-
     df[x_col] = pd.to_numeric(df[x_col], errors="coerce")
 
     fig, ax = plt.subplots(figsize=figsize)
-    if log_y:
-        ax.set_yscale("log", nonpositive="clip")
-
-    all_y_values = []  # collect all y values for range-aware tick formatting
-
-    plotted_lines = []  # store (x_last, y_last, label, color) for end annotations
-
-    for metric_col, metric_label in metrics_to_plot:
-        plot_df = df[[x_col, metric_col]].copy()
-        plot_df[metric_col] = pd.to_numeric(plot_df[metric_col], errors="coerce")
-        plot_df = plot_df.dropna(subset=[x_col, metric_col])
-
-        if len(plot_df) == 0:
-            continue
-
-        if aggregate_same_x:
-            if agg_func == "last":
-                plot_df = plot_df.groupby(x_col, as_index=False).last()
-            elif agg_func == "mean":
-                plot_df = plot_df.groupby(x_col, as_index=False).mean()
-            elif agg_func == "min":
-                plot_df = plot_df.groupby(x_col, as_index=False).min()
-            elif agg_func == "max":
-                plot_df = plot_df.groupby(x_col, as_index=False).max()
-            else:
-                raise ValueError(f"Unsupported agg_func: {agg_func}")
-
-        plot_df = plot_df.sort_values(by=x_col)
-
-        if log_y:
-            y = plot_df[metric_col].to_numpy(dtype=float)
-            if np.any(y <= 0):
-                plot_df[metric_col] = np.where(y > 0, y, np.nan)
-                plot_df = plot_df.dropna(subset=[metric_col])
-                if len(plot_df) == 0:
-                    continue
-
-        line, = ax.plot(
-            plot_df[x_col],
-            plot_df[metric_col],
-            marker="o",
-            markersize=4,
-            linewidth=2,
-            label=metric_label,
-        )
-
-        all_y_values.extend(plot_df[metric_col].tolist())
-
-        # Record the final point of each curve for annotation
-        x_last = plot_df[x_col].iloc[-1]
-        y_last = plot_df[metric_col].iloc[-1]
-        plotted_lines.append((x_last, y_last, metric_label, line.get_color()))
-
-    # ── Y-axis tick improvements ──────────────────────────────────────────────
-
-    if log_y:
-        # Major ticks: one per decade, formatted as decimals (e.g. 0.01, 0.1, 1.0)
-        ax.yaxis.set_major_formatter(
-            matplotlib.ticker.FuncFormatter(
-                lambda val, _: f"{val:.4g}"
-            )
-        )
-        # Minor ticks: 8 subdivisions per decade (2~9 × 10^n), no labels
-        ax.yaxis.set_minor_locator(matplotlib.ticker.LogLocator(base=10, subs=np.arange(2, 10) * 0.1, numticks=100))
-        ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
-        ax.tick_params(axis="y", which="major", labelsize=10, length=6)
-        ax.tick_params(axis="y", which="minor", length=3)
-    else:
-        # Linear scale: auto major ticks + 5 minor subdivisions
-        ax.yaxis.set_major_locator(matplotlib.ticker.AutoLocator())
-        ax.yaxis.set_minor_locator(matplotlib.ticker.AutoMinorLocator(5))
-        ax.yaxis.set_major_formatter(
-            matplotlib.ticker.FuncFormatter(
-                lambda val, _: f"{val:.4g}"
-            )
-        )
-        ax.tick_params(axis="y", which="major", labelsize=10, length=6)
-        ax.tick_params(axis="y", which="minor", length=3)
-
-    # Grid: major solid, minor dotted
-    ax.grid(True, which="major", alpha=0.4, linestyle="-")
-    ax.grid(True, which="minor", alpha=0.15, linestyle=":")
-
-    # ── Annotate the final value of each curve on the right side ─────────────
-    for x_last, y_last, label, color in plotted_lines:
-        ax.annotate(
-            f"{y_last:.4g}",
-            xy=(x_last, y_last),
-            xytext=(6, 0),
-            textcoords="offset points",
-            fontsize=8,
-            color=color,
-            va="center",
-        )
-
-    # ── Mark global minimum on each curve ────────────────────────────────────
-    for metric_col, metric_label in metrics_to_plot:
-        plot_df = df[[x_col, metric_col]].copy()
-        plot_df[metric_col] = pd.to_numeric(plot_df[metric_col], errors="coerce")
-        plot_df = plot_df.dropna(subset=[x_col, metric_col])
-        if len(plot_df) == 0:
-            continue
-        if aggregate_same_x:
-            plot_df = plot_df.groupby(x_col, as_index=False).agg(agg_func if agg_func != "last" else "last")
-        plot_df = plot_df.sort_values(by=x_col)
-        idx_min = plot_df[metric_col].idxmin()
-        x_min = plot_df.loc[idx_min, x_col]
-        y_min = plot_df.loc[idx_min, metric_col]
-        ax.axhline(y=y_min, linestyle="--", linewidth=0.8, alpha=0.5, color="gray")
-        ax.annotate(
-            f"min={y_min:.4g}",
-            xy=(x_min, y_min),
-            xytext=(-4, -14),
-            textcoords="offset points",
-            fontsize=7.5,
-            color="gray",
-            ha="center",
-        )
-
-    ax.legend(loc="upper right", fontsize=9, framealpha=0.7)
-    ax.set_xlabel(x_label)
-    ax.set_ylabel(y_label)
-    ax.set_title("Training History")
+    _plot_metric_pairs_on_axis(
+        ax=ax,
+        df=df,
+        x_col=x_col,
+        metric_pairs=candidate_metrics,
+        aggregate_same_x=aggregate_same_x,
+        agg_func=agg_func,
+        log_y=log_y,
+        x_label=x_label,
+        y_label=y_label,
+        title="Training History",
+    )
     fig.tight_layout()
 
     if output_dir is not None:

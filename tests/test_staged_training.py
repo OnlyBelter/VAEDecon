@@ -262,6 +262,29 @@ def test_stage1_loss_plot_is_saved_from_losses_csv(tmp_path: Path):
     assert (stage_dir / "loss.png").exists()
 
 
+def test_stage2_loss_plot_is_saved_from_losses_csv(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    trainer = VAEDeconTrainer(config=config)
+    stage_dir = tmp_path / "stage_reconstruction_training"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "epoch": [0, 1, 2],
+            "train_loss_epoch": [30.0, 20.0, 10.0],
+            "val_loss": [32.0, 21.0, 11.0],
+            "train_cell_type_sct_gep_loss_epoch": [0.02, 0.01, 0.005],
+            "val_cell_type_sct_gep_loss": [0.03, 0.015, 0.006],
+        }
+    ).to_csv(stage_dir / "losses.csv", index=False)
+
+    trainer._plot_stage_training_history(
+        stage_name="reconstruction_training",
+        stage_dir=stage_dir,
+    )
+
+    assert (stage_dir / "loss.png").exists()
+
+
 def test_load_cell_prop_predictor_checkpoint_updates_only_predictor_weights(tmp_path: Path):
     config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
     trainer = VAEDeconTrainer(config=config)

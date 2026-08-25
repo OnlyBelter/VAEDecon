@@ -999,7 +999,7 @@ class VAEDeconTrainer:
 
         try:
             history_df = pd.read_csv(losses_path)
-            from ..plot.plot_nn import plot_loss
+            from ..plot.plot_nn import plot_loss, plot_loss_panels
 
             metric_pairs = None
             if stage_name == "cell_prop_predictor_pretrain":
@@ -1007,12 +1007,38 @@ class VAEDeconTrainer:
                     ("train_cell_prop_loss_epoch", "train loss"),
                     ("val_cell_prop_loss", "val loss"),
                 ]
-
-            plot_loss(
-                history_df=history_df,
-                output_dir=stage_dir,
-                metric_pairs=metric_pairs,
-            )
+                plot_loss(
+                    history_df=history_df,
+                    output_dir=stage_dir,
+                    metric_pairs=metric_pairs,
+                )
+            elif stage_name == "reconstruction_training":
+                plot_loss_panels(
+                    history_df=history_df,
+                    output_dir=stage_dir,
+                    panel_metric_pairs=[
+                        {
+                            "metric_pairs": [
+                                ("train_loss_epoch", "train loss"),
+                                ("val_loss", "val loss"),
+                            ],
+                            "title": "Total Loss",
+                        },
+                        {
+                            "metric_pairs": [
+                                ("train_cell_type_sct_gep_loss_epoch", "train sctGEP loss"),
+                                ("val_cell_type_sct_gep_loss", "val sctGEP loss"),
+                            ],
+                            "title": "Cell-Type sctGEP Loss",
+                        },
+                    ],
+                )
+            else:
+                plot_loss(
+                    history_df=history_df,
+                    output_dir=stage_dir,
+                    metric_pairs=metric_pairs,
+                )
             logger.info("Saved loss curve for %s to %s", stage_name, stage_dir / "loss.png")
         except Exception as exc:
             logger.warning("Could not plot loss curve for %s: %s", stage_name, exc)
