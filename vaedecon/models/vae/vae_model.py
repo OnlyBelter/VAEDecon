@@ -40,6 +40,18 @@ from ...utility.hierarchical_encoding import HIERARCHICAL_ENCODING
 logger = logging.getLogger(__name__)
 
 
+def _clamp_log2_expression_before_exp(
+    x_log2: torch.Tensor,
+    *,
+    min_value: float = 0.0,
+    max_value: float = 20.0,
+) -> torch.Tensor:
+    """Clamp log2-scale expression to a safe range before exponentiation."""
+    if max_value < min_value:
+        raise ValueError(f"max_value must be >= min_value, got {max_value} < {min_value}")
+    return torch.clamp(x_log2, min=min_value, max=max_value)
+
+
 @dataclass
 class LossTerms:
     """
@@ -848,7 +860,14 @@ class VAE(BaseAE):
             # Decoder outputs a mean-centered residual in scaled log space.
             recon_residual_log = recon_x_all_types
             recon_x_all_types_log = recon_residual_log + self.g_mean.unsqueeze(0)
-            recon_x_all_types_unscaled_log = recon_x_all_types_log * self.scaling_factor
+            # Clamp full reconstructed log2(TPM+1) to the normalized design range:
+            # scaling_factor=20 means valid scaled expression stays within [0, 1].
+            recon_x_all_types_unscaled_log = _clamp_log2_expression_before_exp(
+                recon_x_all_types_log * self.scaling_factor,
+                min_value=0.0,
+                max_value=self.scaling_factor,
+            )
+            recon_x_all_types_log = recon_x_all_types_unscaled_log / self.scaling_factor
             recon_x_all_types_cpm = log_exp2cpm_tensor(
                 recon_x_all_types_unscaled_log,
                 transpose=True,

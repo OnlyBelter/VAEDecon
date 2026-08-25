@@ -13,7 +13,7 @@ from vaedecon.models.base import (
     has_usable_labels,
     remove_cancer_cell_type,
 )
-from vaedecon.models.vae.vae_model import VAE
+from vaedecon.models.vae.vae_model import VAE, _clamp_log2_expression_before_exp
 from vaedecon.trainers.base_trainer import (
     _initialize_adaptive_aux_loss_schedule,
     _apply_aux_loss_schedules,
@@ -1063,6 +1063,17 @@ def test_raise_if_non_finite_output_reports_offending_terms_and_batch_context():
     assert "sample_ids=[sample_a, sample_b]" in message
     assert "x.shape=(2, 3)" in message
     assert "y.shape=(2, 2)" in message
+
+
+def test_clamp_log2_expression_before_exp_limits_values_to_safe_range():
+    x_log2 = torch.tensor([-3.0, 0.0, 5.0, 25.0], dtype=torch.float32)
+
+    clamped = _clamp_log2_expression_before_exp(x_log2, min_value=0.0, max_value=20.0)
+
+    assert torch.allclose(
+        clamped,
+        torch.tensor([0.0, 0.0, 5.0, 20.0], dtype=torch.float32),
+    )
 
 
 def test_loss_function_rejects_z_score_kl_in_mean_centered_mode():

@@ -336,6 +336,10 @@ class DecoderConditionalMLP(BaseDecoder):
         self.cell_type_embedding_dim = getattr(args, 'conditional_decoder_cell_type_emb_dim', 64)
         self.context_dim = getattr(args, 'conditional_decoder_context_dim', 256)
         self.conditioning_dropout_rate = getattr(args, 'conditional_decoder_dropout_rate', 0.1)
+        self.uses_signed_bounded_output = bool(
+            getattr(args, "learn_gep_residual", False)
+            and getattr(args, "learn_gep_residual_mode", "zscore") == "mean_centered"
+        )
 
         output_dim = int(np.prod(self.input_dim))
         conditioning_dim = self.context_dim
@@ -366,9 +370,12 @@ class DecoderConditionalMLP(BaseDecoder):
             )
             input_size = hidden_dim_size
 
+        self.final_linear = nn.Linear(self.hidden_dims[-1], output_dim)
+        nn.init.zeros_(self.final_linear.bias)
+        self.output_activation = nn.Tanh() if self.uses_signed_bounded_output else nn.Softplus()
         self.final_layer = nn.Sequential(
-            nn.Linear(self.hidden_dims[-1], output_dim),
-            nn.Softplus(),
+            self.final_linear,
+            self.output_activation,
         )
 
         self.depth = len(self.layers) + 1

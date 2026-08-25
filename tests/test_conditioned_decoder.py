@@ -43,6 +43,24 @@ def test_decoder_conditional_mlp_requires_conditioning_inputs():
         decoder(z, cell_type_indices=None, bulk_context=None)
 
 
+def test_decoder_conditional_mlp_uses_tanh_for_mean_centered_residual_mode():
+    decoder = DecoderConditionalMLP(
+        args=_build_model_config(
+            learn_gep_residual=True,
+            learn_gep_residual_mode="mean_centered",
+        )
+    )
+
+    assert isinstance(decoder.final_layer[1], torch.nn.Tanh)
+    assert torch.allclose(decoder.final_layer[0].bias, torch.zeros_like(decoder.final_layer[0].bias))
+
+
+def test_decoder_conditional_mlp_keeps_softplus_outside_mean_centered_residual_mode():
+    decoder = DecoderConditionalMLP(args=_build_model_config())
+
+    assert isinstance(decoder.final_layer[1], torch.nn.Softplus)
+
+
 def test_decoder_mlp_shape_is_unchanged():
     decoder = DecoderMLP(args=_build_model_config())
     z = torch.randn(2, 4, 3)
