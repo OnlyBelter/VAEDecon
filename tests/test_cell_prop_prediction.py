@@ -1017,6 +1017,49 @@ def test_loss_function_uses_direct_residual_supervision_in_mean_centered_mode():
     assert torch.isclose(loss_terms.cell_type_sct_gep, torch.tensor(3.0, dtype=torch.float32))
 
 
+def test_loss_function_uses_full_sct_gep_supervision_when_residual_learning_is_disabled():
+    dummy = _build_dummy_vae(cell_prop_weight=0.0, training=True)
+    dummy.model_config.learn_gep_residual = False
+    dummy.model_config.learn_gep_residual_mode = "mean_centered"
+    dummy.model_config.loss_coefficient.cell_type_sct_gep_weight = 1.0
+    dummy._matched_sct_gep_supervision_loss = lambda **_kwargs: torch.full(
+        (2,),
+        4.0,
+        dtype=torch.float32,
+    )
+
+    def _wrong_helper(**_kwargs):
+        raise AssertionError("Direct full-sctGEP mode should not use residual supervision.")
+
+    dummy._matched_sct_gep_residual_supervision_loss = _wrong_helper
+
+    loss_terms = VAE.loss_function(
+        dummy,
+        x=torch.zeros((2, 3), dtype=torch.float32),
+        y=torch.tensor([[0.7, 0.3], [0.2, 0.8]], dtype=torch.float32),
+        recon_x_conv=torch.zeros((2, 3), dtype=torch.float32),
+        mu_types=torch.zeros((2, 1, 2), dtype=torch.float32),
+        logvar_types=torch.zeros((2, 1, 2), dtype=torch.float32),
+        pred_cell_prop=torch.tensor([[0.7, 0.3], [0.2, 0.8]], dtype=torch.float32),
+        raw_non_cancer_cell_prop=None,
+        existence_logits=None,
+        dd_alpha=None,
+        mu_prior=torch.zeros((2, 1), dtype=torch.float32),
+        recon_gene_mean=torch.ones((3, 2), dtype=torch.float32),
+        recon_gene_std=torch.ones((3, 2), dtype=torch.float32),
+        logvar_mean=torch.zeros((2, 1), dtype=torch.float32),
+        mu_mean=torch.zeros((2, 1), dtype=torch.float32),
+        device=torch.device("cpu"),
+        recon_x_all_types_cpm=torch.ones((2, 3, 2), dtype=torch.float32),
+        recon_x_all_types_log=torch.zeros((2, 3, 2), dtype=torch.float32),
+        recon_residual_log=None,
+        true_sct_gep=torch.zeros((2, 3, 2), dtype=torch.float32),
+        true_sct_gep_present_mask=torch.ones((2, 2), dtype=torch.bool),
+    )
+
+    assert torch.isclose(loss_terms.cell_type_sct_gep, torch.tensor(4.0, dtype=torch.float32))
+
+
 def test_raise_if_non_finite_output_allows_finite_terms():
     output = ModelOutput(
         loss=torch.tensor(1.0, dtype=torch.float32),

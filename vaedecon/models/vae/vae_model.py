@@ -1034,9 +1034,12 @@ class VAE(BaseAE):
         attractor_weight = lo.attractor_weight
         z_score_reg_weight = lo.z_score_reg_weight
         residual_mode = getattr(self.model_config, "learn_gep_residual_mode", "zscore")
+        use_mean_centered_residual = bool(
+            self.model_config.learn_gep_residual and residual_mode == "mean_centered"
+        )
         labels_available = has_usable_labels(y)
 
-        if self.model_config.learn_gep_residual and residual_mode == "mean_centered":
+        if use_mean_centered_residual:
             if lo.z_score_kl_weight > 0:
                 raise ValueError(
                     "loss_coefficient['z_score_kl_weight'] must be 0 when "
@@ -1128,7 +1131,7 @@ class VAE(BaseAE):
 
         per_sample_residual_var_weight = float(getattr(lo, "per_sample_residual_var_weight", 0.0) or 0.0)
         if per_sample_residual_var_weight > 0:
-            if residual_mode != "mean_centered" or recon_residual_log is None:
+            if not use_mean_centered_residual or recon_residual_log is None:
                 raise ValueError(
                     "per_sample_residual_var_weight > 0 requires recon_residual_log and "
                     "learn_gep_residual_mode='mean_centered'."
@@ -1161,7 +1164,7 @@ class VAE(BaseAE):
 
         inter_sample_similarity_weight = float(getattr(lo, "inter_sample_similarity_weight", 0.0) or 0.0)
         if inter_sample_similarity_weight > 0:
-            if residual_mode != "mean_centered" or recon_residual_log is None:
+            if not use_mean_centered_residual or recon_residual_log is None:
                 raise ValueError(
                     "inter_sample_similarity_weight > 0 requires recon_residual_log and "
                     "learn_gep_residual_mode='mean_centered'."
@@ -1193,7 +1196,7 @@ class VAE(BaseAE):
 
         cell_type_sct_gep_weight = float(getattr(lo, "cell_type_sct_gep_weight", 0.0) or 0.0)
         if cell_type_sct_gep_weight > 0:
-            if residual_mode == "mean_centered":
+            if use_mean_centered_residual:
                 if recon_residual_log is None:
                     raise ValueError(
                         "recon_residual_log is required when cell_type_sct_gep_weight > 0 "
@@ -1209,7 +1212,7 @@ class VAE(BaseAE):
                 and labels_available
             )
             if supervision_ready:
-                if residual_mode == "mean_centered":
+                if use_mean_centered_residual:
                     cell_type_sct_gep_loss = self._matched_sct_gep_residual_supervision_loss(
                         pred_residual_log=recon_residual_log,
                         true_sct_gep=true_sct_gep,
