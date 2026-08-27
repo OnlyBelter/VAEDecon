@@ -341,6 +341,73 @@ def test_trainer_uses_training_target_set_bulk_paths_when_simu_paths_missing(tmp
     ]
 
 
+def test_processed_training_cache_dir_is_shared_across_ablation_names(tmp_path: Path):
+    base_data = {
+        "gene_mean_std_source": "sct_gep",
+        "gene_mean_std_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+        "simu_bulk_file_path": [
+            "./datasets/random_bulk.h5ad",
+            "./datasets/segment_bulk.h5ad",
+        ],
+        "data_dir": str(tmp_path / "datasets"),
+        "force_reprocess": False,
+    }
+    cfg_a = VAEDeconConfig.from_dict(
+        {
+            "data": base_data,
+            "training": {"naming_postfix": "ablation_a"},
+            "model": {"model_dir": tmp_path / "run_a" / "final_model"},
+        }
+    )
+    cfg_b = VAEDeconConfig.from_dict(
+        {
+            "data": base_data,
+            "training": {"naming_postfix": "ablation_b"},
+            "model": {"model_dir": tmp_path / "run_b" / "final_model"},
+        }
+    )
+
+    trainer_a = VAEDeconTrainer(config=cfg_a)
+    trainer_b = VAEDeconTrainer(config=cfg_b)
+
+    dataset_cfg_a = trainer_a._build_gepdataset_config()
+    dataset_cfg_b = trainer_b._build_gepdataset_config()
+
+    assert Path(dataset_cfg_a.processed_data_dir) == Path(dataset_cfg_b.processed_data_dir)
+
+
+def test_processed_training_cache_dir_changes_when_preprocessing_inputs_change(tmp_path: Path):
+    common = {
+        "gene_mean_std_source": "sct_gep",
+        "gene_mean_std_sct_gep_file_path": "./datasets/train_sct_ref.h5ad",
+        "simu_bulk_file_path": [
+            "./datasets/random_bulk.h5ad",
+        ],
+        "data_dir": str(tmp_path / "datasets"),
+        "force_reprocess": False,
+    }
+    cfg_a = VAEDeconConfig.from_dict(
+        {
+            "data": {**common, "min_var": 1.0},
+            "model": {"model_dir": tmp_path / "run_a" / "final_model"},
+        }
+    )
+    cfg_b = VAEDeconConfig.from_dict(
+        {
+            "data": {**common, "min_var": 2.0},
+            "model": {"model_dir": tmp_path / "run_b" / "final_model"},
+        }
+    )
+
+    trainer_a = VAEDeconTrainer(config=cfg_a)
+    trainer_b = VAEDeconTrainer(config=cfg_b)
+
+    dataset_cfg_a = trainer_a._build_gepdataset_config()
+    dataset_cfg_b = trainer_b._build_gepdataset_config()
+
+    assert Path(dataset_cfg_a.processed_data_dir) != Path(dataset_cfg_b.processed_data_dir)
+
+
 def test_trainer_rejects_duplicate_training_target_set_bulk_paths(tmp_path: Path):
     config = VAEDeconConfig.from_dict(
         {

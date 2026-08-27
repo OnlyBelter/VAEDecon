@@ -2,8 +2,8 @@
 Training pipeline for VAEDecon
 """
 import copy
+import hashlib
 import json
-import os
 import logging
 import shutil
 import traceback
@@ -16,7 +16,6 @@ import pandas as pd
 import torch
 from torch.utils.data import Subset, random_split
 from ..data import GEPDataset
-from ..models.nn import EncoderMLP, DecoderMLP
 # from ..models.vae import VAEConfig
 from ..trainers import BaseTrainerL
 from ..utility import set_output_dir, log_message, set_fig_style
@@ -35,6 +34,13 @@ from ..configs.default_config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_path_for_fingerprint(path_like: Optional[str | Path]) -> Optional[str]:
+    """Normalize paths for stable preprocessing-cache fingerprints."""
+    if path_like is None or str(path_like).strip() == "":
+        return None
+    return str(Path(path_like).expanduser().resolve())
 
 def _cuda_usable() -> bool:
     if not torch.cuda.is_available():
@@ -132,10 +138,6 @@ class VAEDeconTrainer:
                     f"val_split ({self.config.training.val_split}) must sum to 1.0, got {total_split:.4f}."
                 )
 
-        self._processed_training_set_dir = Path(self.config.data.data_dir) / (
-            f'processed_training_sets_{self.config.training.naming_postfix}'
-        )
-
         # Load GEP dataset, PPI and Pathway data will be handled in each specified encoder class.
         gep_dataset_config = self._build_gepdataset_config()  # training file paths and preprocessing params
         dataset = GEPDataset(config=gep_dataset_config)
@@ -159,10 +161,7 @@ class VAEDeconTrainer:
 
         # Update input_dim, gene_mean_std_fp, and build ModelConfig once
         # Build and cache ModelConfig here; _create_model reuses it
-        self.config.model = self._build_vae_config(
-            training_file_paths=gep_dataset_config.file_paths,
-            dataset=dataset
-        )
+        self.config.model = self._build_vae_config(dataset=dataset)
         save_metadata(dataset=dataset, model_config=self.config.model)
 
         # TODO, only calculate gene mean/std when we need it, such as GNN or predict_gep_residual is true.
@@ -580,7 +579,7 @@ class VAEDeconTrainer:
 
         return model
 
-    def _build_vae_config(self, training_file_paths, dataset: GEPDataset) -> ModelConfig:
+    def _build_vae_config(self, dataset: GEPDataset) -> ModelConfig:
         """
         Build a ModelConfig from self.config (model + data sections).
 
@@ -671,12 +670,8 @@ class VAEDeconTrainer:
         trainer_config.per_device_eval_batch_size = self.config.training.batch_size
         return trainer_config
 
-    def _build_gepdataset_config(self) -> GEPDatasetConfig:
-        """
-        Build a config dict for GEPDataset from self.config.data
-        """
-
-        # All training set files
+    def _resolve_training_dataset_inputs(self) -> tuple[list[str | Path], dict]:
+        """Resolve training file paths and matched-target settings for the dataset."""
         simu_paths = [
             path for path in (self.config.data.simu_bulk_file_path or [])
             if path is not None and str(path).strip() != ""
@@ -749,6 +744,71 @@ class VAEDeconTrainer:
                         f"Remove or disable the unused target set entries, or add their bulk "
                         f"files to data.simu_bulk_file_path. Extra: {preview}"
                     )
+
+        return training_file_paths, training_target_sets
+
+    def _build_training_dataset_cache_fingerprint(
+        self,
+        *,
+        training_file_paths: list[str | Path],
+        training_target_sets: dict,
+    ) -> str:
+        """Return a stable content fingerprint for the processed training dataset cache."""
+        training_targets_payload = {
+            str(set_name): {
+                "training_set_file_path": _resolve_path_for_fingerprint(cfg.training_set_file_path),
+                "training_set_sample2cell_id_file_path": _resolve_path_for_fingerprint(
+                    cfg.training_set_sample2cell_id_file_path
+                ),
+                "training_sct_gep_file_path": _resolve_path_for_fingerprint(cfg.training_sct_gep_file_path),
+            }
+            for set_name, cfg in sorted(training_target_sets.items())
+        }
+        payload = {
+            "version": 1,
+            "file_paths": [
+                _resolve_path_for_fingerprint(path)
+                for path in training_file_paths
+                if path is not None and str(path).strip() != ""
+            ],
+            "scaling_by_constant": self.config.data.scaling_by_constant,
+            "scaling_factor": float(self.config.data.scaling_factor),
+            "remove_low_var_genes": bool(self.config.data.remove_low_var_genes),
+            "min_var": float(self.config.data.min_var),
+            "gene_list_file": _resolve_path_for_fingerprint(getattr(self.config.data, "gene_list_file", None)),
+            "cell_cell2ave_exp_file_path": _resolve_path_for_fingerprint(
+                getattr(self.config.data, "cell_cell2ave_exp_file_path", None)
+            ),
+            "training_target_sets": training_targets_payload,
+            "training_sct_gep_cell_prop_threshold": float(
+                getattr(self.config.data, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
+            ),
+        }
+        payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()[:16]
+
+    def _resolve_processed_training_set_dir(
+        self,
+        *,
+        training_file_paths: list[str | Path],
+        training_target_sets: dict,
+    ) -> Path:
+        """Build the shared processed-training cache directory for the current dataset inputs."""
+        fingerprint = self._build_training_dataset_cache_fingerprint(
+            training_file_paths=training_file_paths,
+            training_target_sets=training_target_sets,
+        )
+        return Path(self.config.data.data_dir) / "processed_training_sets" / fingerprint
+
+    def _build_gepdataset_config(self) -> GEPDatasetConfig:
+        """
+        Build a config dict for GEPDataset from self.config.data
+        """
+        training_file_paths, training_target_sets = self._resolve_training_dataset_inputs()
+        self._processed_training_set_dir = self._resolve_processed_training_set_dir(
+            training_file_paths=training_file_paths,
+            training_target_sets=training_target_sets,
+        )
 
         return GEPDatasetConfig(
             file_paths=training_file_paths,
@@ -1487,14 +1547,10 @@ def train_vaedecon(
         raise
 
     # ── Cleanup processed data ────────────────────────────────────────────
-    # Reuse the path already computed inside the trainer
+    # Keep the processed dataset cache so repeated ablations can reuse it.
     processed_dir = trainer._processed_training_set_dir
-    if processed_dir and processed_dir.exists():
-        try:
-            shutil.rmtree(processed_dir)
-            logger.info(f"Deleted processed training set directory: {processed_dir}")
-        except Exception as exc:
-            logger.warning(f"Could not delete processed training set directory: {exc}")
+    if processed_dir:
+        logger.info(f"Retaining processed training set directory for reuse: {processed_dir}")
 
     # Save final config after training (may have updates)
     try:

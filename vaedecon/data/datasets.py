@@ -1,4 +1,5 @@
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor
 import gc
 import json
 import warnings
@@ -23,6 +24,8 @@ logger = logging.getLogger(__name__)
 console = logging.StreamHandler()
 logger.addHandler(console)
 logger.setLevel(logging.INFO)
+
+_MAX_PARALLEL_SOURCE_FILE_LOADS = 4
 
 
 class DatasetOutput(OrderedDict):
@@ -282,6 +285,41 @@ def build_matched_sct_gep_training_targets(
         "selected_sample2cell_id": filtered_mapping_df,
         "aligned_sct_geps_df": aligned_sct_geps_df,
     }
+
+
+def _load_dataset_frames_from_path(
+    path_like: Union[str, Path],
+    *,
+    namespace: Optional[str] = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load one source file into aligned expression and label DataFrames."""
+    path_str = str(path_like)
+    log_message(f"Reading data from {path_str}")
+
+    if path_str.endswith(".h5ad"):
+        h5ad_obj = ReadH5AD(path_str)
+        gep_data_df = h5ad_obj.get_df(convert_to_tpm=True)
+        if gep_data_df.values.dtype != np.float32:
+            gep_data_df = gep_data_df.astype(np.float32)
+        cell_prop_df = h5ad_obj.get_cell_fraction()
+        if cell_prop_df is None:
+            cell_prop_df = pd.DataFrame(index=gep_data_df.index)
+    elif path_str.endswith(".csv"):
+        gep_data_df = pd.read_csv(path_str, index_col=0)
+        cell_prop_df = pd.DataFrame(index=gep_data_df.index)
+    else:
+        raise ValueError(f"Unrecognized file format: {path_str}")
+
+    if namespace is not None:
+        namespaced_index = pd.Index(
+            _namespace_sample_ids(gep_data_df.index.astype(str).tolist(), namespace),
+            dtype=object,
+        )
+        gep_data_df.index = namespaced_index
+        cell_prop_df.index = namespaced_index
+
+    log_message(f"Loaded data shape: {gep_data_df.shape}")
+    return gep_data_df, cell_prop_df
 
 # =============================================================================
 # 1) Cache Manager
@@ -546,37 +584,30 @@ class GEPPreprocessor:
         """
         all_data_dfs: List[pd.DataFrame] = []
         all_cell_prop_dfs: List[pd.DataFrame] = []
-
+        load_jobs: list[tuple[Union[str, Path], Optional[str]]] = []
         for path_like in file_paths:
-            path_str = str(path_like)
-            log_message(f"Reading data from {path_str}")
             namespace = None
             if sample_id_namespace_by_path:
                 namespace = sample_id_namespace_by_path.get(str(Path(path_like).expanduser().resolve()))
+            load_jobs.append((path_like, namespace))
 
-            if path_str.endswith(".h5ad"):
-                h5ad_obj = ReadH5AD(path_str)
-                gep_data_df = h5ad_obj.get_df(convert_to_tpm=True)
-                if gep_data_df.values.dtype != np.float32:
-                    gep_data_df = gep_data_df.astype(np.float32)
-                cell_prop_df = h5ad_obj.get_cell_fraction()
-
-            elif path_str.endswith(".csv"):
-                gep_data_df = pd.read_csv(path_str, index_col=0)
-                cell_prop_df = pd.DataFrame(index=gep_data_df.index)
-
-            else:
-                raise ValueError(f"Unrecognized file format: {path_str}")
-
-            if namespace is not None:
-                namespaced_index = pd.Index(
-                    _namespace_sample_ids(gep_data_df.index.astype(str).tolist(), namespace),
-                    dtype=object,
+        max_workers = min(_MAX_PARALLEL_SOURCE_FILE_LOADS, len(load_jobs))
+        if max_workers > 1:
+            log_message(f"Loading {len(load_jobs)} source files with {max_workers} worker threads...")
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                loaded_frames = list(
+                    executor.map(
+                        lambda job: _load_dataset_frames_from_path(job[0], namespace=job[1]),
+                        load_jobs,
+                    )
                 )
-                gep_data_df.index = namespaced_index
-                cell_prop_df.index = namespaced_index
+        else:
+            loaded_frames = [
+                _load_dataset_frames_from_path(path_like, namespace=namespace)
+                for path_like, namespace in load_jobs
+            ]
 
-            log_message(f"Loaded data shape: {gep_data_df.shape}")
+        for gep_data_df, cell_prop_df in loaded_frames:
             all_data_dfs.append(gep_data_df)
             all_cell_prop_dfs.append(cell_prop_df)
 
@@ -764,8 +795,10 @@ class GEPDataset(Dataset):
         self._n_genes = 0
         self._n_cell_types = 0
 
+        has_cache = self.cache.has_required_cache()
+
         # Try cache first unless force_reprocess=True
-        if (not config.force_reprocess) and self.cache.has_required_cache():
+        if (not config.force_reprocess) and has_cache:
             if self._load_from_cache_metadata():
                 log_message(f"Successfully loaded cache metadata from {self.processed_data_dir}")
             else:
@@ -773,6 +806,10 @@ class GEPDataset(Dataset):
                 self._preprocess_and_cache()
                 self._load_from_cache_metadata()
         else:
+            if config.force_reprocess and has_cache:
+                log_message(
+                    f"force_reprocess=True, rebuilding processed dataset cache at {self.processed_data_dir}"
+                )
             log_message("Preprocessing data from scratch...")
             self._preprocess_and_cache()
             self._load_from_cache_metadata()
