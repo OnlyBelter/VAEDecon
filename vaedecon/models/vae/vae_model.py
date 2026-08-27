@@ -1164,26 +1164,43 @@ class VAE(BaseAE):
 
         inter_sample_similarity_weight = float(getattr(lo, "inter_sample_similarity_weight", 0.0) or 0.0)
         if inter_sample_similarity_weight > 0:
-            if not use_mean_centered_residual or recon_residual_log is None:
-                raise ValueError(
-                    "inter_sample_similarity_weight > 0 requires recon_residual_log and "
-                    "learn_gep_residual_mode='mean_centered'."
-                )
             supervision_ready = (
                 true_sct_gep is not None
                 and true_sct_gep_present_mask is not None
                 and labels_available
             )
             if supervision_ready:
-                inter_sample_similarity_loss = self._inter_sample_similarity_loss(
-                    pred_residual_log=recon_residual_log,
-                    true_sct_gep=true_sct_gep,
-                    true_sct_gep_present_mask=true_sct_gep_present_mask,
-                    true_cell_prop=y,
-                    cell_prop_threshold=float(
-                        getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
-                    ),
+                cell_prop_threshold = float(
+                    getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
                 )
+                if use_mean_centered_residual:
+                    if recon_residual_log is None:
+                        raise ValueError(
+                            "inter_sample_similarity_weight > 0 requires recon_residual_log "
+                            "when learn_gep_residual_mode='mean_centered'."
+                        )
+                    inter_sample_similarity_loss = self._inter_sample_similarity_loss(
+                        pred_residual_log=recon_residual_log,
+                        true_sct_gep=true_sct_gep,
+                        true_sct_gep_present_mask=true_sct_gep_present_mask,
+                        true_cell_prop=y,
+                        cell_prop_threshold=cell_prop_threshold,
+                    )
+                else:
+                    if recon_x_all_types_log is None:
+                        if recon_x_all_types_cpm is None:
+                            raise ValueError(
+                                "inter_sample_similarity_weight > 0 requires recon_x_all_types_log "
+                                "or recon_x_all_types_cpm when residual learning is disabled."
+                            )
+                        recon_x_all_types_log = to_log_space(recon_x_all_types_cpm, self.scaling_factor)
+                    inter_sample_similarity_loss = self._full_sct_gep_inter_sample_similarity_loss(
+                        pred_sct_gep_log=recon_x_all_types_log,
+                        true_sct_gep=true_sct_gep,
+                        true_sct_gep_present_mask=true_sct_gep_present_mask,
+                        true_cell_prop=y,
+                        cell_prop_threshold=cell_prop_threshold,
+                    )
             elif self.training:
                 raise ValueError(
                     "Inter-sample similarity supervision requires true_sct_gep, "
@@ -1494,36 +1511,35 @@ class VAE(BaseAE):
         eye = torch.eye(cosine.shape[0], device=cosine.device, dtype=cosine.dtype)
         return cosine * (1.0 - eye) + eye
 
-    def _inter_sample_similarity_loss(
+    def _masked_inter_sample_similarity_loss(
         self,
-        pred_residual_log: torch.Tensor,
-        true_sct_gep: torch.Tensor,
+        pred_all_types_log: torch.Tensor,
+        true_all_types_log: torch.Tensor,
         true_sct_gep_present_mask: torch.Tensor,
         true_cell_prop: torch.Tensor,
         cell_prop_threshold: float,
     ) -> torch.Tensor:
-        """Match batch-local cell-type-wise inter-sample cosine geometry in residual space."""
-        true_residual_log = true_sct_gep - self.g_mean.unsqueeze(0)
+        """Match batch-local cell-type-wise inter-sample cosine geometry in log space."""
         active_mask = true_sct_gep_present_mask & (true_cell_prop >= cell_prop_threshold)  # (B, C)
 
         per_sample_loss = torch.zeros(
-            (pred_residual_log.shape[0],),
-            device=pred_residual_log.device,
-            dtype=pred_residual_log.dtype,
+            (pred_all_types_log.shape[0],),
+            device=pred_all_types_log.device,
+            dtype=pred_all_types_log.dtype,
         )
         active_cell_type_count = 0
 
-        for cell_type_idx in range(pred_residual_log.shape[2]):
+        for cell_type_idx in range(pred_all_types_log.shape[2]):
             sample_mask = active_mask[:, cell_type_idx]
             n_active = int(sample_mask.sum().item())
             if n_active < 2:
                 continue
 
-            pred_resid_ct = pred_residual_log[sample_mask, :, cell_type_idx]  # (B_active, G)
-            true_resid_ct = true_residual_log[sample_mask, :, cell_type_idx]  # (B_active, G)
+            pred_ct = pred_all_types_log[sample_mask, :, cell_type_idx]  # (B_active, G)
+            true_ct = true_all_types_log[sample_mask, :, cell_type_idx]  # (B_active, G)
 
-            pred_cosine = self._pairwise_cosine_similarity_matrix(pred_resid_ct)
-            true_cosine = self._pairwise_cosine_similarity_matrix(true_resid_ct)
+            pred_cosine = self._pairwise_cosine_similarity_matrix(pred_ct)
+            true_cosine = self._pairwise_cosine_similarity_matrix(true_ct)
 
             off_diag_mask = ~torch.eye(n_active, device=pred_cosine.device, dtype=torch.bool)
             if not off_diag_mask.any():
@@ -1537,6 +1553,41 @@ class VAE(BaseAE):
             return per_sample_loss
 
         return per_sample_loss / float(active_cell_type_count)
+
+    def _inter_sample_similarity_loss(
+        self,
+        pred_residual_log: torch.Tensor,
+        true_sct_gep: torch.Tensor,
+        true_sct_gep_present_mask: torch.Tensor,
+        true_cell_prop: torch.Tensor,
+        cell_prop_threshold: float,
+    ) -> torch.Tensor:
+        """Match batch-local cell-type-wise inter-sample cosine geometry in residual space."""
+        true_residual_log = true_sct_gep - self.g_mean.unsqueeze(0)
+        return self._masked_inter_sample_similarity_loss(
+            pred_all_types_log=pred_residual_log,
+            true_all_types_log=true_residual_log,
+            true_sct_gep_present_mask=true_sct_gep_present_mask,
+            true_cell_prop=true_cell_prop,
+            cell_prop_threshold=cell_prop_threshold,
+        )
+
+    def _full_sct_gep_inter_sample_similarity_loss(
+        self,
+        pred_sct_gep_log: torch.Tensor,
+        true_sct_gep: torch.Tensor,
+        true_sct_gep_present_mask: torch.Tensor,
+        true_cell_prop: torch.Tensor,
+        cell_prop_threshold: float,
+    ) -> torch.Tensor:
+        """Match batch-local cell-type-wise inter-sample cosine geometry for full sctGEPs."""
+        return self._masked_inter_sample_similarity_loss(
+            pred_all_types_log=pred_sct_gep_log,
+            true_all_types_log=true_sct_gep,
+            true_sct_gep_present_mask=true_sct_gep_present_mask,
+            true_cell_prop=true_cell_prop,
+            cell_prop_threshold=cell_prop_threshold,
+        )
 
     def _matched_sct_gep_supervision_loss(
         self,
