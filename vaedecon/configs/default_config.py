@@ -1716,10 +1716,13 @@ class ModelConfig(BaseModelConfig):
         if weight <= 0:
             return self
 
-        if not self.learn_gep_residual or self.learn_gep_residual_mode != "mean_centered":
+        residual_mode_ready = self.learn_gep_residual and self.learn_gep_residual_mode == "mean_centered"
+        direct_full_gep_ready = not self.learn_gep_residual
+        if not (residual_mode_ready or direct_full_gep_ready):
             raise ValueError(
                 "loss_coefficient['inter_sample_similarity_weight'] > 0 requires "
-                "learn_gep_residual=True and learn_gep_residual_mode='mean_centered'."
+                "either direct full-sctGEP mode (learn_gep_residual=False) or "
+                "learn_gep_residual=True with learn_gep_residual_mode='mean_centered'."
             )
 
         return self

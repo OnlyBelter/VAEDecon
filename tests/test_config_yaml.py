@@ -163,6 +163,23 @@ def test_inter_sample_similarity_weight_allows_mean_centered_training_config():
     assert loaded.model.loss_coefficient.inter_sample_similarity_weight == 1.0
 
 
+def test_inter_sample_similarity_weight_allows_direct_full_sct_gep_training_config():
+    loaded = VAEDeconConfig.from_dict(
+        {
+            "model": {
+                "learn_gep_residual": False,
+                "learn_gep_residual_mode": "mean_centered",
+                "loss_coefficient": {
+                    "inter_sample_similarity_weight": 1.0,
+                },
+            }
+        }
+    )
+
+    assert loaded.model.learn_gep_residual is False
+    assert loaded.model.loss_coefficient.inter_sample_similarity_weight == 1.0
+
+
 def test_encoder_output_routing_defaults_generate_encoder_aliases():
     loaded = VAEDeconConfig.from_dict(
         {
