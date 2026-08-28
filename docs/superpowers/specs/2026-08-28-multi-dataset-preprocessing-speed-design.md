@@ -5,8 +5,9 @@ Last updated: 2026-08-28
 ## Status
 
 Approved and partially implemented. Expanded on 2026-08-28 to add
-metadata-only common-gene discovery, configurable source-load parallelism, and
-group-first preprocessing to reduce peak RAM.
+metadata-only common-gene discovery, cache-local persistence of the discovered
+common gene list, configurable source-load parallelism, and group-first
+preprocessing to reduce peak RAM.
 
 ## Goal
 
@@ -91,7 +92,7 @@ This is correct but slow for many independent source files.
 Use a five-part fix:
 
 1. shared content-addressed preprocessing cache
-2. metadata-only first pass to discover the final common gene set
+2. metadata-only first pass to discover and persist the final common gene set
 3. configurable parallel source-file ingestion during first-time preprocessing
 4. group-first preprocessing to bound peak RAM
 5. shared in-run `sctGEP` query deduplication for matched targets
@@ -144,7 +145,7 @@ preprocessing settings, they will reuse the same processed dataset cache.
 
 This should provide the largest gain for repeated experiments.
 
-## Part 2: metadata-only common-gene discovery
+## Part 2: metadata-only common-gene discovery and persistence
 
 ### Problem
 
@@ -173,7 +174,31 @@ Then compute one final target gene list for the real load phase:
 1. start from the intersection across all training sources
 2. if `gene_list_file` is configured, intersect with that too while preserving
    the order defined by `gene_list_file`
-3. use this final gene list when loading the full matrices
+3. save this final gene list into the fingerprinted processed-cache directory
+4. use the saved cache-local common-gene file when loading all later full
+   matrices in that preprocessing run
+
+### Saved artifact
+
+The discovered final gene list should be written as a cache-local text file,
+for example:
+
+```text
+<processed_cache_dir>/common_gene_list.txt
+```
+
+This file becomes the single source of truth for the gene space used by that
+fingerprinted preprocessing cache.
+
+That means:
+
+- bulk source loading should read only the genes listed in
+  `common_gene_list.txt`
+- matched-target `sctGEP` loading should also align directly to
+  `common_gene_list.txt`
+- the optimized training preprocessing path should not need a later
+  `align_with_gene_list(...)` pass just to rediscover or re-slice the same gene
+  set again
 
 ### Scope boundary
 
@@ -194,6 +219,11 @@ That should reduce:
 - peak memory during preprocessing
 - total bytes read from source matrices
 - time spent aligning and transforming unused genes
+
+Because downstream readers will consume the saved common-gene list directly,
+the repeated informational message
+`16217 common genes will be used, 1617 genes will be removed.` should disappear
+from the main optimized preprocessing path.
 
 ## Part 3: configurable parallel source-file ingestion
 
@@ -434,20 +464,23 @@ Add tests for:
    cache
 3. preprocessing-sensitive config changes producing different cache keys
 4. metadata-only common-gene discovery across multiple `.h5ad` inputs
-5. `gene_list_file` intersection preserving configured gene order
-6. mixed `.csv`/`.h5ad` metadata discovery producing the correct common genes
-7. configurable worker count being honored by the preprocessing loader
-8. grouped preprocessing preserving merged sample IDs and labels in original
+5. discovered common genes being saved into the fingerprinted cache directory
+6. repeated preprocessing loads reusing the saved common-gene file
+7. `gene_list_file` intersection preserving configured gene order
+8. mixed `.csv`/`.h5ad` metadata discovery producing the correct common genes
+9. configurable worker count being honored by the preprocessing loader
+10. grouped preprocessing preserving merged sample IDs and labels in original
    file order
-9. temporary group intermediates being cleaned up after a successful run
-10. shared `sctGEP` sources being loaded once within one preprocessing run
+11. temporary group intermediates being cleaned up after a successful run
+12. shared `sctGEP` sources being loaded once within one preprocessing run
 
 ## Recommendation
 
 Implement the balanced fix:
 
 1. shared content-addressed preprocessing cache
-2. metadata-only common-gene discovery before full reads
+2. metadata-only common-gene discovery plus cache-local persistence before full
+   reads
 3. configurable conservative parallel multi-file ingestion
 4. group-first preprocessing with optional temporary intermediates
 5. in-run deduplication for shared matched-target `sctGEP` sources
