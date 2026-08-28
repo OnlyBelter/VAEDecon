@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset
 from torch.utils.data._utils.collate import default_collate
+from tqdm.auto import tqdm
 
 from ..utility.read_file import ReadH5AD
 from ..utility import non_log2log_cpm, check_dir, log_message
@@ -249,7 +250,13 @@ def _load_cached_aligned_sct_geps(
     missing_ids = [cid for cid in selected_cell_ids if cid not in cached_index]
     if missing_ids:
         sct_loader = ReadH5AD(sct_gep_fp, backed="r")
-        fetched_df = sct_loader.get_df(obs_names=missing_ids)
+        try:
+            fetched_df = sct_loader.get_df(
+                obs_names=missing_ids,
+                var_names=target_gene_list,
+            )
+        finally:
+            sct_loader.close()
         if not fetched_df.empty:
             cached_df = pd.concat([cached_df, fetched_df], axis=0)
             cached_df = cached_df[~cached_df.index.duplicated(keep="last")]
@@ -268,13 +275,17 @@ def _load_cached_aligned_sct_geps(
                 except Exception as e:
                     logger.warning(f"Failed to write SCT query cache {cache_fp}: {e}")
 
-    present_ids = [cid for cid in selected_cell_ids if cid in set(cached_df.index.tolist())]
+    cached_index = set(cached_df.index.tolist())
+    present_ids = [cid for cid in selected_cell_ids if cid in cached_index]
     if cache_sct_query_results:
         sct_geps_df_raw = cached_df.loc[present_ids, :]
     else:
         sct_loader = ReadH5AD(sct_gep_fp, backed="r")
         try:
-            sct_geps_df_raw = sct_loader.get_df(obs_names=present_ids)
+            sct_geps_df_raw = sct_loader.get_df(
+                obs_names=present_ids,
+                var_names=target_gene_list,
+            )
         finally:
             sct_loader.close()
 
@@ -353,29 +364,44 @@ def _write_true_sct_gep_targets_into(
     aligned_sct_geps_df: pd.DataFrame,
     true_sct_gep_dest: np.ndarray,
     true_sct_gep_present_mask_dest: np.ndarray,
-) -> None:
+    progress_bar: Optional[Any] = None,
+) -> int:
     """Write matched targets directly into destination arrays without a large temporary tensor."""
     if filtered_mapping_df.empty or aligned_sct_geps_df.empty:
-        return
+        return 0
 
     cell_type_to_idx = {cell_type: idx for idx, cell_type in enumerate(cell_types)}
-    for sample_idx, sample_id in enumerate(raw_bulk_sample_ids):
-        if sample_id not in filtered_mapping_df.index:
-            continue
+    sample_id_to_dataset_row = {
+        str(sample_id): int(row_positions[sample_idx])
+        for sample_idx, sample_id in enumerate(raw_bulk_sample_ids)
+    }
+    sct_row_by_id = {
+        str(cell_id): idx for idx, cell_id in enumerate(aligned_sct_geps_df.index.tolist())
+    }
+    sct_values = aligned_sct_geps_df.to_numpy(dtype=np.float32, copy=False)
 
-        dataset_row_idx = int(row_positions[sample_idx])
-        sample_rows = filtered_mapping_df.loc[[sample_id], :]
-        for _, row in sample_rows.iterrows():
-            cell_type = str(row["cell_type"])
-            selected_cell_id = str(row["selected_cell_id"])
-            cell_type_idx = cell_type_to_idx.get(cell_type)
-            if cell_type_idx is None or selected_cell_id not in aligned_sct_geps_df.index:
-                continue
-            true_sct_gep_dest[dataset_row_idx, :, cell_type_idx] = aligned_sct_geps_df.loc[selected_cell_id, :].to_numpy(
-                dtype=np.float32,
-                copy=False,
-            )
-            true_sct_gep_present_mask_dest[dataset_row_idx, cell_type_idx] = True
+    write_records: list[tuple[int, int, int]] = []
+    for row in filtered_mapping_df.reset_index().itertuples(index=False):
+        dataset_row_idx = sample_id_to_dataset_row.get(str(row.sample_id))
+        cell_type_idx = cell_type_to_idx.get(str(row.cell_type))
+        sct_row_idx = sct_row_by_id.get(str(row.selected_cell_id))
+        if dataset_row_idx is None or cell_type_idx is None or sct_row_idx is None:
+            continue
+        write_records.append((dataset_row_idx, cell_type_idx, sct_row_idx))
+
+    batched_progress = 0
+    for dataset_row_idx, cell_type_idx, sct_row_idx in write_records:
+        true_sct_gep_dest[dataset_row_idx, :, cell_type_idx] = sct_values[sct_row_idx]
+        true_sct_gep_present_mask_dest[dataset_row_idx, cell_type_idx] = True
+        batched_progress += 1
+        if progress_bar is not None and batched_progress >= 256:
+            progress_bar.update(batched_progress)
+            batched_progress = 0
+
+    if progress_bar is not None and batched_progress > 0:
+        progress_bar.update(batched_progress)
+
+    return len(write_records)
 
 
 def build_matched_sct_gep_training_targets(
@@ -1430,14 +1456,18 @@ class GEPDataset(Dataset):
             dtype=np.float32,
             shape=(n_samples, n_genes, n_cell_types),
         )
-        true_sct_gep[:] = 0.0
         true_sct_gep_present_mask = np.lib.format.open_memmap(
             true_sct_gep_present_mask_path,
             mode="w+",
             dtype=bool,
             shape=(n_samples, n_cell_types),
         )
-        true_sct_gep_present_mask[:] = False
+        # `open_memmap(..., mode="w+")` creates zero-initialized files, so skipping
+        # the explicit full-array fill avoids an immediate multi-GB write.
+        log_message(
+            "Building matched sctGEP targets "
+            f"({n_samples} samples x {n_genes} genes x {n_cell_types} cell types)..."
+        )
 
         sample_id_to_positions: Dict[str, list[int]] = {}
         for row_idx, sample_id in enumerate(sample_ids):
@@ -1501,27 +1531,53 @@ class GEPDataset(Dataset):
             if not filtered_mapping_df.empty:
                 group_entry["selected_cell_ids"].extend(filtered_mapping_df["selected_cell_id"].tolist())
 
-        for group_entry in grouped_target_sets.values():
+        for group_idx, group_entry in enumerate(grouped_target_sets.values(), start=1):
             unique_sct_cell_ids = list(dict.fromkeys(group_entry["selected_cell_ids"]))
+            log_message(
+                "Matched sctGEP group "
+                f"{group_idx}/{len(grouped_target_sets)}: loading {len(unique_sct_cell_ids)} "
+                f"reference cells from {group_entry['sct_gep_fp']}"
+            )
             aligned_sct_geps_df = _load_cached_aligned_sct_geps(
                 sct_gep_fp=Path(group_entry["sct_gep_fp"]),
                 selected_cell_ids=unique_sct_cell_ids,
                 target_gene_list=gene_list,
             )
-            for item in group_entry["items"]:
-                _write_true_sct_gep_targets_into(
-                    raw_bulk_sample_ids=item["raw_bulk_sample_ids"],
-                    row_positions=item["row_positions"],
-                    cell_types=cell_types,
-                    filtered_mapping_df=item["filtered_mapping_df"],
-                    aligned_sct_geps_df=aligned_sct_geps_df,
-                    true_sct_gep_dest=true_sct_gep,
-                    true_sct_gep_present_mask_dest=true_sct_gep_present_mask,
-                )
+            total_assignments = int(
+                sum(len(item["filtered_mapping_df"]) for item in group_entry["items"])
+            )
+            log_message(
+                "Matched sctGEP group "
+                f"{group_idx}/{len(grouped_target_sets)}: writing about {total_assignments} "
+                "sample-cell-type assignments..."
+            )
+            progress_bar = tqdm(
+                total=total_assignments,
+                desc=f"matched_sct_gep {group_idx}/{len(grouped_target_sets)}",
+                unit="assign",
+                leave=False,
+            )
+            try:
+                for item in group_entry["items"]:
+                    _write_true_sct_gep_targets_into(
+                        raw_bulk_sample_ids=item["raw_bulk_sample_ids"],
+                        row_positions=item["row_positions"],
+                        cell_types=cell_types,
+                        filtered_mapping_df=item["filtered_mapping_df"],
+                        aligned_sct_geps_df=aligned_sct_geps_df,
+                        true_sct_gep_dest=true_sct_gep,
+                        true_sct_gep_present_mask_dest=true_sct_gep_present_mask,
+                        progress_bar=progress_bar,
+                    )
+            finally:
+                progress_bar.close()
             if hasattr(true_sct_gep, "flush"):
                 true_sct_gep.flush()
             if hasattr(true_sct_gep_present_mask, "flush"):
                 true_sct_gep_present_mask.flush()
+            log_message(
+                f"Matched sctGEP group {group_idx}/{len(grouped_target_sets)} finished."
+            )
             del aligned_sct_geps_df
             gc.collect()
 
