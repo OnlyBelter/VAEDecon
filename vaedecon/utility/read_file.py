@@ -14,6 +14,35 @@ from .pub_func import (log_exp2cpm, read_df, non_log2log_cpm,
 logger = logging.getLogger(__name__)
 
 
+def _compute_log_space_cpm_stats(log_space_values) -> tuple[np.ndarray, np.ndarray]:
+    """Compute per-gene CPM mean/std from log2(CPM+1) or log2(TPM+1) values."""
+    if hasattr(log_space_values, "toarray"):
+        values = log_space_values.toarray().astype(np.float32, copy=False)
+    else:
+        values = np.asarray(log_space_values, dtype=np.float32)
+
+    if values.ndim != 2:
+        raise ValueError(f"Expected 2D expression array, got shape {values.shape}")
+    if values.shape[0] == 0:
+        n_genes = values.shape[1] if values.ndim == 2 else 0
+        zeros = np.zeros((n_genes,), dtype=np.float32)
+        return zeros, zeros
+
+    exp_linear = np.exp2(values.astype(np.float64, copy=False)) - 1.0
+    exp_linear = np.nan_to_num(exp_linear, nan=0.0, posinf=0.0, neginf=0.0)
+    exp_linear = np.clip(exp_linear, a_min=0.0, a_max=None)
+
+    lib_size = exp_linear.sum(axis=1, keepdims=True)
+    invalid_lib_size = (~np.isfinite(lib_size)) | (lib_size <= 0.0)
+    lib_size[invalid_lib_size] = 1.0
+
+    exp_cpm = (exp_linear / lib_size) * 1e6
+    exp_avg = np.mean(exp_cpm, axis=0).astype(np.float32, copy=False)
+    exp_std = np.std(exp_cpm, axis=0).astype(np.float32, copy=False)
+    exp_std = np.where(np.isfinite(exp_std), exp_std, 0.0).astype(np.float32, copy=False)
+    return exp_avg, exp_std
+
+
 class ReadH5AD(object):
     """
     Read .h5ad file and provides methods to access and process its data.
@@ -476,31 +505,79 @@ def get_gene_mean_std_across_cell_types(sct_dataset_fp: str, result_fp, gene_lis
     """Get the mean and std of gene expression values across cell types in the SCT dataset."""
     # sct_dataset_obj = ReadH5AD(sct_dataset_fp)
     # sct_dataset_df = sct_dataset_obj.get_df(convert_to_tpm=True)
+    result_fp = Path(result_fp)
     if not os.path.exists(result_fp):
         gene_list = pd.read_csv(gene_list_fp, index_col=0, header=None).index.tolist()
         cell_type_list = pd.read_csv(cell_type_fp, index_col=0, header=None).index.tolist()
-        sct_obj = ReadH5AD(sct_dataset_fp)
+        sct_obj = ReadH5AD(sct_dataset_fp, backed="r")
 
-        h5ad = sct_obj.get_h5ad()
-        h5ad_obs = h5ad.obs.copy()
-        ct2ave = {}
-        for col in cell_type_list:
-            x = h5ad[h5ad_obs[col] == 1, :]
-            x_df = pd.DataFrame(x.X, index=x.obs.index, columns=x.var.index)
-            exp_obj = ReadExp(x_df, exp_type='log_space')
-            exp_obj.align_with_gene_list(gene_list=gene_list, fill_not_exist=True)
-            exp_obj.to_tpm()
-            exp = exp_obj.get_exp()
-            exp_avg = exp.mean(axis=0)
-            exp_std = exp.std(axis=0)
-            ct2ave[col + '_avg'] = exp_avg
-            ct2ave[col + '_std'] = exp_std
-        ct2ave = pd.DataFrame(ct2ave)
-        if log2p1 is True:
-            ct2ave = np.log2(ct2ave + 1)
-        if scaling_by_constant is True:
-            ct2ave = ct2ave / scaling_factor
-        ct2ave.to_csv(result_fp, float_format='%g')
+        try:
+            h5ad = sct_obj.get_h5ad()
+            h5ad_obs = h5ad.obs.copy()
+            source_gene_names = [str(gene) for gene in h5ad.var_names.to_list()]
+            source_gene_to_idx = {gene: idx for idx, gene in enumerate(source_gene_names)}
+            aligned_gene_pairs = [
+                (target_idx, source_gene_to_idx[gene])
+                for target_idx, gene in enumerate(gene_list)
+                if gene in source_gene_to_idx
+            ]
+            target_gene_positions = [target_idx for target_idx, _ in aligned_gene_pairs]
+            source_gene_positions = [source_idx for _, source_idx in aligned_gene_pairs]
+
+            logger.info(
+                "Computing gene mean/std across %s cell types using %s/%s aligned genes from %s.",
+                len(cell_type_list),
+                len(source_gene_positions),
+                len(gene_list),
+                sct_dataset_fp,
+            )
+            if len(source_gene_positions) != len(gene_list):
+                logger.info(
+                    "Gene mean/std reference is missing %s genes from the training list; "
+                    "their mean/std values will be filled with zeros.",
+                    len(gene_list) - len(source_gene_positions),
+                )
+
+            ct2ave = {}
+            total_cell_types = len(cell_type_list)
+            for cell_type_idx, col in enumerate(cell_type_list, start=1):
+                if col not in h5ad_obs.columns:
+                    raise KeyError(
+                        f"Cell type column '{col}' not found in SCT dataset {sct_dataset_fp}"
+                    )
+
+                selected_obs_positions = np.flatnonzero(
+                    h5ad_obs[col].to_numpy(copy=False) == 1
+                )
+                logger.info(
+                    "Gene mean/std %s/%s: %s (%s cells)",
+                    cell_type_idx,
+                    total_cell_types,
+                    col,
+                    len(selected_obs_positions),
+                )
+
+                exp_avg_full = np.zeros((len(gene_list),), dtype=np.float32)
+                exp_std_full = np.zeros((len(gene_list),), dtype=np.float32)
+
+                if len(selected_obs_positions) > 0 and len(source_gene_positions) > 0:
+                    x = h5ad[selected_obs_positions, source_gene_positions]
+                    exp_avg, exp_std = _compute_log_space_cpm_stats(x.X)
+                    exp_avg_full[target_gene_positions] = exp_avg
+                    exp_std_full[target_gene_positions] = exp_std
+
+                ct2ave[col + '_avg'] = exp_avg_full
+                ct2ave[col + '_std'] = exp_std_full
+
+            ct2ave = pd.DataFrame(ct2ave, index=gene_list)
+            if log2p1 is True:
+                ct2ave = np.log2(ct2ave + 1)
+            if scaling_by_constant is True:
+                ct2ave = ct2ave / scaling_factor
+            result_fp.parent.mkdir(parents=True, exist_ok=True)
+            ct2ave.to_csv(result_fp, float_format='%g')
+        finally:
+            sct_obj.close()
 
 
 def compute_gene_mean_std_from_pooled_sc_h5ad(
