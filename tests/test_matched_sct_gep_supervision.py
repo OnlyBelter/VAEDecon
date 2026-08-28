@@ -12,6 +12,7 @@ from vaedecon.data.datasets import GEPDataset
 from vaedecon.data.datasets import build_matched_sct_gep_training_targets
 from vaedecon.models.vae.vae_model import VAE, to_log_space
 from vaedecon.utility import non_log2log_cpm
+from vaedecon.utility.read_file import ReadExp
 
 
 def _write_h5ad(path: Path, x: np.ndarray, obs_names: list[str], var_names: list[str], obs: pd.DataFrame) -> None:
@@ -448,6 +449,47 @@ def test_gepdataset_discovers_common_genes_and_preserves_gene_list_order(tmp_pat
     assert dataset.gene_list == ["gene_c", "gene_b"]
     assert dataset.sample_ids == ["sample_a", "sample_b"]
     assert dataset.data.shape == (2, 2)
+    assert (tmp_path / "processed" / "common_gene_list.txt").read_text(encoding="utf-8").splitlines() == ["gene_c", "gene_b"]
+
+
+def test_gepdataset_reuses_saved_common_gene_list_during_force_reprocess(tmp_path: Path, monkeypatch):
+    bulk_a_path = tmp_path / "bulk_a.h5ad"
+    bulk_b_path = tmp_path / "bulk_b.csv"
+    processed_dir = tmp_path / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    (processed_dir / "common_gene_list.txt").write_text("gene_c\ngene_b\n", encoding="utf-8")
+
+    _write_h5ad(
+        bulk_a_path,
+        x=np.array([[2.0, 4.0, 8.0]], dtype=np.float32),
+        obs_names=["sample_a"],
+        var_names=["gene_a", "gene_b", "gene_c"],
+        obs=pd.DataFrame({"CT1": [1.0]}, index=["sample_a"]),
+    )
+    pd.DataFrame(
+        [[3.0, 9.0, 27.0]],
+        index=["sample_b"],
+        columns=["gene_b", "gene_c", "gene_d"],
+    ).to_csv(bulk_b_path)
+
+    def _unexpected_discovery(*_args, **_kwargs):
+        raise AssertionError("Common gene discovery should not run when the cache-local gene list already exists.")
+
+    monkeypatch.setattr(datasets_module, "_discover_final_target_gene_list", _unexpected_discovery)
+
+    dataset = GEPDataset(
+        GEPDatasetConfig(
+            file_paths=[bulk_a_path, bulk_b_path],
+            processed_data_dir=processed_dir,
+            force_reprocess=True,
+            scaling_by_constant=False,
+            remove_low_var_genes=False,
+        )
+    )
+
+    assert dataset.gene_list == ["gene_c", "gene_b"]
+    assert dataset.sample_ids == ["sample_a", "sample_b"]
+    assert dataset.data.shape == (2, 2)
 
 
 def test_gepdataset_renormalizes_h5ad_after_gene_removal_before_recovering_log_space(tmp_path: Path):
@@ -631,6 +673,66 @@ def test_gepdataset_writes_true_sct_gep_directly_to_npy_cache(tmp_path: Path):
 
     assert (processed_dir / "true_sct_gep.npy").exists()
     assert (processed_dir / "true_sct_gep_present_mask.npy").exists()
+    assert dataset.true_sct_gep.shape == (2, 2, 2)
+    assert dataset.true_sct_gep_present_mask.tolist() == [[True, True], [True, False]]
+
+
+def test_gepdataset_builds_matched_targets_without_align_with_gene_list(tmp_path: Path, monkeypatch):
+    genes = ["gene_a", "gene_b"]
+    bulk_path = tmp_path / "bulk.h5ad"
+    ref_sct_path = tmp_path / "ref_sct.h5ad"
+    mapping_path = tmp_path / "sample2cell.csv"
+
+    _write_h5ad(
+        bulk_path,
+        x=np.array([[2.0, 4.0], [3.0, 9.0]], dtype=np.float32),
+        obs_names=["sample_1", "sample_2"],
+        var_names=genes,
+        obs=pd.DataFrame(
+            {
+                "CT1": [0.7, 0.8],
+                "CT2": [0.3, 0.2],
+            },
+            index=["sample_1", "sample_2"],
+        ),
+    )
+    _write_h5ad(
+        ref_sct_path,
+        x=np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float32),
+        obs_names=["cell_a", "cell_b", "cell_c"],
+        var_names=genes,
+        obs=pd.DataFrame(index=["cell_a", "cell_b", "cell_c"]),
+    )
+    pd.DataFrame(
+        {
+            "cell_type": ["CT1", "CT2", "CT1"],
+            "selected_cell_id": ["cell_a", "cell_b", "cell_c"],
+        },
+        index=["sample_1", "sample_1", "sample_2"],
+    ).to_csv(mapping_path)
+
+    def _unexpected_align(*_args, **_kwargs):
+        raise AssertionError("align_with_gene_list should not be used in the optimized matched-target path.")
+
+    monkeypatch.setattr(ReadExp, "align_with_gene_list", _unexpected_align)
+
+    dataset = GEPDataset(
+        GEPDatasetConfig(
+            file_paths=[bulk_path],
+            processed_data_dir=tmp_path / "processed",
+            force_reprocess=True,
+            scaling_by_constant=False,
+            remove_low_var_genes=False,
+            training_target_sets={
+                "Train_set1": {
+                    "training_set_file_path": bulk_path,
+                    "training_set_sample2cell_id_file_path": mapping_path,
+                    "training_sct_gep_file_path": ref_sct_path,
+                }
+            },
+        )
+    )
+
     assert dataset.true_sct_gep.shape == (2, 2, 2)
     assert dataset.true_sct_gep_present_mask.tolist() == [[True, True], [True, False]]
 

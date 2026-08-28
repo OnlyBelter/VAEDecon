@@ -15,7 +15,7 @@ import pandas as pd
 from torch.utils.data import Dataset
 from torch.utils.data._utils.collate import default_collate
 
-from ..utility.read_file import ReadExp, ReadH5AD
+from ..utility.read_file import ReadH5AD
 from ..utility import non_log2log_cpm, check_dir, log_message
 from ..configs import GEPDatasetConfig
 
@@ -159,6 +159,40 @@ def _discover_final_target_gene_list(
     return final_genes
 
 
+def _load_or_create_cached_common_gene_list(
+    file_paths: Sequence[Union[str, Path]],
+    *,
+    gene_list_file: Optional[Union[str, Path]] = None,
+    cache_file_path: Optional[Union[str, Path]] = None,
+) -> list[str]:
+    """Load the cache-local common gene list when available, otherwise discover and save it."""
+    cache_path = Path(cache_file_path) if cache_file_path is not None else None
+    if cache_path is not None and cache_path.exists():
+        cached_genes = [str(gene) for gene in load_gene_list(cache_path)]
+        if cached_genes:
+            log_message(f"Loaded {len(cached_genes)} common target genes from {cache_path}")
+            return cached_genes
+        logger.warning(f"Cached common gene list is empty at {cache_path}; rediscovering it.")
+
+    final_genes = _discover_final_target_gene_list(
+        file_paths=file_paths,
+        gene_list_file=gene_list_file,
+    )
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        GEPCacheManager.save_list_txt(final_genes, cache_path)
+        log_message(f"Saved {len(final_genes)} common target genes to {cache_path}")
+        return [str(gene) for gene in load_gene_list(cache_path)]
+    return final_genes
+
+
+def _reindex_expression_to_gene_list(exp_df: pd.DataFrame, target_gene_list: Sequence[str]) -> pd.DataFrame:
+    """Reindex expression columns to the requested gene order, filling missing genes with zeros."""
+    if exp_df.empty:
+        return pd.DataFrame(columns=list(target_gene_list), index=exp_df.index)
+    return exp_df.reindex(columns=list(target_gene_list), fill_value=0.0)
+
+
 def _load_bulk_sample_ids_from_file(file_path: Union[str, Path]) -> list[str]:
     """Load bulk sample IDs from a training expression file without full preprocessing."""
     path = Path(file_path)
@@ -239,14 +273,15 @@ def _load_cached_aligned_sct_geps(
         sct_geps_df_raw = cached_df.loc[present_ids, :]
     else:
         sct_loader = ReadH5AD(sct_gep_fp, backed="r")
-        sct_geps_df_raw = sct_loader.get_df(obs_names=present_ids)
+        try:
+            sct_geps_df_raw = sct_loader.get_df(obs_names=present_ids)
+        finally:
+            sct_loader.close()
 
     if sct_geps_df_raw.empty:
         return pd.DataFrame(columns=target_gene_list)
 
-    sct_exp_processor = ReadExp(sct_geps_df_raw, exp_type="log_space")
-    sct_exp_processor.align_with_gene_list(gene_list=target_gene_list, fill_not_exist=True)
-    return sct_exp_processor.get_exp()
+    return _reindex_expression_to_gene_list(sct_geps_df_raw, target_gene_list)
 
 
 def _filter_sample2cell_mapping(
@@ -479,6 +514,7 @@ class GEPCacheManager:
         self.true_sct_gep_present_mask_path = self.cache_dir / (
             "true_sct_gep_present_mask.npz" if self.compress else "true_sct_gep_present_mask.npy"
         )
+        self.common_gene_list_path = self.cache_dir / "common_gene_list.txt"
         self.gene_list_path = self.cache_dir / "gene_list.txt"
         self.cell_types_path = self.cache_dir / "cell_types.txt"
         self.sample_ids_path = self.cache_dir / "sample_ids.txt"
@@ -673,6 +709,7 @@ class GEPPreprocessor:
         self,
         file_paths: Sequence[Union[str, Path]],
         gene_list_file: Optional[Union[str, Path]] = None,
+        common_gene_list_path: Optional[Union[str, Path]] = None,
         remove_low_var_genes: bool = False,
         min_var: float = 1.0,
         cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None,
@@ -689,9 +726,10 @@ class GEPPreprocessor:
             self.max_parallel_source_file_loads = max(1, int(max_parallel_source_file_loads))
 
         log_message("Step 1: Discovering common genes...")
-        initial_target_gene_list = _discover_final_target_gene_list(
+        initial_target_gene_list = _load_or_create_cached_common_gene_list(
             file_paths=file_paths,
             gene_list_file=gene_list_file,
+            cache_file_path=common_gene_list_path,
         )
 
         log_message("Step 2: Loading groups and staging raw intermediates...")
@@ -1273,6 +1311,7 @@ class GEPDataset(Dataset):
         processed = preprocessor.run(
             file_paths=self.config.file_paths,
             gene_list_file=self.config.gene_list_file,
+            common_gene_list_path=self.cache.common_gene_list_path,
             remove_low_var_genes=self.config.remove_low_var_genes,
             min_var=self.config.min_var,
             cell_cell2ave_exp_file_path=self.config.cell_cell2ave_exp_file_path,
