@@ -877,7 +877,7 @@ class VAE(BaseAE):
             recon_x_all_types_unscaled_log = _clamp_log2_expression_before_exp(
                 recon_x_all_types_log * self.scaling_factor,
                 min_value=0.0,
-                max_value=self.scaling_factor,
+                max_value=20.0,
             )
             recon_x_all_types_log = recon_x_all_types_unscaled_log / self.scaling_factor
             recon_x_all_types_cpm = log_exp2cpm_tensor(
@@ -1111,26 +1111,29 @@ class VAE(BaseAE):
         # Identify genes with low mean or low std,
         # whose z-scores are unreliable for KL regularization.
         # Replace their predicted values with the reference mean plus small Gaussian noise.
-        low_mean_threshold = getattr(lo, "low_mean_threshold", 2.0)
-        low_std_threshold = getattr(lo, "low_std_threshold", 1.0)
-        mask = (self.g_mean_non_log < low_mean_threshold) | (self.g_std_non_log < low_std_threshold)  # (G, C)
-        mask = mask.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
+        low_mean_std_weight = float(getattr(lo, "low_mean_std_weight", 0.0) or 0.0)
+        if low_mean_std_weight > 0:
+            low_mean_threshold = getattr(lo, "low_mean_threshold", 2.0)
+            low_std_threshold = getattr(lo, "low_std_threshold", 1.0)
+            mask = (self.g_mean_non_log < low_mean_threshold) | (self.g_std_non_log < low_std_threshold)  # (G, C)
+            mask = mask.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
 
-        g_mean_expanded = self.g_mean_non_log.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
-        # g_std_expanded = self.g_std_non_log.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
-        g_mean_expanded_log = to_log_space(g_mean_expanded, self.scaling_factor)  # (B, G, C)
-        if recon_x_all_types_log is None:
-            if recon_x_all_types_cpm is None:
-                raise ValueError(
-                    "Either recon_x_all_types_log or recon_x_all_types_cpm is required "
-                    "for per-cell-type auxiliary losses."
-                )
-            recon_x_all_types_log = to_log_space(recon_x_all_types_cpm, self.scaling_factor)
-        mask_f = mask.to(dtype=recon_x_all_types_log.dtype)
-        diff2 = (recon_x_all_types_log - g_mean_expanded_log).pow(2) * mask_f
-        denom = mask_f.sum(dim=(1, 2)).clamp_min(1.0)
-        low_mean_std_gene_loss_per_sample = diff2.sum(dim=(1, 2)) / denom  # (B,)
-
+            g_mean_expanded = self.g_mean_non_log.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
+            # g_std_expanded = self.g_std_non_log.unsqueeze(0).expand(batch_size, n_gene, -1)  # (B, G, C)
+            g_mean_expanded_log = to_log_space(g_mean_expanded, self.scaling_factor)  # (B, G, C)
+            if recon_x_all_types_log is None:
+                if recon_x_all_types_cpm is None:
+                    raise ValueError(
+                        "Either recon_x_all_types_log or recon_x_all_types_cpm is required "
+                        "for per-cell-type auxiliary losses."
+                    )
+                recon_x_all_types_log = to_log_space(recon_x_all_types_cpm, self.scaling_factor)
+            mask_f = mask.to(dtype=recon_x_all_types_log.dtype)
+            diff2 = (recon_x_all_types_log - g_mean_expanded_log).pow(2) * mask_f
+            denom = mask_f.sum(dim=(1, 2)).clamp_min(1.0)
+            low_mean_std_gene_loss_per_sample = diff2.sum(dim=(1, 2)) / denom  # (B,)
+        else:
+            low_mean_std_gene_loss_per_sample = torch.zeros((batch_size,), device=device)
         # --- 2.75 Cross-sample gene-variance matching loss ---
         cross_sample_gene_var_weight = float(getattr(lo, "cross_sample_gene_var_weight", 0.0) or 0.0)
         if cross_sample_gene_var_weight > 0 and batch_size >= 2:
