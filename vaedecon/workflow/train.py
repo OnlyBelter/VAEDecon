@@ -765,7 +765,7 @@ class VAEDeconTrainer:
             for set_name, cfg in sorted(training_target_sets.items())
         }
         payload = {
-            "version": 1,
+            "version": 2,
             "file_paths": [
                 _resolve_path_for_fingerprint(path)
                 for path in training_file_paths
@@ -815,10 +815,13 @@ class VAEDeconTrainer:
             scaling_by_constant=self.config.data.scaling_by_constant,
             remove_low_var_genes=self.config.data.remove_low_var_genes,
             force_reprocess=self.config.data.force_reprocess,
+            max_parallel_source_file_loads=self.config.data.max_parallel_source_file_loads,
             use_memmap=self.config.data.use_memmap,
             chunk_size=self.config.data.chunk_size,
             min_var=self.config.data.min_var,
             scaling_factor=self.config.data.scaling_factor,
+            gene_list_file=self.config.data.gene_list_file,
+            cell_cell2ave_exp_file_path=self.config.data.cell_cell2ave_exp_file_path,
             gene_mean_std_source=self.config.data.gene_mean_std_source,
             gene_mean_std_sct_gep_file_path=self.config.data.gene_mean_std_sct_gep_file_path,
             sct_gep_file_path=self.config.data.sct_gep_file_path,

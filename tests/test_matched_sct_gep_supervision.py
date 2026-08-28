@@ -11,6 +11,7 @@ from vaedecon.configs.default_config import GEPDatasetConfig
 from vaedecon.data.datasets import GEPDataset
 from vaedecon.data.datasets import build_matched_sct_gep_training_targets
 from vaedecon.models.vae.vae_model import VAE, to_log_space
+from vaedecon.utility import non_log2log_cpm
 
 
 def _write_h5ad(path: Path, x: np.ndarray, obs_names: list[str], var_names: list[str], obs: pd.DataFrame) -> None:
@@ -412,6 +413,168 @@ def test_gepdataset_grouped_bulk_loading_preserves_input_order(tmp_path: Path):
         "Train_set3::sample_c",
     ]
     assert dataset.true_sct_gep_present_mask.tolist() == [[True], [True], [True]]
+
+
+def test_gepdataset_discovers_common_genes_and_preserves_gene_list_order(tmp_path: Path):
+    h5ad_path = tmp_path / "bulk_a.h5ad"
+    csv_path = tmp_path / "bulk_b.csv"
+    gene_list_path = tmp_path / "gene_list.txt"
+
+    _write_h5ad(
+        h5ad_path,
+        x=np.array([[2.0, 4.0, 8.0]], dtype=np.float32),
+        obs_names=["sample_a"],
+        var_names=["gene_a", "gene_b", "gene_c"],
+        obs=pd.DataFrame({"CT1": [1.0]}, index=["sample_a"]),
+    )
+    pd.DataFrame(
+        [[3.0, 9.0, 27.0]],
+        index=["sample_b"],
+        columns=["gene_b", "gene_c", "gene_d"],
+    ).to_csv(csv_path)
+    gene_list_path.write_text("gene_c\ngene_b\ngene_x\n", encoding="utf-8")
+
+    dataset = GEPDataset(
+        GEPDatasetConfig(
+            file_paths=[h5ad_path, csv_path],
+            processed_data_dir=tmp_path / "processed",
+            force_reprocess=True,
+            scaling_by_constant=False,
+            remove_low_var_genes=False,
+            gene_list_file=gene_list_path,
+        )
+    )
+
+    assert dataset.gene_list == ["gene_c", "gene_b"]
+    assert dataset.sample_ids == ["sample_a", "sample_b"]
+    assert dataset.data.shape == (2, 2)
+
+
+def test_gepdataset_renormalizes_h5ad_after_gene_removal_before_recovering_log_space(tmp_path: Path):
+    h5ad_path = tmp_path / "bulk_a.h5ad"
+    gene_list_path = tmp_path / "gene_list.txt"
+
+    full_tpm = np.array([[250000.0, 250000.0, 500000.0]], dtype=np.float32)
+    full_log = np.log2(full_tpm + 1.0).astype(np.float32)
+    _write_h5ad(
+        h5ad_path,
+        x=full_log,
+        obs_names=["sample_a"],
+        var_names=["gene_a", "gene_b", "gene_c"],
+        obs=pd.DataFrame({"CT1": [1.0]}, index=["sample_a"]),
+    )
+    gene_list_path.write_text("gene_b\ngene_c\n", encoding="utf-8")
+
+    dataset = GEPDataset(
+        GEPDatasetConfig(
+            file_paths=[h5ad_path],
+            processed_data_dir=tmp_path / "processed",
+            force_reprocess=True,
+            scaling_by_constant=False,
+            remove_low_var_genes=False,
+            gene_list_file=gene_list_path,
+        )
+    )
+
+    expected = non_log2log_cpm(
+        pd.DataFrame([[250000.0, 500000.0]], index=["sample_a"], columns=["gene_b", "gene_c"]),
+        transpose=False,
+    )
+
+    assert dataset.gene_list == ["gene_b", "gene_c"]
+    np.testing.assert_allclose(dataset.data[0], expected.iloc[0].to_numpy(dtype=np.float32), rtol=1e-4, atol=1e-3)
+
+
+def test_gepdataset_honors_configured_parallel_load_worker_limit(tmp_path: Path, monkeypatch):
+    genes = ["gene_a", "gene_b"]
+    bulk_paths = [tmp_path / f"bulk_{i}.h5ad" for i in range(3)]
+    mapping_paths = [tmp_path / f"sample2cell_{i}.csv" for i in range(3)]
+    ref_sct_path = tmp_path / "shared_ref_sct.h5ad"
+
+    for idx, (bulk_path, mapping_path) in enumerate(zip(bulk_paths, mapping_paths, strict=True), start=1):
+        _write_h5ad(
+            bulk_path,
+            x=np.array([[float(idx), float(idx + 1)]], dtype=np.float32),
+            obs_names=[f"sample_{idx}"],
+            var_names=genes,
+            obs=pd.DataFrame({"CT1": [1.0]}, index=[f"sample_{idx}"]),
+        )
+        pd.DataFrame(
+            {"cell_type": ["CT1"], "selected_cell_id": [f"cell_{idx}"]},
+            index=[f"sample_{idx}"],
+        ).to_csv(mapping_path)
+
+    _write_h5ad(
+        ref_sct_path,
+        x=np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float32),
+        obs_names=["cell_1", "cell_2", "cell_3"],
+        var_names=genes,
+        obs=pd.DataFrame(index=["cell_1", "cell_2", "cell_3"]),
+    )
+
+    recorded_workers: list[int] = []
+
+    class RecordingExecutor:
+        def __init__(self, max_workers):
+            recorded_workers.append(int(max_workers))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, func, iterable):
+            return [func(item) for item in iterable]
+
+    monkeypatch.setattr(datasets_module, "ThreadPoolExecutor", RecordingExecutor)
+
+    GEPDataset(
+        GEPDatasetConfig(
+            file_paths=bulk_paths,
+            processed_data_dir=tmp_path / "processed",
+            force_reprocess=True,
+            scaling_by_constant=False,
+            remove_low_var_genes=False,
+            max_parallel_source_file_loads=2,
+            training_target_sets={
+                f"Train_set{i}": {
+                    "training_set_file_path": bulk_path,
+                    "training_set_sample2cell_id_file_path": mapping_path,
+                    "training_sct_gep_file_path": ref_sct_path,
+                }
+                for i, (bulk_path, mapping_path) in enumerate(zip(bulk_paths, mapping_paths, strict=True), start=1)
+            },
+        )
+    )
+
+    assert recorded_workers == [2]
+
+
+def test_gepdataset_cleans_up_temporary_group_intermediates(tmp_path: Path):
+    genes = ["gene_a", "gene_b"]
+    bulk_path = tmp_path / "bulk.h5ad"
+
+    _write_h5ad(
+        bulk_path,
+        x=np.array([[2.0, 4.0]], dtype=np.float32),
+        obs_names=["sample_1"],
+        var_names=genes,
+        obs=pd.DataFrame({"CT1": [1.0]}, index=["sample_1"]),
+    )
+
+    processed_dir = tmp_path / "processed"
+    GEPDataset(
+        GEPDatasetConfig(
+            file_paths=[bulk_path],
+            processed_data_dir=processed_dir,
+            force_reprocess=True,
+            scaling_by_constant=False,
+            remove_low_var_genes=False,
+        )
+    )
+
+    assert not (processed_dir / "_tmp_preprocess").exists()
 
 
 def test_matched_sct_gep_loss_masks_low_prop_cell_types():

@@ -9,7 +9,7 @@ from pathlib import Path
 from scipy.sparse import csr_matrix
 from sklearn import preprocessing as pp
 from .pub_func import (log_exp2cpm, read_df, non_log2log_cpm,
-                       non_log2cpm, get_inx2cell_type, log_message)
+                       non_log2cpm, get_inx2cell_type)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ class ReadH5AD(object):
 
     def get_df(self,
                obs_names: Optional[List[str]] = None,
+               var_names: Optional[List[str]] = None,
                result_file_path: Optional[Union[str, Path]] = None,
                convert_to_tpm: bool = False,  # Note: This implies input is log-transformed
                scaling_by_sample: bool = False) -> pd.DataFrame:
@@ -50,6 +51,8 @@ class ReadH5AD(object):
         Args:
             obs_names: Optional list of observation names (sample/cell IDs) to fetch.
                        If None, all observations from self.dataset are processed.
+            var_names: Optional list of variable names (genes) to fetch.
+                       If None, all genes from self.dataset are processed.
             result_file_path: Optional path to save the resulting DataFrame as a CSV.
             convert_to_tpm: If True, attempts to convert data (assumed to be log-transformed
                               counts like log2(X+1)) to TPM. Requires a valid log_exp2cpm function.
@@ -64,14 +67,16 @@ class ReadH5AD(object):
 
         if self.dataset.n_obs == 0:
             logger.warning(f"Source AnnData object from {self.file_path} has 0 observations.")
-            return pd.DataFrame(columns=self.dataset.var_names.to_list())
+            return pd.DataFrame(columns=self.dataset.var_names.to_list() if var_names is None else list(var_names))
 
         adata_slice: an.AnnData
+        actual_obs_to_slice = None
+        actual_vars_to_slice = None
 
         if obs_names is not None:
             if not obs_names:  # Handle empty list explicitly
                 logger.warning("Empty obs_names list provided to get_df. Returning empty DataFrame.")
-                return pd.DataFrame(columns=self.dataset.var_names.to_list())
+                return pd.DataFrame(columns=self.dataset.var_names.to_list() if var_names is None else list(var_names))
 
             # Filter provided obs_names to those actually present in the AnnData object's index
             valid_obs_mask = self.dataset.obs_names.isin(obs_names)
@@ -83,30 +88,49 @@ class ReadH5AD(object):
                     f"None of the {len(obs_names)} provided obs_names (e.g., {requested_preview}) "
                     f"were found in the dataset from {self.file_path}. Returning empty DataFrame."
                 )
-                return pd.DataFrame(columns=self.dataset.var_names.to_list())
+                return pd.DataFrame(columns=self.dataset.var_names.to_list() if var_names is None else list(var_names))
 
             logger.info(f"Subsetting AnnData for {len(actual_obs_to_slice)} requested observations.")
-            adata_view = self.dataset[actual_obs_to_slice, :]
+        if var_names is not None:
+            if not var_names:
+                logger.warning("Empty var_names list provided to get_df. Returning empty DataFrame.")
+                return pd.DataFrame(index=self.dataset.obs_names.to_list() if obs_names is None else actual_obs_to_slice, columns=[])
+
+            valid_var_mask = self.dataset.var_names.isin(var_names)
+            actual_vars_to_slice = self.dataset.var_names[valid_var_mask].to_list()
+            if not actual_vars_to_slice:
+                requested_preview = var_names[:min(5, len(var_names))]
+                logger.warning(
+                    f"None of the {len(var_names)} provided var_names (e.g., {requested_preview}) "
+                    f"were found in the dataset from {self.file_path}. Returning empty DataFrame."
+                )
+                return pd.DataFrame(index=self.dataset.obs_names.to_list() if obs_names is None else actual_obs_to_slice, columns=[])
+
+        if obs_names is None and var_names is None:
+            # Process the entire dataset.
+            # Making a copy ensures that self.dataset remains unchanged by downstream processing.
+            if getattr(self.dataset, "isbacked", False):
+                raise ValueError(
+                    "Reading the full dataset in backed mode would load everything into memory. "
+                    "Please pass obs_names or var_names to subset the AnnData object."
+                )
+            adata_slice = self.dataset.copy()
+            logger.info(f"Processing all {self.dataset.n_obs} observations from {self.file_path}.")
+        else:
+            adata_view = self.dataset[
+                actual_obs_to_slice if obs_names is not None else slice(None),
+                actual_vars_to_slice if var_names is not None else slice(None),
+            ]
             # In backed mode, AnnData.copy() requires a filename. Use to_memory() for in-RAM processing.
             if getattr(self.dataset, "isbacked", False):
                 adata_slice = adata_view.to_memory()
             else:
                 # Slicing AnnData usually returns a view. .copy() makes it an independent object in memory.
                 adata_slice = adata_view.copy()
-        else:
-            # Process the entire dataset.
-            # Making a copy ensures that self.dataset remains unchanged by downstream processing.
-            if getattr(self.dataset, "isbacked", False):
-                raise ValueError(
-                    "Reading the full dataset in backed mode would load everything into memory. "
-                    "Please pass obs_names to subset the AnnData object."
-                )
-            adata_slice = self.dataset.copy()
-            logger.info(f"Processing all {self.dataset.n_obs} observations from {self.file_path}.")
 
         if adata_slice.n_obs == 0:  # Safeguard if slicing resulted in empty
             logger.warning("Resulting AnnData slice has 0 observations. Returning empty DataFrame.")
-            return pd.DataFrame(columns=self.dataset.var_names.to_list())
+            return pd.DataFrame(columns=adata_slice.var_names.to_list())
 
         # Extract expression data .X
         # Convert to dense NumPy array if sparse, ensure float32
@@ -174,6 +198,18 @@ class ReadH5AD(object):
         Get the underlying AnnData object.
         """
         return self.dataset
+
+    def get_var_names(self) -> list[str]:
+        """Get gene names without materializing the expression matrix."""
+        return self.dataset.var_names.to_list()
+
+    def close(self) -> None:
+        """Close a backed AnnData handle when present."""
+        if getattr(self.dataset, "isbacked", False):
+            try:
+                self.dataset.file.close()
+            except Exception:
+                pass
 
 
 class ReadExp(object):

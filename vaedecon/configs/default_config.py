@@ -596,6 +596,8 @@ class DataConfig(BaseConfig):
     # Additional files
     pred_cell_prop_file_path: Optional[str] = None
     cell_type2ave_exp_file_path: Optional[str] = None
+    gene_list_file: Optional[str | Path] = None
+    cell_cell2ave_exp_file_path: Optional[str | Path] = None
     # PPI and Pathway file paths
     ppi_file_path: Optional[Path] = Field(
         default=None,
@@ -743,6 +745,7 @@ class DataConfig(BaseConfig):
     remove_low_var_genes: bool = True  # If True, perform low-variance gene filtering.
     min_var: float = 1.0  # Minimum variance threshold for gene filtering (if remove_low_var_genes is True).
     force_reprocess: bool = False  # If True, ignore cache and re-run preprocessing.
+    max_parallel_source_file_loads: int = 2  # Conservative default to avoid server OOM during multi-file loads.
 
     use_memmap: bool = True  # Use np.memmap for .npy cache files to reduce RAM pressure.
     chunk_size: int = 10000  # Chunk size for chunked transform. Increase for speed, decrease for memory.
@@ -802,6 +805,7 @@ class GEPDatasetConfig(DataConfig):
     remove_low_var_genes: bool = False
     min_var: float = 1.0
     cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None
+    max_parallel_source_file_loads: int = 2
 
     use_memmap: bool = True
     chunk_size: int = 10000

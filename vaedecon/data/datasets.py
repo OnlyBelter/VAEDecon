@@ -2,6 +2,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import gc
 import json
+import shutil
 import warnings
 from collections import OrderedDict
 from pathlib import Path
@@ -25,7 +26,7 @@ console = logging.StreamHandler()
 logger.addHandler(console)
 logger.setLevel(logging.INFO)
 
-_MAX_PARALLEL_SOURCE_FILE_LOADS = 4
+_DEFAULT_MAX_PARALLEL_SOURCE_FILE_LOADS = 2
 
 
 class DatasetOutput(OrderedDict):
@@ -111,12 +112,62 @@ def load_gene_list(file_path: Path) -> list[str]:
     return gene_list
 
 
+def _read_source_gene_names(file_path: Union[str, Path]) -> list[str]:
+    """Read only gene names from one source file without materializing full data."""
+    path = Path(file_path)
+    path_str = str(path)
+    if path_str.endswith(".h5ad"):
+        h5ad_obj = ReadH5AD(path, backed="r")
+        try:
+            return [str(gene) for gene in h5ad_obj.get_var_names()]
+        finally:
+            h5ad_obj.close()
+    if path_str.endswith(".csv"):
+        header_df = pd.read_csv(path, nrows=0)
+        return [str(col) for col in header_df.columns.tolist()[1:]]
+    raise ValueError(f"Unrecognized file format: {path}")
+
+
+def _ordered_intersection(base_order: Sequence[str], keep: set[str]) -> list[str]:
+    """Return items from base_order that are present in keep, preserving order."""
+    return [item for item in base_order if item in keep]
+
+
+def _discover_final_target_gene_list(
+    file_paths: Sequence[Union[str, Path]],
+    gene_list_file: Optional[Union[str, Path]] = None,
+) -> list[str]:
+    """Compute the final ordered common gene list before reading full matrices."""
+    if not file_paths:
+        raise ValueError("No data loaded. Please check file_paths.")
+
+    source_gene_lists = [_read_source_gene_names(path_like) for path_like in file_paths]
+    common_gene_set = set(source_gene_lists[0])
+    for gene_list in source_gene_lists[1:]:
+        common_gene_set &= set(gene_list)
+
+    if gene_list_file is not None:
+        configured_gene_list = [str(gene) for gene in load_gene_list(Path(gene_list_file))]
+        final_genes = _ordered_intersection(configured_gene_list, common_gene_set)
+    else:
+        final_genes = _ordered_intersection(source_gene_lists[0], common_gene_set)
+
+    if not final_genes:
+        raise ValueError("No common genes remain after source intersection and configured gene filtering.")
+
+    log_message(f"Discovered {len(final_genes)} common target genes before full matrix loading.")
+    return final_genes
+
+
 def _load_bulk_sample_ids_from_file(file_path: Union[str, Path]) -> list[str]:
     """Load bulk sample IDs from a training expression file without full preprocessing."""
     path = Path(file_path)
     if str(path).endswith(".h5ad"):
-        h5ad_obj = ReadH5AD(path)
-        return h5ad_obj.get_h5ad().obs_names.to_list()
+        h5ad_obj = ReadH5AD(path, backed="r")
+        try:
+            return h5ad_obj.get_h5ad().obs_names.to_list()
+        finally:
+            h5ad_obj.close()
     if str(path).endswith(".csv"):
         df = pd.read_csv(path, index_col=0)
         return df.index.astype(str).tolist()
@@ -324,21 +375,38 @@ def _load_dataset_frames_from_path(
     path_like: Union[str, Path],
     *,
     namespace: Optional[str] = None,
+    target_gene_list: Optional[Sequence[str]] = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load one source file into aligned expression and label DataFrames."""
     path_str = str(path_like)
     log_message(f"Reading data from {path_str}")
 
     if path_str.endswith(".h5ad"):
-        h5ad_obj = ReadH5AD(path_str)
-        gep_data_df = h5ad_obj.get_df(convert_to_tpm=True)
-        if gep_data_df.values.dtype != np.float32:
-            gep_data_df = gep_data_df.astype(np.float32)
-        cell_prop_df = h5ad_obj.get_cell_fraction()
+        h5ad_obj = ReadH5AD(path_str, backed="r" if target_gene_list is not None else None)
+        try:
+            # When we subset genes here, convert_to_tpm=True renormalizes the remaining
+            # genes to TPM before later preprocessing steps recover log2(TPM + 1).
+            gep_data_df = h5ad_obj.get_df(
+                convert_to_tpm=True,
+                var_names=list(target_gene_list) if target_gene_list is not None else None,
+            )
+            if gep_data_df.values.dtype != np.float32:
+                gep_data_df = gep_data_df.astype(np.float32)
+            cell_prop_df = h5ad_obj.get_cell_fraction()
+        finally:
+            h5ad_obj.close()
         if cell_prop_df is None:
             cell_prop_df = pd.DataFrame(index=gep_data_df.index)
     elif path_str.endswith(".csv"):
-        gep_data_df = pd.read_csv(path_str, index_col=0)
+        if target_gene_list is not None:
+            header_df = pd.read_csv(path_str, nrows=0)
+            index_col_name = header_df.columns.tolist()[0]
+            available_genes = set(str(col) for col in header_df.columns.tolist()[1:])
+            selected_genes = [str(gene) for gene in target_gene_list if str(gene) in available_genes]
+            gep_data_df = pd.read_csv(path_str, index_col=0, usecols=[index_col_name] + selected_genes)
+            gep_data_df = gep_data_df.loc[:, selected_genes]
+        else:
+            gep_data_df = pd.read_csv(path_str, index_col=0)
         cell_prop_df = pd.DataFrame(index=gep_data_df.index)
     else:
         raise ValueError(f"Unrecognized file format: {path_str}")
@@ -558,8 +626,15 @@ class GEPPreprocessor:
     - chunked transformation with memory-aware behavior
     """
 
-    def __init__(self, chunk_size: int = 10000):
+    def __init__(
+        self,
+        chunk_size: int = 10000,
+        max_parallel_source_file_loads: int = _DEFAULT_MAX_PARALLEL_SOURCE_FILE_LOADS,
+        temp_dir: Optional[Union[str, Path]] = None,
+    ):
         self.chunk_size = chunk_size
+        self.max_parallel_source_file_loads = max(1, int(max_parallel_source_file_loads))
+        self.temp_dir = Path(temp_dir) if temp_dir is not None else None
 
     def run(
         self,
@@ -570,54 +645,78 @@ class GEPPreprocessor:
         cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None,
         sample_id_namespace_by_path: Optional[Dict[str, str]] = None,
         source_group_key_by_path: Optional[Dict[str, str]] = None,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        max_parallel_source_file_loads: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         End-to-end preprocessing pipeline.
         Returns:
-            gep_data_df: processed expression data
-            cell_prop_df: matched cell proportion labels if available
+            dict containing final arrays and metadata
         """
-        # Step 1: Load and merge data
-        log_message("Step 1: Loading and merging data...")
-        gep_data_df, cell_prop_df = self._load_and_merge_data(
+        if max_parallel_source_file_loads is not None:
+            self.max_parallel_source_file_loads = max(1, int(max_parallel_source_file_loads))
+
+        log_message("Step 1: Discovering common genes...")
+        initial_target_gene_list = _discover_final_target_gene_list(
             file_paths=file_paths,
-            sample_id_namespace_by_path=sample_id_namespace_by_path,
-            source_group_key_by_path=source_group_key_by_path,
+            gene_list_file=gene_list_file,
         )
 
-        # Step 2: Gene filtering
-        log_message("Step 2: Gene filtering...")
-        if gene_list_file is not None:
-            gep_data_df = self._apply_gene_list_filter(gep_data_df, Path(gene_list_file))
-
-        if remove_low_var_genes:
-            ref_path = Path(cell_cell2ave_exp_file_path) if cell_cell2ave_exp_file_path else None
-            gep_data_df = self._apply_low_var_gene_removal(
-                gep_data_df=gep_data_df,
-                min_var=min_var,
-                cell_cell2ave_exp_file_path=ref_path
+        log_message("Step 2: Loading groups and staging raw intermediates...")
+        self._prepare_temp_dir()
+        try:
+            staged = self._stage_group_raw_intermediates(
+                file_paths=file_paths,
+                target_gene_list=initial_target_gene_list,
+                sample_id_namespace_by_path=sample_id_namespace_by_path,
+                source_group_key_by_path=source_group_key_by_path,
             )
 
-        # Step 3: Transformation
-        log_message("Step 3: Applying transformations...")
-        gep_data_df = self._apply_transformation_chunked(gep_data_df, chunk_size=self.chunk_size)
+            final_gene_list = initial_target_gene_list
+            if remove_low_var_genes:
+                log_message("Step 3: Applying low-variance gene filtering...")
+                ref_path = Path(cell_cell2ave_exp_file_path) if cell_cell2ave_exp_file_path else None
+                final_gene_list = self._apply_low_var_gene_removal(
+                    gene_list=initial_target_gene_list,
+                    gene_sums=staged["gene_sums"],
+                    gene_squared_sums=staged["gene_squared_sums"],
+                    n_samples=int(staged["n_samples"]),
+                    min_var=min_var,
+                    cell_cell2ave_exp_file_path=ref_path,
+                )
+            else:
+                log_message("Step 3: Skipping low-variance gene filtering.")
 
-        return gep_data_df, cell_prop_df
+            log_message("Step 4: Applying transformations and assembling final arrays...")
+            return self._build_final_arrays_from_staged_groups(
+                group_records=staged["group_records"],
+                final_gene_list=final_gene_list,
+                initial_target_gene_list=initial_target_gene_list,
+                final_cell_types=staged["final_cell_types"],
+                expected_sample_ids=staged["expected_sample_ids"],
+            )
+        finally:
+            self._cleanup_temp_dir()
 
-    def _load_and_merge_data(
+    def _prepare_temp_dir(self) -> None:
+        """Create a fresh temporary preprocessing directory."""
+        if self.temp_dir is None:
+            return
+        if self.temp_dir.exists():
+            shutil.rmtree(self.temp_dir)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+
+    def _cleanup_temp_dir(self) -> None:
+        """Remove temporary preprocessing files after the run finishes."""
+        if self.temp_dir is not None and self.temp_dir.exists():
+            shutil.rmtree(self.temp_dir)
+
+    def _build_load_jobs(
         self,
         file_paths: Sequence[Union[str, Path]],
         sample_id_namespace_by_path: Optional[Dict[str, str]] = None,
         source_group_key_by_path: Optional[Dict[str, str]] = None,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Load each file and merge into one dataframe.
-
-        Notes:
-        - .h5ad path uses ReadH5AD pipeline
-        - .csv path uses pd.read_csv
-        - Merging uses join='inner' to keep intersected genes/columns
-        """
+    ) -> list[dict[str, Any]]:
+        """Build file-loading jobs with stable ordering and group keys."""
         load_jobs: list[dict[str, Any]] = []
         for position, path_like in enumerate(file_paths):
             resolved_path = str(Path(path_like).expanduser().resolve())
@@ -639,22 +738,54 @@ class GEPPreprocessor:
 
         if not load_jobs:
             raise ValueError("No data loaded. Please check file_paths.")
+        return load_jobs
 
+    @staticmethod
+    def _group_load_jobs(load_jobs: Sequence[dict[str, Any]]) -> OrderedDict[str, list[dict[str, Any]]]:
+        """Group jobs while preserving the first-seen group order."""
         grouped_jobs: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
         for job in load_jobs:
             grouped_jobs.setdefault(job["source_group_key"], []).append(job)
+        return grouped_jobs
 
+    @staticmethod
+    def _intersect_ordered_lists(ordered_lists: Sequence[Sequence[str]]) -> list[str]:
+        """Intersect multiple ordered lists while preserving the first list's order."""
+        if not ordered_lists:
+            return []
+        common_items = set(ordered_lists[0])
+        for values in ordered_lists[1:]:
+            common_items &= set(values)
+        return [item for item in ordered_lists[0] if item in common_items]
+
+    def _stage_group_raw_intermediates(
+        self,
+        file_paths: Sequence[Union[str, Path]],
+        target_gene_list: Sequence[str],
+        sample_id_namespace_by_path: Optional[Dict[str, str]] = None,
+        source_group_key_by_path: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Load each preprocessing group, compute global stats, and persist raw group arrays."""
+        load_jobs = self._build_load_jobs(
+            file_paths=file_paths,
+            sample_id_namespace_by_path=sample_id_namespace_by_path,
+            source_group_key_by_path=source_group_key_by_path,
+        )
+        grouped_jobs = self._group_load_jobs(load_jobs)
         if len(grouped_jobs) > 1:
             log_message(
                 f"Loading {len(load_jobs)} source files across {len(grouped_jobs)} preprocessing groups..."
             )
 
-        merged_gep_data_df: Optional[pd.DataFrame] = None
-        merged_cell_prop_df: Optional[pd.DataFrame] = None
+        gene_sums = np.zeros(len(target_gene_list), dtype=np.float64)
+        gene_squared_sums = np.zeros(len(target_gene_list), dtype=np.float64)
+        total_samples = 0
         sample_ids_by_position: dict[int, list[str]] = {}
+        cell_type_lists: list[list[str]] = []
+        group_records: list[dict[str, Any]] = []
 
         for group_idx, group_jobs in enumerate(grouped_jobs.values(), start=1):
-            max_workers = min(_MAX_PARALLEL_SOURCE_FILE_LOADS, len(group_jobs))
+            max_workers = min(self.max_parallel_source_file_loads, len(group_jobs))
             if max_workers > 1:
                 log_message(
                     f"Loading preprocessing group {group_idx}/{len(grouped_jobs)} "
@@ -665,7 +796,11 @@ class GEPPreprocessor:
                         executor.map(
                             lambda job: (
                                 job["position"],
-                                _load_dataset_frames_from_path(job["path_like"], namespace=job["namespace"]),
+                                _load_dataset_frames_from_path(
+                                    job["path_like"],
+                                    namespace=job["namespace"],
+                                    target_gene_list=target_gene_list,
+                                ),
                             ),
                             group_jobs,
                         )
@@ -677,6 +812,7 @@ class GEPPreprocessor:
                         _load_dataset_frames_from_path(
                             group_jobs[0]["path_like"],
                             namespace=group_jobs[0]["namespace"],
+                            target_gene_list=target_gene_list,
                         ),
                     )
                 ]
@@ -691,85 +827,161 @@ class GEPPreprocessor:
             log_message(f"Merging preprocessing group {group_idx}/{len(grouped_jobs)}...")
             group_gep_data_df = pd.concat(group_data_dfs, axis=0, join="inner")
             group_cell_prop_df = pd.concat(group_cell_prop_dfs, axis=0, join="inner")
+            group_gep_data_df = group_gep_data_df.loc[:, list(target_gene_list)]
+            if not group_cell_prop_df.empty:
+                group_cell_prop_df = group_cell_prop_df.loc[group_gep_data_df.index]
 
-            if merged_gep_data_df is None:
-                merged_gep_data_df = group_gep_data_df
-                merged_cell_prop_df = group_cell_prop_df
+            group_values = group_gep_data_df.values.astype(np.float32, copy=False)
+            gene_sums += group_values.sum(axis=0, dtype=np.float64)
+            gene_squared_sums += np.square(group_values, dtype=np.float64).sum(axis=0, dtype=np.float64)
+            total_samples += int(group_values.shape[0])
+
+            raw_data_path = (self.temp_dir / f"group_{group_idx:04d}_raw_data.npy") if self.temp_dir else None
+            if raw_data_path is not None:
+                np.save(raw_data_path, group_values)
+
+            group_record: dict[str, Any] = {
+                "raw_data_path": raw_data_path,
+                "sample_ids": group_gep_data_df.index.astype(str).tolist(),
+                "cell_types": group_cell_prop_df.columns.astype(str).tolist(),
+                "n_samples": int(group_values.shape[0]),
+            }
+            if not group_cell_prop_df.empty:
+                raw_labels_path = (self.temp_dir / f"group_{group_idx:04d}_raw_labels.npy") if self.temp_dir else None
+                group_labels = group_cell_prop_df.values.astype(np.float32, copy=False)
+                if raw_labels_path is not None:
+                    np.save(raw_labels_path, group_labels)
+                group_record["raw_labels_path"] = raw_labels_path
             else:
-                merged_gep_data_df = pd.concat([merged_gep_data_df, group_gep_data_df], axis=0, join="inner")
-                merged_cell_prop_df = pd.concat([merged_cell_prop_df, group_cell_prop_df], axis=0, join="inner")
+                group_record["raw_labels_path"] = None
+            group_records.append(group_record)
+            cell_type_lists.append(group_record["cell_types"])
 
-            del loaded_group, group_data_dfs, group_cell_prop_dfs, group_gep_data_df, group_cell_prop_df
+            del loaded_group, group_data_dfs, group_cell_prop_dfs, group_gep_data_df, group_cell_prop_df, group_values
             gc.collect()
-
-        gep_data_df = merged_gep_data_df
-        cell_prop_df = merged_cell_prop_df
-        if gep_data_df is None or cell_prop_df is None:
-            raise ValueError("No data loaded. Please check file_paths.")
 
         expected_sample_ids: list[str] = []
         for position in range(len(load_jobs)):
             expected_sample_ids.extend(sample_ids_by_position.get(position, []))
 
-        if expected_sample_ids and gep_data_df.index.is_unique:
-            gep_data_df = gep_data_df.loc[expected_sample_ids, :]
-            if not cell_prop_df.empty and cell_prop_df.index.is_unique:
-                cell_prop_df = cell_prop_df.loc[expected_sample_ids, :]
-
-        if not cell_prop_df.empty:
-            if len(gep_data_df) != len(cell_prop_df):
-                raise ValueError("Sample count mismatch after merge.")
-            if not np.all(gep_data_df.index == cell_prop_df.index):
-                raise ValueError("Sample ID mismatch after merge.")
-
-        log_message(f"Merged data shape: {gep_data_df.shape}")
-        return gep_data_df, cell_prop_df
-
-    @staticmethod
-    def _apply_gene_list_filter(
-        gep_data_df: pd.DataFrame,
-        gene_list_file: Path
-    ) -> pd.DataFrame:
-        """Apply target gene list alignment/filtering."""
-        target_genes = load_gene_list(gene_list_file)
-        gep_exp_obj = ReadExp(gep_data_df, exp_type="TPM")
-        gep_exp_obj.align_with_gene_list(gene_list=target_genes, fill_not_exist=True)
-        result = gep_exp_obj.get_exp()
-        log_message(f"After gene list filtering: {result.shape}")
-        return result
+        return {
+            "group_records": group_records,
+            "gene_sums": gene_sums,
+            "gene_squared_sums": gene_squared_sums,
+            "n_samples": total_samples,
+            "expected_sample_ids": expected_sample_ids,
+            "final_cell_types": self._intersect_ordered_lists(cell_type_lists),
+        }
 
     @staticmethod
     def _apply_low_var_gene_removal(
-        gep_data_df: pd.DataFrame,
+        gene_list: Sequence[str],
+        gene_sums: np.ndarray,
+        gene_squared_sums: np.ndarray,
+        n_samples: int,
         min_var: float,
         cell_cell2ave_exp_file_path: Optional[Path],
-    ) -> pd.DataFrame:
+    ) -> list[str]:
         """
-        Remove low-variance genes and optionally intersect with reference genes.
+        Remove low-variance genes from global sufficient statistics and optionally intersect with reference genes.
         """
-        n_genes_before = gep_data_df.shape[1]
+        n_genes_before = len(gene_list)
 
-        log_message("Computing gene variances...")
-        gene_variances = gep_data_df.var(axis=0)
-        genes_to_keep = gene_variances > min_var
-        gep_data_df = gep_data_df.loc[:, genes_to_keep]
+        if n_samples <= 1:
+            gene_variances = np.full(n_genes_before, np.nan, dtype=np.float64)
+        else:
+            numerator = gene_squared_sums - (np.square(gene_sums) / float(n_samples))
+            gene_variances = numerator / float(n_samples - 1)
+            gene_variances = np.maximum(gene_variances, 0.0)
+
+        genes_to_keep = gene_variances > float(min_var)
+        final_gene_list = [str(gene_list[idx]) for idx, keep in enumerate(genes_to_keep) if keep]
 
         if cell_cell2ave_exp_file_path is not None:
             try:
                 cell_ave_exp_df = pd.read_csv(cell_cell2ave_exp_file_path, index_col=0)
-                genes_in_ref = cell_ave_exp_df.index
-                common_genes = gep_data_df.columns.intersection(genes_in_ref)
-                gep_data_df = gep_data_df[common_genes]
+                genes_in_ref = set(str(gene) for gene in cell_ave_exp_df.index.tolist())
+                final_gene_list = [gene for gene in final_gene_list if gene in genes_in_ref]
                 del cell_ave_exp_df
             except Exception as e:
                 logger.error(f"Error processing reference file: {e}")
 
-        n_genes_after = gep_data_df.shape[1]
+        n_genes_after = len(final_gene_list)
+        if n_genes_after == 0:
+            raise ValueError("Low-variance filtering removed all genes.")
         log_message(
             f"Gene filtering: {n_genes_before} → {n_genes_after} genes "
             f"(removed {n_genes_before - n_genes_after})"
         )
-        return gep_data_df
+        return final_gene_list
+
+    def _build_final_arrays_from_staged_groups(
+        self,
+        *,
+        group_records: Sequence[dict[str, Any]],
+        final_gene_list: Sequence[str],
+        initial_target_gene_list: Sequence[str],
+        final_cell_types: Sequence[str],
+        expected_sample_ids: Sequence[str],
+    ) -> Dict[str, Any]:
+        """Transform staged raw group arrays and assemble one final dataset array."""
+        gene_index_by_name = {str(gene): idx for idx, gene in enumerate(initial_target_gene_list)}
+        final_gene_indices = [gene_index_by_name[str(gene)] for gene in final_gene_list]
+        total_samples = sum(int(record["n_samples"]) for record in group_records)
+
+        data_array = np.empty((total_samples, len(final_gene_list)), dtype=np.float32)
+        labels_array: Optional[np.ndarray] = None
+        if final_cell_types:
+            labels_array = np.empty((total_samples, len(final_cell_types)), dtype=np.float32)
+
+        aggregated_sample_ids: list[str] = []
+        cursor = 0
+        for record in group_records:
+            raw_data = np.load(record["raw_data_path"], mmap_mode="r") if record["raw_data_path"] else None
+            if raw_data is None:
+                raise ValueError("Missing staged raw data for preprocessing group.")
+            raw_subset = np.asarray(raw_data[:, final_gene_indices], dtype=np.float32)
+            transformed_group_df = self._apply_transformation_chunked(
+                pd.DataFrame(raw_subset, index=record["sample_ids"], columns=list(final_gene_list)),
+                chunk_size=self.chunk_size,
+            )
+            group_values = transformed_group_df.values.astype(np.float32, copy=False)
+            n_group_samples = int(record["n_samples"])
+            data_array[cursor:cursor + n_group_samples] = group_values
+
+            if labels_array is not None:
+                raw_labels = np.load(record["raw_labels_path"], mmap_mode="r") if record["raw_labels_path"] else None
+                if raw_labels is None:
+                    raise ValueError("Expected staged label array for a labeled preprocessing group.")
+                local_cell_types = list(record["cell_types"])
+                col_indices = [local_cell_types.index(cell_type) for cell_type in final_cell_types]
+                labels_array[cursor:cursor + n_group_samples] = np.asarray(raw_labels[:, col_indices], dtype=np.float32)
+                del raw_labels
+
+            aggregated_sample_ids.extend(record["sample_ids"])
+            cursor += n_group_samples
+
+            del raw_data, raw_subset, transformed_group_df, group_values
+            gc.collect()
+
+        if expected_sample_ids and len(set(aggregated_sample_ids)) == len(aggregated_sample_ids):
+            sample_id_to_idx = {sample_id: idx for idx, sample_id in enumerate(aggregated_sample_ids)}
+            reorder_idx = np.asarray([sample_id_to_idx[sample_id] for sample_id in expected_sample_ids], dtype=np.int64)
+            data_array = data_array[reorder_idx]
+            if labels_array is not None:
+                labels_array = labels_array[reorder_idx]
+            final_sample_ids = list(expected_sample_ids)
+        else:
+            final_sample_ids = aggregated_sample_ids
+
+        log_message(f"Final processed array shape: {data_array.shape}")
+        return {
+            "data_array": data_array,
+            "labels_array": labels_array,
+            "gene_list": list(final_gene_list),
+            "sample_ids": final_sample_ids,
+            "cell_types": list(final_cell_types),
+        }
 
     @staticmethod
     def _apply_transformation_chunked(
@@ -1017,11 +1229,15 @@ class GEPDataset(Dataset):
     # -------------------------------------------------------------------------
     def _preprocess_and_cache(self) -> None:
         """Run preprocessing pipeline and save outputs to cache."""
-        preprocessor = GEPPreprocessor(chunk_size=self.chunk_size)
+        preprocessor = GEPPreprocessor(
+            chunk_size=self.chunk_size,
+            max_parallel_source_file_loads=self.config.max_parallel_source_file_loads,
+            temp_dir=self.processed_data_dir / "_tmp_preprocess",
+        )
         sample_id_namespace_by_path = self._build_sample_id_namespace_by_path()
         source_group_key_by_path = self._build_source_group_key_by_path()
 
-        gep_data_df, cell_prop_df = preprocessor.run(
+        processed = preprocessor.run(
             file_paths=self.config.file_paths,
             gene_list_file=self.config.gene_list_file,
             remove_low_var_genes=self.config.remove_low_var_genes,
@@ -1029,31 +1245,31 @@ class GEPDataset(Dataset):
             cell_cell2ave_exp_file_path=self.config.cell_cell2ave_exp_file_path,
             sample_id_namespace_by_path=sample_id_namespace_by_path,
             source_group_key_by_path=source_group_key_by_path,
+            max_parallel_source_file_loads=self.config.max_parallel_source_file_loads,
         )
+        data_array = processed["data_array"]
+        labels_array = processed["labels_array"]
+        gene_list = processed["gene_list"]
+        sample_ids = processed["sample_ids"]
+        cell_types = processed["cell_types"]
 
-        # Convert to float32 numpy and apply optional scaling
-        log_message("Converting processed data to numpy arrays...")
-        data_array = gep_data_df.values.astype(np.float32, copy=False)
+        # Arrays are already float32 at this point; only apply optional scaling.
+        log_message("Applying final array scaling...")
         if self.apply_scaling:
             data_array = data_array / float(self.scaling_value)
-
-        # Labels may be absent for evaluation/inference datasets
-        labels_array: Optional[np.ndarray] = None
-        if not cell_prop_df.empty:
-            labels_array = cell_prop_df.loc[gep_data_df.index].values.astype(np.float32, copy=False)
 
         true_sct_gep_array: Optional[np.ndarray] = None
         true_sct_gep_present_mask_array: Optional[np.ndarray] = None
         if self.config.training_target_sets:
-            if cell_prop_df.empty:
+            if labels_array is None or len(cell_types) == 0:
                 raise ValueError(
                     "training_target_sets requires cell-fraction labels so matched "
                     "sctGEP targets can align with training cell types."
                 )
             true_sct_gep_array, true_sct_gep_present_mask_array = self._build_true_sct_gep_targets(
-                sample_ids=gep_data_df.index.astype(str).tolist(),
-                gene_list=gep_data_df.columns.astype(str).tolist(),
-                cell_types=cell_prop_df.columns.astype(str).tolist(),
+                sample_ids=[str(sample_id) for sample_id in sample_ids],
+                gene_list=[str(gene) for gene in gene_list],
+                cell_types=[str(cell_type) for cell_type in cell_types],
             )
             if self.apply_scaling and true_sct_gep_array is not None:
                 true_sct_gep_array = true_sct_gep_array / float(self.scaling_value)
@@ -1071,24 +1287,24 @@ class GEPDataset(Dataset):
             key="true_sct_gep_present_mask",
         )
         self.cache.save_metadata(
-            gene_list=gep_data_df.columns.to_list(),
-            sample_ids=gep_data_df.index.to_list(),
-            cell_types=cell_prop_df.columns.to_list() if not cell_prop_df.empty else [],
+            gene_list=gene_list,
+            sample_ids=sample_ids,
+            cell_types=cell_types,
             scaling_value=float(self.scaling_value),
             apply_scaling=self.apply_scaling,
         )
 
         # Set in-memory metadata immediately
-        self.gene_list = gep_data_df.columns.to_list()
-        self.sample_ids = gep_data_df.index.to_list()
-        self.cell_types = cell_prop_df.columns.to_list() if not cell_prop_df.empty else []
+        self.gene_list = list(gene_list)
+        self.sample_ids = list(sample_ids)
+        self.cell_types = list(cell_types)
 
         self._n_samples = len(self.sample_ids)
         self._n_genes = len(self.gene_list)
         self._n_cell_types = len(self.cell_types)
 
         # Cleanup
-        del gep_data_df, cell_prop_df, data_array, labels_array
+        del processed, data_array, labels_array
         if true_sct_gep_array is not None:
             del true_sct_gep_array
         if true_sct_gep_present_mask_array is not None:
