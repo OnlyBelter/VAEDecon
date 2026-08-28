@@ -849,10 +849,22 @@ class VAE(BaseAE):
 
         # Log -> CPM (Batch, Genes, C)
         if not self.model_config.learn_gep_residual:
-            recon_x_all_types_log = recon_x_all_types
+            # Direct full-GEP mode predicts log2(TPM+1). Clamp to the same safe
+            # exponentiation range used by the mean-centered residual path so
+            # one extreme decoder output cannot poison CPM normalization.
             if self.data_config.scaling_by_constant:
                 # Scale back up if input was scaled down.
                 recon_x_all_types = recon_x_all_types * self.scaling_factor
+            recon_x_all_types = _clamp_log2_expression_before_exp(
+                recon_x_all_types,
+                min_value=0.0,
+                max_value=20.0,
+            )
+            recon_x_all_types_log = (
+                recon_x_all_types / self.scaling_factor
+                if self.data_config.scaling_by_constant
+                else recon_x_all_types
+            )
             # Decoder outputs full GEP in log space -> convert to CPM for mixing.
             recon_x_all_types_cpm = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
             self.z_scores = None

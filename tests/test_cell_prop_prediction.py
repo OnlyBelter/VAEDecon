@@ -21,6 +21,7 @@ from vaedecon.trainers.base_trainer import (
     _resolve_linear_schedule_value,
     _step_adaptive_aux_loss_schedule,
 )
+from vaedecon.utility import log_exp2cpm_tensor, non_log2cpm_tensor
 from vaedecon.workflow.workflow import _detach_model_output_to_cpu, evaluate_model
 
 
@@ -1194,6 +1195,49 @@ def test_clamp_log2_expression_before_exp_limits_values_to_safe_range():
         clamped,
         torch.tensor([0.0, 0.0, 5.0, 20.0], dtype=torch.float32),
     )
+
+
+def test_direct_full_gep_clamp_keeps_log_to_cpm_conversion_finite():
+    raw_direct_log = torch.tensor(
+        [[[25.0, -4.0], [1.0, 0.0]]],
+        dtype=torch.float32,
+    )
+
+    clamped_direct_log = _clamp_log2_expression_before_exp(
+        raw_direct_log,
+        min_value=0.0,
+        max_value=20.0,
+    )
+    cpm = log_exp2cpm_tensor(clamped_direct_log, transpose=True)
+
+    assert torch.isfinite(cpm).all()
+    assert torch.all(cpm >= 0)
+    assert clamped_direct_log[0, 0, 0].item() == 20.0
+    assert clamped_direct_log[0, 0, 1].item() == 0.0
+
+
+def test_non_log2cpm_tensor_handles_zero_and_non_finite_library_sizes():
+    exp = torch.tensor(
+        [
+            [[float("nan"), 1.0, float("-inf")], [0.0, 0.0, 0.0]],
+            [[2.0, 2.0, float("inf")], [1.0, -1.0, 1.0]],
+        ],
+        dtype=torch.float32,
+    )
+
+    normalized = non_log2cpm_tensor(exp)
+
+    expected = torch.tensor(
+        [
+            [[0.0, 1.0e6, 0.0], [0.0, 0.0, 0.0]],
+            [[5.0e5, 5.0e5, 0.0], [5.0e5, 0.0, 5.0e5]],
+        ],
+        dtype=torch.float32,
+    )
+
+    assert torch.isfinite(normalized).all()
+    assert torch.all(normalized >= 0)
+    assert torch.allclose(normalized, expected)
 
 
 def test_loss_function_rejects_z_score_kl_in_mean_centered_mode():

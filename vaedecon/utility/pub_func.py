@@ -647,12 +647,23 @@ def non_log2cpm_tensor(exp: torch.Tensor, sum_exp=1e6) -> torch.Tensor:
 
     :return: counts per million (CPM) or transcript per million (TPM)
     """
+    exp = torch.nan_to_num(exp, nan=0.0, posinf=0.0, neginf=0.0)
+    exp = torch.clamp(exp, min=0.0)
+
     if len(exp.shape) == 2:  # if the shape is 2, it means genes by samples
         batch_size, n_gene = exp.shape
-        return exp / torch.sum(exp, -1).reshape((batch_size, 1)) * sum_exp
+        lib_size = torch.sum(exp, -1).reshape((batch_size, 1))
     else:  # expected shape: batch_size, n_cell_type, n_gene
         batch_size, n_cell_type, n_gene = exp.shape
-        return exp / torch.sum(exp, -1).reshape((batch_size, n_cell_type, 1)) * sum_exp
+        lib_size = torch.sum(exp, -1).reshape((batch_size, n_cell_type, 1))
+
+    safe_lib_size = torch.where(
+        torch.isfinite(lib_size) & (lib_size > 0),
+        lib_size,
+        torch.ones_like(lib_size),
+    )
+    normalized = exp / safe_lib_size * sum_exp
+    return torch.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def get_corr(df_col1, df_col2, return_p_value=False, n_decimal=3) -> Union[float, tuple]:
