@@ -491,6 +491,77 @@ def test_inference_builds_dataset_config_with_sct_gene_mean_std_refs(tmp_path: P
     assert dataset_cfg.pooled_sc_seed == 42
 
 
+def test_predictor_clears_stale_processed_test_cache_before_loading_dataset(
+    tmp_path: Path,
+    monkeypatch,
+):
+    test_set_fp = tmp_path / "test_set.h5ad"
+    test_set_fp.write_text("not-a-real-h5ad")
+
+    model_dir = tmp_path / "final_model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    input_gene_list_fp = model_dir / "input_gene_list.txt"
+    input_gene_list_fp.write_text("g1\ng2\n")
+
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "sct_gep_file_path": "./datasets/legacy_sct_gep.h5ad",
+                "gene_mean_std_sct_gep_file_path": "./datasets/dedicated_gene_mean_std_ref.h5ad",
+                "force_reprocess": False,
+                "use_memmap": False,
+            },
+            "evaluation": {
+                "val_batch_size": 2,
+                "save_reconstructed_gep": False,
+            },
+            "model": {
+                "model_dir": model_dir,
+                "input_gene_list_fp": input_gene_list_fp,
+            },
+        }
+    )
+
+    predictor = VAEDeconPredictor(
+        model_dir=str(model_dir),
+        config=config,
+        device="cpu",
+    )
+
+    stale_processed_dir = tmp_path / "processed_test"
+    stale_processed_dir.mkdir(parents=True, exist_ok=True)
+    (stale_processed_dir / "common_gene_list.txt").write_text("stale_gene\n")
+
+    class _DummyDataset:
+        def __init__(self):
+            self.data = np.zeros((1, 2), dtype=np.float32)
+
+    def _fake_gepdataset(*, config):
+        assert config.processed_data_dir == stale_processed_dir
+        assert not stale_processed_dir.exists()
+        return _DummyDataset()
+
+    monkeypatch.setattr("vaedecon.workflow.inference.GEPDataset", _fake_gepdataset)
+    monkeypatch.setattr(predictor, "_ensure_model_loaded", lambda: None)
+    predictor.model = object()
+
+    def _fake_evaluate_model(**kwargs):
+        assert kwargs["test_set"].data.shape == (1, 2)
+        return {"ok": True}
+
+    monkeypatch.setattr("vaedecon.workflow.inference.evaluate_model", _fake_evaluate_model)
+
+    results = predictor.predict(
+        data_file_path=str(test_set_fp),
+        output_dir=str(tmp_path / "out"),
+        dataset_type="test",
+    )
+
+    assert results == {"ok": True}
+    assert not stale_processed_dir.exists()
+
+
 def test_trainer_builds_reproducible_debug_overfit_subset_and_manifest(tmp_path: Path):
     config = VAEDeconConfig.from_dict(
         {

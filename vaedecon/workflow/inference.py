@@ -4,6 +4,7 @@ Inference pipeline for VAEDecon
 import os
 import gc
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -21,6 +22,15 @@ from .workflow import (
 from ..configs.default_config import VAEDeconConfig, GEPDatasetConfig, TestSetConfig, TrainingConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _reset_small_test_processed_cache(processed_data_dir: str | Path) -> None:
+    """Remove stale processed test artifacts before rebuilding small test sets."""
+    cache_dir = Path(str(processed_data_dir))
+    if not cache_dir.exists():
+        return
+    shutil.rmtree(cache_dir)
+    logger.info("Removed stale processed test cache at %s before inference.", cache_dir)
 
 
 def _selected_sc_gep_cache_complete(
@@ -466,6 +476,8 @@ class VAEDeconPredictor:
             dataset_type=dataset_type,
             require_model_artifacts=True,
         )
+        if dataset_type == "test":
+            _reset_small_test_processed_cache(gep_dataset_config.processed_data_dir)
         dataset = GEPDataset(config=gep_dataset_config)
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
