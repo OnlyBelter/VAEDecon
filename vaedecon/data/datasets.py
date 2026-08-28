@@ -310,6 +310,39 @@ def _materialize_true_sct_gep_targets(
     return true_sct_gep, true_sct_gep_present_mask
 
 
+def _write_true_sct_gep_targets_into(
+    raw_bulk_sample_ids: list[str],
+    row_positions: np.ndarray,
+    cell_types: list[str],
+    filtered_mapping_df: pd.DataFrame,
+    aligned_sct_geps_df: pd.DataFrame,
+    true_sct_gep_dest: np.ndarray,
+    true_sct_gep_present_mask_dest: np.ndarray,
+) -> None:
+    """Write matched targets directly into destination arrays without a large temporary tensor."""
+    if filtered_mapping_df.empty or aligned_sct_geps_df.empty:
+        return
+
+    cell_type_to_idx = {cell_type: idx for idx, cell_type in enumerate(cell_types)}
+    for sample_idx, sample_id in enumerate(raw_bulk_sample_ids):
+        if sample_id not in filtered_mapping_df.index:
+            continue
+
+        dataset_row_idx = int(row_positions[sample_idx])
+        sample_rows = filtered_mapping_df.loc[[sample_id], :]
+        for _, row in sample_rows.iterrows():
+            cell_type = str(row["cell_type"])
+            selected_cell_id = str(row["selected_cell_id"])
+            cell_type_idx = cell_type_to_idx.get(cell_type)
+            if cell_type_idx is None or selected_cell_id not in aligned_sct_geps_df.index:
+                continue
+            true_sct_gep_dest[dataset_row_idx, :, cell_type_idx] = aligned_sct_geps_df.loc[selected_cell_id, :].to_numpy(
+                dtype=np.float32,
+                copy=False,
+            )
+            true_sct_gep_present_mask_dest[dataset_row_idx, cell_type_idx] = True
+
+
 def build_matched_sct_gep_training_targets(
     sct_gep_dataset_file_path: Union[str, Path],
     sample2cell_id_file_path: Union[str, Path],
@@ -1260,32 +1293,45 @@ class GEPDataset(Dataset):
 
         true_sct_gep_array: Optional[np.ndarray] = None
         true_sct_gep_present_mask_array: Optional[np.ndarray] = None
+        sct_target_arrays_pre_saved = False
+        temp_optional_cache_paths: list[Path] = []
         if self.config.training_target_sets:
             if labels_array is None or len(cell_types) == 0:
                 raise ValueError(
                     "training_target_sets requires cell-fraction labels so matched "
                     "sctGEP targets can align with training cell types."
                 )
-            true_sct_gep_array, true_sct_gep_present_mask_array = self._build_true_sct_gep_targets(
+            (
+                true_sct_gep_array,
+                true_sct_gep_present_mask_array,
+                sct_target_arrays_pre_saved,
+                temp_optional_cache_paths,
+            ) = self._build_true_sct_gep_targets(
                 sample_ids=[str(sample_id) for sample_id in sample_ids],
                 gene_list=[str(gene) for gene in gene_list],
                 cell_types=[str(cell_type) for cell_type in cell_types],
             )
             if self.apply_scaling and true_sct_gep_array is not None:
-                true_sct_gep_array = true_sct_gep_array / float(self.scaling_value)
+                if sct_target_arrays_pre_saved:
+                    true_sct_gep_array[:] = true_sct_gep_array[:] / float(self.scaling_value)
+                    if hasattr(true_sct_gep_array, "flush"):
+                        true_sct_gep_array.flush()
+                else:
+                    true_sct_gep_array = true_sct_gep_array / float(self.scaling_value)
 
         # Save arrays + metadata
         self.cache.save_arrays(data_array, labels_array)
-        self.cache.save_optional_array(
-            array_path=self.cache.true_sct_gep_path,
-            array=true_sct_gep_array,
-            key="true_sct_gep",
-        )
-        self.cache.save_optional_array(
-            array_path=self.cache.true_sct_gep_present_mask_path,
-            array=true_sct_gep_present_mask_array,
-            key="true_sct_gep_present_mask",
-        )
+        if not sct_target_arrays_pre_saved:
+            self.cache.save_optional_array(
+                array_path=self.cache.true_sct_gep_path,
+                array=true_sct_gep_array,
+                key="true_sct_gep",
+            )
+            self.cache.save_optional_array(
+                array_path=self.cache.true_sct_gep_present_mask_path,
+                array=true_sct_gep_present_mask_array,
+                key="true_sct_gep_present_mask",
+            )
         self.cache.save_metadata(
             gene_list=gene_list,
             sample_ids=sample_ids,
@@ -1309,6 +1355,9 @@ class GEPDataset(Dataset):
             del true_sct_gep_array
         if true_sct_gep_present_mask_array is not None:
             del true_sct_gep_present_mask_array
+        for temp_path in temp_optional_cache_paths:
+            if temp_path.exists():
+                temp_path.unlink()
         gc.collect()
 
         log_message(
@@ -1321,13 +1370,35 @@ class GEPDataset(Dataset):
         sample_ids: list[str],
         gene_list: list[str],
         cell_types: list[str],
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, bool, list[Path]]:
         """Build dataset-aligned matched sctGEP targets for configured training bulk sets."""
         n_samples = len(sample_ids)
         n_genes = len(gene_list)
         n_cell_types = len(cell_types)
-        true_sct_gep = np.zeros((n_samples, n_genes, n_cell_types), dtype=np.float32)
-        true_sct_gep_present_mask = np.zeros((n_samples, n_cell_types), dtype=bool)
+        temp_paths: list[Path] = []
+        arrays_pre_saved = not self.compress
+        if self.compress:
+            true_sct_gep_path = self.processed_data_dir / "_tmp_true_sct_gep.npy"
+            true_sct_gep_present_mask_path = self.processed_data_dir / "_tmp_true_sct_gep_present_mask.npy"
+            temp_paths.extend([true_sct_gep_path, true_sct_gep_present_mask_path])
+        else:
+            true_sct_gep_path = self.cache.true_sct_gep_path
+            true_sct_gep_present_mask_path = self.cache.true_sct_gep_present_mask_path
+
+        true_sct_gep = np.lib.format.open_memmap(
+            true_sct_gep_path,
+            mode="w+",
+            dtype=np.float32,
+            shape=(n_samples, n_genes, n_cell_types),
+        )
+        true_sct_gep[:] = 0.0
+        true_sct_gep_present_mask = np.lib.format.open_memmap(
+            true_sct_gep_present_mask_path,
+            mode="w+",
+            dtype=bool,
+            shape=(n_samples, n_cell_types),
+        )
+        true_sct_gep_present_mask[:] = False
 
         sample_id_to_positions: Dict[str, list[int]] = {}
         for row_idx, sample_id in enumerate(sample_ids):
@@ -1399,17 +1470,23 @@ class GEPDataset(Dataset):
                 target_gene_list=gene_list,
             )
             for item in group_entry["items"]:
-                matched_true_sct_gep, matched_present_mask = _materialize_true_sct_gep_targets(
+                _write_true_sct_gep_targets_into(
                     raw_bulk_sample_ids=item["raw_bulk_sample_ids"],
-                    target_gene_list=gene_list,
+                    row_positions=item["row_positions"],
                     cell_types=cell_types,
                     filtered_mapping_df=item["filtered_mapping_df"],
                     aligned_sct_geps_df=aligned_sct_geps_df,
+                    true_sct_gep_dest=true_sct_gep,
+                    true_sct_gep_present_mask_dest=true_sct_gep_present_mask,
                 )
-                true_sct_gep[item["row_positions"], :, :] = matched_true_sct_gep
-                true_sct_gep_present_mask[item["row_positions"], :] = matched_present_mask
+            if hasattr(true_sct_gep, "flush"):
+                true_sct_gep.flush()
+            if hasattr(true_sct_gep_present_mask, "flush"):
+                true_sct_gep_present_mask.flush()
+            del aligned_sct_geps_df
+            gc.collect()
 
-        return true_sct_gep, true_sct_gep_present_mask
+        return true_sct_gep, true_sct_gep_present_mask, arrays_pre_saved, temp_paths
 
     # -------------------------------------------------------------------------
     # PyTorch Dataset interface

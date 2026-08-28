@@ -577,6 +577,129 @@ def test_gepdataset_cleans_up_temporary_group_intermediates(tmp_path: Path):
     assert not (processed_dir / "_tmp_preprocess").exists()
 
 
+def test_gepdataset_writes_true_sct_gep_directly_to_npy_cache(tmp_path: Path):
+    genes = ["gene_a", "gene_b"]
+    bulk_path = tmp_path / "bulk.h5ad"
+    ref_sct_path = tmp_path / "ref_sct.h5ad"
+    mapping_path = tmp_path / "sample2cell.csv"
+    processed_dir = tmp_path / "processed"
+
+    _write_h5ad(
+        bulk_path,
+        x=np.array([[2.0, 4.0], [3.0, 9.0]], dtype=np.float32),
+        obs_names=["sample_1", "sample_2"],
+        var_names=genes,
+        obs=pd.DataFrame(
+            {
+                "CT1": [0.7, 0.8],
+                "CT2": [0.3, 0.2],
+            },
+            index=["sample_1", "sample_2"],
+        ),
+    )
+    _write_h5ad(
+        ref_sct_path,
+        x=np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float32),
+        obs_names=["cell_a", "cell_b", "cell_c"],
+        var_names=genes,
+        obs=pd.DataFrame(index=["cell_a", "cell_b", "cell_c"]),
+    )
+    pd.DataFrame(
+        {
+            "cell_type": ["CT1", "CT2", "CT1"],
+            "selected_cell_id": ["cell_a", "cell_b", "cell_c"],
+        },
+        index=["sample_1", "sample_1", "sample_2"],
+    ).to_csv(mapping_path)
+
+    dataset = GEPDataset(
+        GEPDatasetConfig(
+            file_paths=[bulk_path],
+            processed_data_dir=processed_dir,
+            force_reprocess=True,
+            scaling_by_constant=False,
+            cache_compress=False,
+            training_target_sets={
+                "Train_set1": {
+                    "training_set_file_path": bulk_path,
+                    "training_set_sample2cell_id_file_path": mapping_path,
+                    "training_sct_gep_file_path": ref_sct_path,
+                }
+            },
+        )
+    )
+
+    assert (processed_dir / "true_sct_gep.npy").exists()
+    assert (processed_dir / "true_sct_gep_present_mask.npy").exists()
+    assert dataset.true_sct_gep.shape == (2, 2, 2)
+    assert dataset.true_sct_gep_present_mask.tolist() == [[True, True], [True, False]]
+
+
+def test_gepdataset_scales_true_sct_gep_in_place_for_npy_cache(tmp_path: Path):
+    genes = ["gene_a", "gene_b"]
+    bulk_path = tmp_path / "bulk.h5ad"
+    ref_sct_path = tmp_path / "ref_sct.h5ad"
+    mapping_path = tmp_path / "sample2cell.csv"
+    processed_dir = tmp_path / "processed"
+
+    _write_h5ad(
+        bulk_path,
+        x=np.array([[2.0, 4.0], [3.0, 9.0]], dtype=np.float32),
+        obs_names=["sample_1", "sample_2"],
+        var_names=genes,
+        obs=pd.DataFrame(
+            {
+                "CT1": [0.7, 0.8],
+                "CT2": [0.3, 0.2],
+            },
+            index=["sample_1", "sample_2"],
+        ),
+    )
+    _write_h5ad(
+        ref_sct_path,
+        x=np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float32),
+        obs_names=["cell_a", "cell_b", "cell_c"],
+        var_names=genes,
+        obs=pd.DataFrame(index=["cell_a", "cell_b", "cell_c"]),
+    )
+    pd.DataFrame(
+        {
+            "cell_type": ["CT1", "CT2", "CT1"],
+            "selected_cell_id": ["cell_a", "cell_b", "cell_c"],
+        },
+        index=["sample_1", "sample_1", "sample_2"],
+    ).to_csv(mapping_path)
+
+    dataset = GEPDataset(
+        GEPDatasetConfig(
+            file_paths=[bulk_path],
+            processed_data_dir=processed_dir,
+            force_reprocess=True,
+            scaling_by_constant=True,
+            scaling_factor=2.0,
+            cache_compress=False,
+            training_target_sets={
+                "Train_set1": {
+                    "training_set_file_path": bulk_path,
+                    "training_set_sample2cell_id_file_path": mapping_path,
+                    "training_sct_gep_file_path": ref_sct_path,
+                }
+            },
+        )
+    )
+
+    aligned = build_matched_sct_gep_training_targets(
+        sct_gep_dataset_file_path=ref_sct_path,
+        sample2cell_id_file_path=mapping_path,
+        bulk_sample_ids=["sample_1", "sample_2"],
+        target_gene_list=genes,
+        cell_types=["CT1", "CT2"],
+        cache_sct_query_results=False,
+    )["true_sct_gep"]
+
+    np.testing.assert_allclose(dataset.true_sct_gep, aligned / 2.0, rtol=1e-6, atol=1e-6)
+
+
 def test_matched_sct_gep_loss_masks_low_prop_cell_types():
     vae = VAE.__new__(VAE)
     vae.scaling_factor = 1.0
