@@ -4,7 +4,9 @@ Last updated: 2026-08-28
 
 ## Status
 
-Approved and partially implemented.
+Approved and partially implemented. Expanded on 2026-08-28 to add
+metadata-only common-gene discovery, configurable source-load parallelism, and
+group-first preprocessing to reduce peak RAM.
 
 ## Goal
 
@@ -30,9 +32,11 @@ The main reasons are:
    - the example 21-dataset config sets `data.force_reprocess: true`
 2. the processed dataset cache is keyed by `training.naming_postfix`
    - different ablations using the same raw inputs do not share the same cache
-3. raw file ingestion is serial
-   - each `.h5ad` is opened, converted, and materialized one-by-one before the
-     final merge
+3. raw file ingestion still performs expensive full-width reads
+   - each `.h5ad` is opened and materialized before the final gene intersection
+4. many large DataFrames can coexist before the final merge
+   - this increases peak RAM and can cause the process to be killed by the
+     server even when Python raises no traceback
 
 ## Current behavior summary
 
@@ -58,16 +62,19 @@ Consequence:
 
 `GEPDataset` currently:
 
-1. loads all source files
+1. loads source files
 2. merges them
 3. applies gene filtering
 4. applies transformation
 5. writes one processed cache
 
-The file loading stage is currently serial and pandas-heavy:
+The file loading stage is still pandas-heavy even after the first round of
+speedups:
 
-- each `.h5ad` is read through `ReadH5AD.get_df(convert_to_tpm=True)`
-- each loaded DataFrame is kept until the final `pd.concat(...)`
+- each `.h5ad` is read at full gene width through `ReadH5AD.get_df(convert_to_tpm=True)`
+- final common genes are only enforced after full matrices are already in memory
+- group-local merges help, but the loader can still do unnecessary IO and keep
+  more columns than needed during the heaviest stage
 
 This is correct but slow for many independent source files.
 
@@ -81,11 +88,13 @@ This is correct but slow for many independent source files.
 
 ## Recommended approach
 
-Use a three-part fix:
+Use a five-part fix:
 
 1. shared content-addressed preprocessing cache
-2. parallel source-file ingestion during first-time preprocessing
-3. shared in-run `sctGEP` query deduplication for matched targets
+2. metadata-only first pass to discover the final common gene set
+3. configurable parallel source-file ingestion during first-time preprocessing
+4. group-first preprocessing to bound peak RAM
+5. shared in-run `sctGEP` query deduplication for matched targets
 
 ## Part 1: shared preprocessing cache
 
@@ -135,12 +144,63 @@ preprocessing settings, they will reuse the same processed dataset cache.
 
 This should provide the largest gain for repeated experiments.
 
-## Part 2: parallel source-file ingestion
+## Part 2: metadata-only common-gene discovery
 
 ### Problem
 
-First-time preprocessing still requires reading many raw datasets, and that
-stage is currently serial.
+The current loader reads full expression matrices before it knows the final gene
+intersection that will survive preprocessing.
+
+This wastes:
+
+- disk IO, because genes that will later be dropped are still read from disk
+- RAM, because full-width DataFrames are materialized before the intersection
+- CPU time, because downstream alignment and conversion operate on more columns
+  than necessary
+
+### Proposed change
+
+Add a lightweight first pass that reads only per-file gene metadata.
+
+For each input file:
+
+1. if the source is `.h5ad`, open it in backed mode and read only `var_names`
+2. if the source is `.csv`, read only the header row
+3. convert those names into a normalized ordered gene list for that source
+
+Then compute one final target gene list for the real load phase:
+
+1. start from the intersection across all training sources
+2. if `gene_list_file` is configured, intersect with that too while preserving
+   the order defined by `gene_list_file`
+3. use this final gene list when loading the full matrices
+
+### Scope boundary
+
+This change should not alter:
+
+- downstream tensor shapes beyond the already expected common-gene reduction
+- training-target alignment semantics
+- cache file formats
+- model behavior
+
+### Expected result
+
+The real load phase should materialize only the final gene space that will be
+kept anyway.
+
+That should reduce:
+
+- peak memory during preprocessing
+- total bytes read from source matrices
+- time spent aligning and transforming unused genes
+
+## Part 3: configurable parallel source-file ingestion
+
+### Problem
+
+First-time preprocessing still requires reading many raw datasets, and the
+optimal worker count depends on available RAM.
 
 ### Proposed change
 
@@ -172,17 +232,74 @@ This change should not alter:
 
 ### Worker count
 
-Start with a conservative default:
+Expose a data config field such as:
 
-- use a bounded worker count such as `min(4, n_files)`
+```yaml
+data:
+  max_parallel_source_file_loads: 2
+```
 
-This avoids overloading I/O or RAM on shared systems while still improving
-parallel read throughput.
+Behavior:
 
-The first implementation can keep this internal rather than adding a new user
-config option.
+- default to a conservative value such as `2`
+- clamp the effective worker count to `min(configured_value, n_files)`
+- allow `1` on memory-tight servers
+- allow higher values on stronger machines
 
-## Part 3: shared in-run `sctGEP` query deduplication
+This gives users a direct stability/performance knob without changing dataset
+semantics.
+
+## Part 4: group-first preprocessing to bound peak RAM
+
+### Problem
+
+Even with grouping by shared `training_sct_gep_file_path`, preprocessing can
+still keep too much data alive if all groups contribute to one large in-memory
+merge before later stages complete.
+
+### Proposed change
+
+Process one group at a time after the common-gene first pass.
+
+For each preprocessing group:
+
+1. load only the final target genes for files in that group
+2. merge that group's expression and label tables
+3. apply the normal transformation pipeline for that group
+4. convert to arrays or save a temporary group-level intermediate on disk
+5. free group-local pandas objects before moving to the next group
+
+After all groups are processed:
+
+1. concatenate the group-level outputs in the original file order
+2. write the final processed dataset cache in the same format as today
+
+### Intermediate storage policy
+
+The recommended implementation should allow temporary group-level intermediates
+under the processed dataset directory during one preprocessing run.
+
+These intermediates are:
+
+- implementation details, not part of the public cache contract
+- safe to overwrite when `force_reprocess: true`
+- safe to delete after the final cache is written
+
+### Scope boundary
+
+This change should not alter:
+
+- the final processed cache layout
+- sample ordering relative to the configured training file order
+- matched-target tensor alignment
+- scaling semantics
+
+### Expected result
+
+Peak preprocessing memory should scale closer to the largest group instead of
+the full union of all source files.
+
+## Part 5: shared in-run `sctGEP` query deduplication
 
 ### Problem
 
@@ -252,10 +369,32 @@ Loading multiple `.h5ad` files concurrently may increase peak RAM usage.
 Mitigation:
 
 - keep the worker count conservative
-- parallelize only the independent file-read stage
-- keep later merge/transformation logic unchanged in the main process
+- load only the final target gene list after the metadata pass
+- process one group at a time instead of one full union merge
 
-### 3. Path-order semantics
+### 3. Metadata/header pass can disagree across file formats
+
+If `.h5ad` and `.csv` sources expose genes differently, the computed common gene
+set could be wrong.
+
+Mitigation:
+
+- normalize all discovered gene names to strings
+- preserve existing case-sensitive matching semantics
+- add regression tests that mix `.h5ad` and `.csv` inputs
+
+### 4. Temporary group intermediates can leave residue after failure
+
+If preprocessing crashes mid-run, temporary group artifacts may remain in the
+processed cache directory.
+
+Mitigation:
+
+- place them under a dedicated temporary subdirectory
+- overwrite them on the next `force_reprocess: true` run
+- delete them after successful final cache write
+
+### 5. Path-order semantics
 
 If file order matters for namespacing or downstream alignment, hashing must
 preserve meaningful ordering.
@@ -283,6 +422,8 @@ Mitigation:
 2. Compare preprocessing wall time before and after the change.
 3. Confirm that the final cached data shape, sample IDs, gene list, labels, and
    matched `true_sct_gep` targets remain unchanged.
+4. Confirm that the real load phase only materializes the final target gene set
+   instead of the full original width.
 
 ### Regression coverage
 
@@ -292,19 +433,29 @@ Add tests for:
 2. different hyperparameter-only ablations reusing the same processed dataset
    cache
 3. preprocessing-sensitive config changes producing different cache keys
-4. parallel load path preserving merged sample IDs and labels
-5. shared `sctGEP` sources being loaded once within one preprocessing run
+4. metadata-only common-gene discovery across multiple `.h5ad` inputs
+5. `gene_list_file` intersection preserving configured gene order
+6. mixed `.csv`/`.h5ad` metadata discovery producing the correct common genes
+7. configurable worker count being honored by the preprocessing loader
+8. grouped preprocessing preserving merged sample IDs and labels in original
+   file order
+9. temporary group intermediates being cleaned up after a successful run
+10. shared `sctGEP` sources being loaded once within one preprocessing run
 
 ## Recommendation
 
 Implement the balanced fix:
 
 1. shared content-addressed preprocessing cache
-2. conservative parallel multi-file ingestion
-3. in-run deduplication for shared matched-target `sctGEP` sources
+2. metadata-only common-gene discovery before full reads
+3. configurable conservative parallel multi-file ingestion
+4. group-first preprocessing with optional temporary intermediates
+5. in-run deduplication for shared matched-target `sctGEP` sources
 
 This is the smallest design that addresses both of the user’s actual needs:
 
 - much faster repeated runs across ablations
 - meaningfully faster first-time preprocessing for many training datasets
+- lower peak RAM during large multi-dataset preprocessing
+- a direct worker-count knob for unstable shared servers
 - fewer repeated `sctGEP` reference-file reads inside one matched-target build

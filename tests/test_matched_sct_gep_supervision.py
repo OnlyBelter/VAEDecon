@@ -330,6 +330,90 @@ def test_gepdataset_loads_shared_sct_reference_once_per_run(tmp_path: Path, monk
     assert dataset.true_sct_gep_present_mask.tolist() == [[True], [True], [True], [True]]
 
 
+def test_gepdataset_grouped_bulk_loading_preserves_input_order(tmp_path: Path):
+    genes = ["gene_a", "gene_b", "gene_c"]
+    bulk_a_path = tmp_path / "bulk_a.h5ad"
+    bulk_b_path = tmp_path / "bulk_b.h5ad"
+    bulk_c_path = tmp_path / "bulk_c.h5ad"
+    ref_shared_path = tmp_path / "shared_ref_sct.h5ad"
+    ref_other_path = tmp_path / "other_ref_sct.h5ad"
+    mapping_a_path = tmp_path / "sample2cell_a.csv"
+    mapping_b_path = tmp_path / "sample2cell_b.csv"
+    mapping_c_path = tmp_path / "sample2cell_c.csv"
+
+    _write_h5ad(
+        bulk_a_path,
+        x=np.array([[2.0, 4.0, 8.0]], dtype=np.float32),
+        obs_names=["sample_a"],
+        var_names=genes,
+        obs=pd.DataFrame({"CT1": [1.0]}, index=["sample_a"]),
+    )
+    _write_h5ad(
+        bulk_b_path,
+        x=np.array([[3.0, 9.0, 27.0]], dtype=np.float32),
+        obs_names=["sample_b"],
+        var_names=genes,
+        obs=pd.DataFrame({"CT1": [1.0]}, index=["sample_b"]),
+    )
+    _write_h5ad(
+        bulk_c_path,
+        x=np.array([[5.0, 25.0, 125.0]], dtype=np.float32),
+        obs_names=["sample_c"],
+        var_names=genes,
+        obs=pd.DataFrame({"CT1": [1.0]}, index=["sample_c"]),
+    )
+    _write_h5ad(
+        ref_shared_path,
+        x=np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32),
+        obs_names=["cell_a", "cell_b"],
+        var_names=genes,
+        obs=pd.DataFrame(index=["cell_a", "cell_b"]),
+    )
+    _write_h5ad(
+        ref_other_path,
+        x=np.array([[7.0, 8.0, 9.0]], dtype=np.float32),
+        obs_names=["cell_c"],
+        var_names=genes,
+        obs=pd.DataFrame(index=["cell_c"]),
+    )
+    pd.DataFrame({"cell_type": ["CT1"], "selected_cell_id": ["cell_a"]}, index=["sample_a"]).to_csv(mapping_a_path)
+    pd.DataFrame({"cell_type": ["CT1"], "selected_cell_id": ["cell_b"]}, index=["sample_b"]).to_csv(mapping_b_path)
+    pd.DataFrame({"cell_type": ["CT1"], "selected_cell_id": ["cell_c"]}, index=["sample_c"]).to_csv(mapping_c_path)
+
+    dataset = GEPDataset(
+        GEPDatasetConfig(
+            file_paths=[bulk_a_path, bulk_b_path, bulk_c_path],
+            processed_data_dir=tmp_path / "processed",
+            force_reprocess=True,
+            scaling_by_constant=False,
+            training_target_sets={
+                "Train_set1": {
+                    "training_set_file_path": bulk_a_path,
+                    "training_set_sample2cell_id_file_path": mapping_a_path,
+                    "training_sct_gep_file_path": ref_shared_path,
+                },
+                "Train_set2": {
+                    "training_set_file_path": bulk_b_path,
+                    "training_set_sample2cell_id_file_path": mapping_b_path,
+                    "training_sct_gep_file_path": ref_shared_path,
+                },
+                "Train_set3": {
+                    "training_set_file_path": bulk_c_path,
+                    "training_set_sample2cell_id_file_path": mapping_c_path,
+                    "training_sct_gep_file_path": ref_other_path,
+                },
+            },
+        )
+    )
+
+    assert dataset.sample_ids == [
+        "Train_set1::sample_a",
+        "Train_set2::sample_b",
+        "Train_set3::sample_c",
+    ]
+    assert dataset.true_sct_gep_present_mask.tolist() == [[True], [True], [True]]
+
+
 def test_matched_sct_gep_loss_masks_low_prop_cell_types():
     vae = VAE.__new__(VAE)
     vae.scaling_factor = 1.0

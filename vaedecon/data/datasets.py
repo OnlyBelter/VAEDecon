@@ -569,6 +569,7 @@ class GEPPreprocessor:
         min_var: float = 1.0,
         cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None,
         sample_id_namespace_by_path: Optional[Dict[str, str]] = None,
+        source_group_key_by_path: Optional[Dict[str, str]] = None,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         End-to-end preprocessing pipeline.
@@ -581,6 +582,7 @@ class GEPPreprocessor:
         gep_data_df, cell_prop_df = self._load_and_merge_data(
             file_paths=file_paths,
             sample_id_namespace_by_path=sample_id_namespace_by_path,
+            source_group_key_by_path=source_group_key_by_path,
         )
 
         # Step 2: Gene filtering
@@ -606,6 +608,7 @@ class GEPPreprocessor:
         self,
         file_paths: Sequence[Union[str, Path]],
         sample_id_namespace_by_path: Optional[Dict[str, str]] = None,
+        source_group_key_by_path: Optional[Dict[str, str]] = None,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Load each file and merge into one dataframe.
@@ -615,45 +618,103 @@ class GEPPreprocessor:
         - .csv path uses pd.read_csv
         - Merging uses join='inner' to keep intersected genes/columns
         """
-        all_data_dfs: List[pd.DataFrame] = []
-        all_cell_prop_dfs: List[pd.DataFrame] = []
-        load_jobs: list[tuple[Union[str, Path], Optional[str]]] = []
-        for path_like in file_paths:
+        load_jobs: list[dict[str, Any]] = []
+        for position, path_like in enumerate(file_paths):
+            resolved_path = str(Path(path_like).expanduser().resolve())
             namespace = None
             if sample_id_namespace_by_path:
-                namespace = sample_id_namespace_by_path.get(str(Path(path_like).expanduser().resolve()))
-            load_jobs.append((path_like, namespace))
+                namespace = sample_id_namespace_by_path.get(resolved_path)
+            source_group_key = resolved_path
+            if source_group_key_by_path:
+                source_group_key = source_group_key_by_path.get(resolved_path, resolved_path)
+            load_jobs.append(
+                {
+                    "position": position,
+                    "path_like": path_like,
+                    "resolved_path": resolved_path,
+                    "namespace": namespace,
+                    "source_group_key": str(source_group_key),
+                }
+            )
 
-        max_workers = min(_MAX_PARALLEL_SOURCE_FILE_LOADS, len(load_jobs))
-        if max_workers > 1:
-            log_message(f"Loading {len(load_jobs)} source files with {max_workers} worker threads...")
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                loaded_frames = list(
-                    executor.map(
-                        lambda job: _load_dataset_frames_from_path(job[0], namespace=job[1]),
-                        load_jobs,
-                    )
-                )
-        else:
-            loaded_frames = [
-                _load_dataset_frames_from_path(path_like, namespace=namespace)
-                for path_like, namespace in load_jobs
-            ]
-
-        for gep_data_df, cell_prop_df in loaded_frames:
-            all_data_dfs.append(gep_data_df)
-            all_cell_prop_dfs.append(cell_prop_df)
-
-        if not all_data_dfs:
+        if not load_jobs:
             raise ValueError("No data loaded. Please check file_paths.")
 
-        log_message("Merging datasets...")
-        gep_data_df = pd.concat(all_data_dfs, axis=0, join="inner")
-        cell_prop_df = pd.concat(all_cell_prop_dfs, axis=0, join="inner")
+        grouped_jobs: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+        for job in load_jobs:
+            grouped_jobs.setdefault(job["source_group_key"], []).append(job)
 
-        # Early memory cleanup
-        del all_data_dfs, all_cell_prop_dfs
-        gc.collect()
+        if len(grouped_jobs) > 1:
+            log_message(
+                f"Loading {len(load_jobs)} source files across {len(grouped_jobs)} preprocessing groups..."
+            )
+
+        merged_gep_data_df: Optional[pd.DataFrame] = None
+        merged_cell_prop_df: Optional[pd.DataFrame] = None
+        sample_ids_by_position: dict[int, list[str]] = {}
+
+        for group_idx, group_jobs in enumerate(grouped_jobs.values(), start=1):
+            max_workers = min(_MAX_PARALLEL_SOURCE_FILE_LOADS, len(group_jobs))
+            if max_workers > 1:
+                log_message(
+                    f"Loading preprocessing group {group_idx}/{len(grouped_jobs)} "
+                    f"with {len(group_jobs)} files and {max_workers} worker threads..."
+                )
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    loaded_group = list(
+                        executor.map(
+                            lambda job: (
+                                job["position"],
+                                _load_dataset_frames_from_path(job["path_like"], namespace=job["namespace"]),
+                            ),
+                            group_jobs,
+                        )
+                    )
+            else:
+                loaded_group = [
+                    (
+                        group_jobs[0]["position"],
+                        _load_dataset_frames_from_path(
+                            group_jobs[0]["path_like"],
+                            namespace=group_jobs[0]["namespace"],
+                        ),
+                    )
+                ]
+
+            group_data_dfs: List[pd.DataFrame] = []
+            group_cell_prop_dfs: List[pd.DataFrame] = []
+            for position, (gep_data_df, cell_prop_df) in sorted(loaded_group, key=lambda item: item[0]):
+                sample_ids_by_position[position] = gep_data_df.index.astype(str).tolist()
+                group_data_dfs.append(gep_data_df)
+                group_cell_prop_dfs.append(cell_prop_df)
+
+            log_message(f"Merging preprocessing group {group_idx}/{len(grouped_jobs)}...")
+            group_gep_data_df = pd.concat(group_data_dfs, axis=0, join="inner")
+            group_cell_prop_df = pd.concat(group_cell_prop_dfs, axis=0, join="inner")
+
+            if merged_gep_data_df is None:
+                merged_gep_data_df = group_gep_data_df
+                merged_cell_prop_df = group_cell_prop_df
+            else:
+                merged_gep_data_df = pd.concat([merged_gep_data_df, group_gep_data_df], axis=0, join="inner")
+                merged_cell_prop_df = pd.concat([merged_cell_prop_df, group_cell_prop_df], axis=0, join="inner")
+
+            del loaded_group, group_data_dfs, group_cell_prop_dfs, group_gep_data_df, group_cell_prop_df
+            gc.collect()
+
+        gep_data_df = merged_gep_data_df
+        cell_prop_df = merged_cell_prop_df
+        if gep_data_df is None or cell_prop_df is None:
+            raise ValueError("No data loaded. Please check file_paths.")
+
+        expected_sample_ids: list[str] = []
+        for position in range(len(load_jobs)):
+            expected_sample_ids.extend(sample_ids_by_position.get(position, []))
+
+        if expected_sample_ids and gep_data_df.index.is_unique:
+            gep_data_df = gep_data_df.loc[expected_sample_ids, :]
+            if not cell_prop_df.empty and cell_prop_df.index.is_unique:
+                cell_prop_df = cell_prop_df.loc[expected_sample_ids, :]
 
         if not cell_prop_df.empty:
             if len(gep_data_df) != len(cell_prop_df):
@@ -937,6 +998,20 @@ class GEPDataset(Dataset):
 
         return namespace_by_path
 
+    def _build_source_group_key_by_path(self) -> Dict[str, str]:
+        """Group bulk source files by shared matched-target SCT reference."""
+        source_group_key_by_path: Dict[str, str] = {}
+        for target_cfg in dict(self.config.training_target_sets or {}).values():
+            resolved_bulk_path = str(Path(target_cfg.training_set_file_path).expanduser().resolve())
+            resolved_sct_gep_path = str(Path(target_cfg.training_sct_gep_file_path).expanduser().resolve())
+            source_group_key_by_path[resolved_bulk_path] = resolved_sct_gep_path
+
+        for path_like in self.config.file_paths:
+            resolved_path = str(Path(path_like).expanduser().resolve())
+            source_group_key_by_path.setdefault(resolved_path, f"source::{resolved_path}")
+
+        return source_group_key_by_path
+
     # -------------------------------------------------------------------------
     # Preprocess + cache
     # -------------------------------------------------------------------------
@@ -944,6 +1019,7 @@ class GEPDataset(Dataset):
         """Run preprocessing pipeline and save outputs to cache."""
         preprocessor = GEPPreprocessor(chunk_size=self.chunk_size)
         sample_id_namespace_by_path = self._build_sample_id_namespace_by_path()
+        source_group_key_by_path = self._build_source_group_key_by_path()
 
         gep_data_df, cell_prop_df = preprocessor.run(
             file_paths=self.config.file_paths,
@@ -952,6 +1028,7 @@ class GEPDataset(Dataset):
             min_var=self.config.min_var,
             cell_cell2ave_exp_file_path=self.config.cell_cell2ave_exp_file_path,
             sample_id_namespace_by_path=sample_id_namespace_by_path,
+            source_group_key_by_path=source_group_key_by_path,
         )
 
         # Convert to float32 numpy and apply optional scaling
