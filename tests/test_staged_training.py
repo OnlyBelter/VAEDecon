@@ -108,6 +108,18 @@ class DummySaveModel(torch.nn.Module):
         Path(model_dir, "saved_marker.txt").write_text("saved", encoding="utf-8")
 
 
+class DummyPrototypeStageModel(torch.nn.Module):
+    def __init__(self, model_config):
+        super().__init__()
+        self.encoders = torch.nn.ModuleList([torch.nn.Linear(4, 4)])
+        self.decoder = torch.nn.Linear(4, 4)
+        self.residual_decoder = self.decoder
+        self.prototype_bank = torch.nn.Parameter(torch.randn(4, 3))
+        self.prototype_decoder = torch.nn.Linear(4, 4)
+        self.cell_prop_predictor = torch.nn.Linear(4, 3)
+        self.model_config = model_config
+
+
 def test_staged_training_config_accepts_selected_stage_with_init_checkpoint(tmp_path: Path):
     config_dict = _base_staged_config_dict(tmp_path)
     config_dict["training"]["staged_training"]["run_stages"] = ["reconstruction_training"]
@@ -183,6 +195,88 @@ def test_apply_stage_module_trainability_freezes_expected_modules(tmp_path: Path
     assert all(not parameter.requires_grad for parameter in dummy_model.encoders.parameters())
     assert all(not parameter.requires_grad for parameter in dummy_model.decoder.parameters())
     assert all(parameter.requires_grad for parameter in dummy_model.cell_prop_predictor.parameters())
+
+
+def test_staged_training_prototype_workflow_requires_use_prototype_bank(tmp_path: Path):
+    config_dict = _base_staged_config_dict(tmp_path)
+    config_dict["training"]["staged_training"]["stages"] = [
+        config_dict["training"]["staged_training"]["stages"][0],
+        {
+            "name": "prototype_training",
+            "max_epochs": 5,
+            "train_modules": ["prototype_bank", "prototype_decoder"],
+            "freeze_modules": ["cell_prop_predictor", "residual_decoder"],
+            "learning_rate_scale": 1.0,
+            "loss_overrides": {
+                "cell_prop": 0.0,
+                "prototype_anchor_weight": 1.0,
+            },
+            "early_stopping": {
+                "monitor": "val_loss",
+                "patience": 2,
+                "min_delta": 0.0,
+            },
+        },
+        {
+            "name": "residual_training",
+            "max_epochs": 5,
+            "train_modules": ["encoders", "residual_decoder"],
+            "freeze_modules": ["cell_prop_predictor", "prototype_bank", "prototype_decoder"],
+            "learning_rate_scale": 1.0,
+            "loss_overrides": {
+                "cell_prop": 0.0,
+                "cell_type_sct_gep_weight": 1.0,
+            },
+            "early_stopping": {
+                "monitor": "val_loss",
+                "patience": 2,
+                "min_delta": 0.0,
+            },
+        },
+        {
+            "name": "joint_finetune",
+            "max_epochs": 5,
+            "train_modules": ["cell_prop_predictor", "encoders", "residual_decoder"],
+            "freeze_modules": ["prototype_bank", "prototype_decoder"],
+            "learning_rate_scale": 0.1,
+            "early_stopping": {
+                "monitor": "val_loss",
+                "patience": 2,
+                "min_delta": 0.0,
+            },
+        },
+    ]
+    config_dict["training"]["staged_training"]["run_stages"] = ["prototype_training"]
+    config_dict["training"]["staged_training"]["stage_init_checkpoints"] = {
+        "prototype_training": str(tmp_path / "predictor.ckpt"),
+    }
+
+    with pytest.raises(ValueError, match="use_prototype_bank=True"):
+        VAEDeconConfig.from_dict(config_dict)
+
+
+def test_apply_stage_module_trainability_handles_new_prototype_module_groups(tmp_path: Path):
+    config_dict = _base_staged_config_dict(tmp_path)
+    config_dict["model"]["use_prototype_bank"] = True
+    config = VAEDeconConfig.from_dict(config_dict)
+    trainer = VAEDeconTrainer(config=config)
+    dummy_model = DummyPrototypeStageModel(model_config=config.model)
+
+    mode_overrides = trainer._apply_stage_module_trainability(
+        dummy_model,
+        train_modules=["prototype_bank", "prototype_decoder"],
+    )
+
+    assert mode_overrides["prototype_bank"] == "train"
+    assert mode_overrides["prototype_decoder"] == "train"
+    assert mode_overrides["cell_prop_predictor"] == "eval"
+    assert mode_overrides["encoders"] == "eval"
+    assert mode_overrides["decoder"] == "eval"
+    assert mode_overrides["residual_decoder"] == "eval"
+    assert dummy_model.prototype_bank.requires_grad is True
+    assert all(parameter.requires_grad for parameter in dummy_model.prototype_decoder.parameters())
+    assert all(not parameter.requires_grad for parameter in dummy_model.encoders.parameters())
+    assert all(not parameter.requires_grad for parameter in dummy_model.cell_prop_predictor.parameters())
 
 
 def test_stage_loss_overrides_reset_and_apply(tmp_path: Path):

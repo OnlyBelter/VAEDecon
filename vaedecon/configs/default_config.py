@@ -25,6 +25,10 @@ class LossCoefficient(BaseModel):
     inter_sample_similarity_weight: float = 0.0
     cell_type_sct_gep_weight: float = 0.0
     cell_type_existence_weight: float = 0.0
+    prototype_anchor_weight: float = 0.0
+    prototype_separation_weight: float = 0.0
+    residual_zero_mean_weight: float = 0.0
+    residual_embedding_norm_weight: float = 0.0
     z_score_reg_weight: float = 0.0
     z_score_kl_weight: float = 0.0  # Weight for KL divergence between empirical Z-score distribution and N(0,1)
     low_mean_std_weight: float = 1.0  # Weight for MSE regularization on low mean/std genes
@@ -46,6 +50,10 @@ class LossCoefficient(BaseModel):
         "inter_sample_similarity_weight",
         "cell_type_sct_gep_weight",
         "cell_type_existence_weight",
+        "prototype_anchor_weight",
+        "prototype_separation_weight",
+        "residual_zero_mean_weight",
+        "residual_embedding_norm_weight",
         "z_score_reg_weight",
         "z_score_kl_weight",
         "low_mean_std_weight",
@@ -362,6 +370,8 @@ class StagedTrainingStageConfig(BaseModel):
 
     name: Literal[
         "cell_prop_predictor_pretrain",
+        "prototype_training",
+        "residual_training",
         "reconstruction_training",
         "joint_finetune",
     ]
@@ -394,7 +404,14 @@ class StagedTrainingStageConfig(BaseModel):
     @field_validator("train_modules", "freeze_modules")
     @classmethod
     def validate_module_names(cls, v: List[str]) -> List[str]:
-        valid_modules = {"cell_prop_predictor", "encoders", "decoder"}
+        valid_modules = {
+            "cell_prop_predictor",
+            "encoders",
+            "decoder",
+            "prototype_bank",
+            "prototype_decoder",
+            "residual_decoder",
+        }
         normalized: List[str] = []
         for module_name in v:
             if not isinstance(module_name, str):
@@ -434,6 +451,18 @@ class StagedTrainingStageConfig(BaseModel):
             )
         if self.name == "cell_prop_predictor_pretrain":
             self.early_stopping.monitor = "val_cell_prop_loss"
+        if self.name == "prototype_training":
+            required = {"prototype_bank", "prototype_decoder"}
+            missing = sorted(required - set(self.train_modules))
+            if missing:
+                raise ValueError(
+                    "prototype_training must include the following train_modules: "
+                    + ", ".join(missing)
+                )
+        if self.name == "residual_training" and "residual_decoder" not in set(self.train_modules):
+            raise ValueError(
+                "residual_training must include 'residual_decoder' in train_modules"
+            )
         return self
 
 
@@ -510,8 +539,7 @@ class StagedTrainingConfig(BaseModel):
             ]
             if run_stage_names != expected_stage_slice:
                 raise ValueError(
-                    "run_stages must follow the canonical contiguous stage order: "
-                    "cell_prop_predictor_pretrain -> reconstruction_training -> joint_finetune"
+                    "run_stages must follow the configured canonical contiguous stage order."
                 )
 
         unknown_init_ckpt_stages = set(self.stage_init_checkpoints.keys()) - set(configured_stage_names)
@@ -1312,6 +1340,20 @@ class ModelConfig(BaseModelConfig):
         default=False,
         description="Whether to learn GEP residuals compared to the mean GEP of each cell type (instead of learning the full GEP)"
     )
+    use_prototype_bank: bool = Field(
+        default=False,
+        description=(
+            "Enable the four-stage prototype-residual workflow. When True, the model "
+            "builds an explicit prototype bank and a dedicated prototype decoder."
+        ),
+    )
+    prototype_decoder_hidden_dims: List[int] = Field(
+        default_factory=list,
+        description=(
+            "Optional hidden dimensions for the prototype decoder. When empty, a "
+            "smaller decoder is derived from decoder_hidden_dims."
+        ),
+    )
     learn_gep_residual_mode: Literal["zscore", "mean_centered"] = Field(
         default="zscore",
         description=(
@@ -1907,16 +1949,31 @@ class VAEDeconConfig:
                 )
 
             selected_stages = staged_training.run_stages or [stage.name for stage in staged_training.stages]
-            if any(stage_name in {"reconstruction_training", "joint_finetune"} for stage_name in selected_stages):
+            prototype_workflow_stage_names = {"prototype_training", "residual_training"}
+            if any(stage_name in prototype_workflow_stage_names for stage_name in selected_stages):
+                if not model.use_prototype_bank:
+                    raise ValueError(
+                        "training.staged_training prototype/residual stages require "
+                        "model.use_prototype_bank=True"
+                    )
+            if any(
+                stage_name in {
+                    "prototype_training",
+                    "residual_training",
+                    "reconstruction_training",
+                    "joint_finetune",
+                }
+                for stage_name in selected_stages
+            ):
                 predictor_alias = model.cell_prop_predictor_alias
                 if model.encoder_output_routing.cell_prop_source != predictor_alias:
                     raise ValueError(
-                        "training.staged_training reconstruction/joint stages require "
+                        "training.staged_training later stages require "
                         "model.encoder_output_routing.cell_prop_source to use the cell_prop_predictor alias"
                     )
                 if model.encoder_output_routing.decoder_context_source != predictor_alias:
                     raise ValueError(
-                        "training.staged_training reconstruction/joint stages require "
+                        "training.staged_training later stages require "
                         "model.encoder_output_routing.decoder_context_source to use the cell_prop_predictor alias"
                     )
 

@@ -52,6 +52,15 @@ def _resolve_stage_named_modules(model: BaseAE) -> Dict[str, Any]:
     decoder = getattr(base_model, "decoder", None)
     if decoder is not None:
         modules["decoder"] = decoder
+    residual_decoder = getattr(base_model, "residual_decoder", None)
+    if residual_decoder is not None:
+        modules["residual_decoder"] = residual_decoder
+    prototype_bank = getattr(base_model, "prototype_bank", None)
+    if prototype_bank is not None:
+        modules["prototype_bank"] = prototype_bank
+    prototype_decoder = getattr(base_model, "prototype_decoder", None)
+    if prototype_decoder is not None:
+        modules["prototype_decoder"] = prototype_decoder
     cell_prop_predictor = getattr(base_model, "cell_prop_predictor", None)
     if cell_prop_predictor is not None:
         modules["cell_prop_predictor"] = cell_prop_predictor

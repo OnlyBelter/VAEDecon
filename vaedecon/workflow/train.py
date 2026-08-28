@@ -653,6 +653,8 @@ class VAEDeconTrainer:
             encoders=self.config.model.encoders,
             decoders=self.config.model.decoders,
             mask_ratio=self.config.model.mask_ratio,
+            use_prototype_bank=self.config.model.use_prototype_bank,
+            prototype_decoder_hidden_dims=self.config.model.prototype_decoder_hidden_dims,
             learn_gep_residual=self.config.model.learn_gep_residual,
             learn_gep_residual_mode=self.config.model.learn_gep_residual_mode,
             conditional_decoder_cell_type_emb_dim=self.config.model.conditional_decoder_cell_type_emb_dim,
@@ -845,6 +847,15 @@ class VAEDeconTrainer:
         decoder = getattr(base_model, "decoder", None)
         if decoder is not None:
             modules["decoder"] = decoder
+        residual_decoder = getattr(base_model, "residual_decoder", None)
+        if residual_decoder is not None:
+            modules["residual_decoder"] = residual_decoder
+        prototype_bank = getattr(base_model, "prototype_bank", None)
+        if prototype_bank is not None:
+            modules["prototype_bank"] = prototype_bank
+        prototype_decoder = getattr(base_model, "prototype_decoder", None)
+        if prototype_decoder is not None:
+            modules["prototype_decoder"] = prototype_decoder
         cell_prop_predictor = getattr(base_model, "cell_prop_predictor", None)
         if cell_prop_predictor is not None:
             modules["cell_prop_predictor"] = cell_prop_predictor
@@ -858,16 +869,27 @@ class VAEDeconTrainer:
     ) -> Dict[str, str]:
         modules = self._resolve_stage_named_modules(model)
         module_mode_overrides: Dict[str, str] = {}
+        grouped_modules: Dict[int, tuple[torch.nn.Module, list[str]]] = {}
         for module_name, module in modules.items():
-            is_trainable = module_name in set(train_modules)
+            module_id = id(module)
+            if module_id not in grouped_modules:
+                grouped_modules[module_id] = (module, [module_name])
+            else:
+                grouped_modules[module_id][1].append(module_name)
+
+        train_module_set = set(train_modules)
+        for module, module_aliases in grouped_modules.values():
+            is_trainable = any(alias in train_module_set for alias in module_aliases)
             for parameter in module.parameters():
                 parameter.requires_grad = is_trainable
             if is_trainable:
                 module.train()
-                module_mode_overrides[module_name] = "train"
+                for module_name in module_aliases:
+                    module_mode_overrides[module_name] = "train"
             else:
                 module.eval()
-                module_mode_overrides[module_name] = "eval"
+                for module_name in module_aliases:
+                    module_mode_overrides[module_name] = "eval"
         return module_mode_overrides
 
     @staticmethod
@@ -929,7 +951,15 @@ class VAEDeconTrainer:
                 predictor_state_dict[normalized_key[len("cell_prop_predictor."):]] = value
             elif not any(
                 normalized_key.startswith(prefix)
-                for prefix in ("encoders.", "decoder.", "logits", "hierarchical_code_head")
+                for prefix in (
+                    "encoders.",
+                    "decoder.",
+                    "residual_decoder.",
+                    "prototype_bank.",
+                    "prototype_decoder.",
+                    "logits",
+                    "hierarchical_code_head",
+                )
             ):
                 predictor_state_dict[normalized_key] = value
         return predictor_state_dict
@@ -974,6 +1004,11 @@ class VAEDeconTrainer:
                 prog_bar_metrics.append("cell_prop_loss")
             stage_training_config.prog_bar_metrics = prog_bar_metrics
         return stage_training_config
+
+    @staticmethod
+    def _set_stage_runtime_context(model, *, stage_name: str) -> None:
+        base_model = _unwrap_stage_model(model)
+        setattr(base_model, "current_stage_name", stage_name)
 
     @staticmethod
     def _resolve_stage_checkpoint_paths(stage_dir: Path) -> tuple[Path, Path]:
@@ -1097,7 +1132,7 @@ class VAEDeconTrainer:
                     output_dir=stage_dir,
                     metric_pairs=metric_pairs,
                 )
-            elif stage_name == "reconstruction_training":
+            elif stage_name in {"reconstruction_training", "residual_training"}:
                 plot_loss_panels(
                     history_df=history_df,
                     output_dir=stage_dir,
@@ -1115,6 +1150,34 @@ class VAEDeconTrainer:
                                 ("val_cell_type_sct_gep_loss", "val sctGEP loss"),
                             ],
                             "title": "Cell-Type sctGEP Loss",
+                        },
+                    ],
+                )
+            elif stage_name == "prototype_training":
+                plot_loss_panels(
+                    history_df=history_df,
+                    output_dir=stage_dir,
+                    panel_metric_pairs=[
+                        {
+                            "metric_pairs": [
+                                ("train_loss_epoch", "train loss"),
+                                ("val_loss", "val loss"),
+                            ],
+                            "title": "Total Loss",
+                        },
+                        {
+                            "metric_pairs": [
+                                ("train_prototype_anchor_loss_epoch", "train prototype anchor"),
+                                ("val_prototype_anchor_loss", "val prototype anchor"),
+                            ],
+                            "title": "Prototype Anchor Loss",
+                        },
+                        {
+                            "metric_pairs": [
+                                ("train_prototype_separation_loss_epoch", "train prototype separation"),
+                                ("val_prototype_separation_loss", "val prototype separation"),
+                            ],
+                            "title": "Prototype Separation Loss",
                         },
                     ],
                 )
@@ -1230,13 +1293,17 @@ class VAEDeconTrainer:
                     stage_cfg.name,
                     init_checkpoint_path,
                 )
-                if stage_cfg.name == "reconstruction_training" and direct_predecessor not in executed_stage_best_checkpoints:
+                if (
+                    stage_cfg.name in {"reconstruction_training", "prototype_training"}
+                    and direct_predecessor not in executed_stage_best_checkpoints
+                ):
                     self._load_cell_prop_predictor_checkpoint(model, init_checkpoint_path)
                 else:
                     self._load_stage_checkpoint(model, init_checkpoint_path)
 
             self._reset_stage_loss_overrides(model, base_model_config)
             self._apply_stage_loss_overrides(model, stage_cfg.loss_overrides)
+            self._set_stage_runtime_context(model, stage_name=stage_cfg.name)
             module_mode_overrides = self._apply_stage_module_trainability(
                 model,
                 train_modules=list(stage_cfg.train_modules),

@@ -72,6 +72,10 @@ class LossTerms:
     attractor: torch.Tensor = torch.tensor(0.0)
     cell_type_sct_gep: torch.Tensor = torch.tensor(0.0)
     cell_type_existence: torch.Tensor = torch.tensor(0.0)
+    prototype_anchor: torch.Tensor = torch.tensor(0.0)
+    prototype_separation: torch.Tensor = torch.tensor(0.0)
+    residual_zero_mean: torch.Tensor = torch.tensor(0.0)
+    residual_embedding_norm: torch.Tensor = torch.tensor(0.0)
     z_score_reciprocal: torch.Tensor = torch.tensor(0.0)  # Optional term for std regularization
     z_score_kl_loss: torch.Tensor = torch.tensor(0.0)  # New KL term for empirical z-score to N(0,1)
     low_mean_std_gene_loss: torch.Tensor = torch.tensor(0.0)  # Optional term to prevent collapse of low-mean/std genes
@@ -301,6 +305,26 @@ class VAE(BaseAE):
             "hierarchical_code_targets",
             torch.tensor(hierarchical_targets, dtype=torch.float32),
         )
+        self.use_prototype_bank = bool(getattr(model_config, "use_prototype_bank", False))
+        self.current_stage_name = "joint_finetune"
+        self.prototype_bank = None
+        self.prototype_decoder = None
+        self.residual_decoder = self.decoder
+        if self.use_prototype_bank:
+            prototype_hidden_dims = list(getattr(model_config, "prototype_decoder_hidden_dims", []) or [])
+            if not prototype_hidden_dims:
+                prototype_hidden_dims = list(getattr(model_config, "decoder_hidden_dims", [512, 512, 1024])[:2])
+            from ...models.nn.mlp import DecoderMLP
+            prototype_decoder_args = model_config.model_copy(
+                update={
+                    "decoder_hidden_dims": prototype_hidden_dims,
+                    "learn_gep_residual": False,
+                },
+                deep=True,
+            )
+            self.prototype_bank = nn.Parameter(torch.empty(latent_dim, n_cell_types))
+            nn.init.orthogonal_(self.prototype_bank)
+            self.prototype_decoder = DecoderMLP(args=prototype_decoder_args)
         self.cell_prop_activation_function = model_config.cell_prop_activation_function
         self.cancer_cell_type_index = None
         if self.cell_prop_activation_function == "sigmoid":
@@ -811,6 +835,18 @@ class VAE(BaseAE):
         # For each cell type k, sample z from diagonal Gaussian N(mu_k, diag(sigma_k^2))
         # via reparameterization trick.
         z_types = reparameterize_gaussian(mu_types, log_var_types)
+        z_proto = None
+        prototype_recon_x_all_types = None
+        prototype_recon_x_all_types_log = None
+        if self.use_prototype_bank and self.prototype_bank is not None and self.prototype_decoder is not None:
+            z_proto = self.prototype_bank.unsqueeze(0).expand(batch_size, -1, -1)
+            proto_flat = self.prototype_bank.transpose(0, 1)
+            prototype_recon_flat = self.prototype_decoder(proto_flat)["reconstruction"]
+            prototype_recon_x_all_types = (
+                prototype_recon_flat.view(1, n_cell_types, -1)
+                .permute(0, 2, 1)
+                .expand(batch_size, -1, -1)
+            )
 
         # Flatten for decoder: (B, L, C) -> (B, C, L) -> (B*C, L)
         z_types_flat = z_types.permute(0, 2, 1).reshape(-1, self.model_config.latent_dim)
@@ -839,6 +875,17 @@ class VAE(BaseAE):
         # Restore shape: (B*C, G) -> (B, C, G) -> (B, G, C)
         # We need (B, G, C) for subsequent matrix multiplication.
         recon_x_all_types = recon_flat.view(batch_size, n_cell_types, -1).permute(0, 2, 1)
+        stage_name = str(getattr(self, "current_stage_name", "") or "")
+        using_prototype_only_stage = (
+            self.use_prototype_bank
+            and stage_name == "prototype_training"
+            and prototype_recon_x_all_types is not None
+        )
+        if self.use_prototype_bank and prototype_recon_x_all_types is not None:
+            if using_prototype_only_stage:
+                recon_x_all_types = prototype_recon_x_all_types
+            else:
+                recon_x_all_types = prototype_recon_x_all_types + recon_x_all_types
         # -------------------------------------------------------
 
         # 5. Scaling & Mixing
@@ -865,13 +912,36 @@ class VAE(BaseAE):
                 if self.data_config.scaling_by_constant
                 else recon_x_all_types
             )
+            if self.use_prototype_bank and prototype_recon_x_all_types is not None:
+                prototype_log = prototype_recon_x_all_types
+                if self.data_config.scaling_by_constant:
+                    prototype_log = prototype_log * self.scaling_factor
+                prototype_log = _clamp_log2_expression_before_exp(
+                    prototype_log,
+                    min_value=0.0,
+                    max_value=20.0,
+                )
+                prototype_recon_x_all_types_log = (
+                    prototype_log / self.scaling_factor
+                    if self.data_config.scaling_by_constant
+                    else prototype_log
+                )
             # Decoder outputs full GEP in log space -> convert to CPM for mixing.
             recon_x_all_types_cpm = log_exp2cpm_tensor(recon_x_all_types, transpose=True)
             self.z_scores = None
         elif residual_mode == "mean_centered":
             # Decoder outputs a mean-centered residual in scaled log space.
             recon_residual_log = recon_x_all_types
-            recon_x_all_types_log = recon_residual_log + self.g_mean.unsqueeze(0)
+            if self.use_prototype_bank and prototype_recon_x_all_types is not None:
+                prototype_recon_x_all_types_log = prototype_recon_x_all_types
+                if using_prototype_only_stage:
+                    recon_residual_log = torch.zeros_like(recon_x_all_types)
+                    recon_x_all_types_log = prototype_recon_x_all_types_log
+                else:
+                    recon_residual_log = recon_x_all_types - prototype_recon_x_all_types
+                    recon_x_all_types_log = prototype_recon_x_all_types_log + recon_residual_log
+            else:
+                recon_x_all_types_log = recon_residual_log + self.g_mean.unsqueeze(0)
             # Clamp full reconstructed log2(TPM+1) to the normalized design range:
             # scaling_factor=20 means valid scaled expression stays within [0, 1].
             recon_x_all_types_unscaled_log = _clamp_log2_expression_before_exp(
@@ -957,6 +1027,9 @@ class VAE(BaseAE):
             true_sct_gep=true_sct_gep,
             true_sct_gep_present_mask=true_sct_gep_present_mask,
             sample_ids=batch_sample_ids,
+            z_proto=z_proto,
+            z_res=z_types,
+            prototype_recon_x_all_types_log=prototype_recon_x_all_types_log,
         )
 
         return ModelOutput(
@@ -977,6 +1050,10 @@ class VAE(BaseAE):
             inter_sample_similarity_loss=loss_terms.inter_sample_similarity_loss,
             cell_type_sct_gep_loss=loss_terms.cell_type_sct_gep,
             cell_type_existence_loss=loss_terms.cell_type_existence,
+            prototype_anchor_loss=loss_terms.prototype_anchor,
+            prototype_separation_loss=loss_terms.prototype_separation,
+            residual_zero_mean_loss=loss_terms.residual_zero_mean,
+            residual_embedding_norm_loss=loss_terms.residual_embedding_norm,
             mu=mu_mean,
             mu_deconv=mu_types,
             log_var=log_var_types,
@@ -985,6 +1062,9 @@ class VAE(BaseAE):
             recon_x_all_types=recon_x_all_types_cpm,  # Usually return CPM format for analysis
             recon_x_all_types_log=recon_x_all_types_log,
             recon_residual_log=recon_residual_log,
+            z_proto=z_proto,
+            z_res=z_types,
+            z_vis=(z_proto + z_types) if z_proto is not None else None,
             z_score_reciprocal=loss_terms.z_score_reciprocal,  # For monitoring potential z-score collapse when learning residuals
         )
 
@@ -1014,6 +1094,9 @@ class VAE(BaseAE):
         true_sct_gep: Optional[torch.Tensor] = None,
         true_sct_gep_present_mask: Optional[torch.Tensor] = None,
         sample_ids: Optional[Sequence[str]] = None,
+        z_proto: Optional[torch.Tensor] = None,
+        z_res: Optional[torch.Tensor] = None,
+        prototype_recon_x_all_types_log: Optional[torch.Tensor] = None,
     ) -> LossTerms:
         """
         Compute all objective terms and aggregate total loss.
@@ -1280,6 +1363,10 @@ class VAE(BaseAE):
             cell_type_sct_gep_loss = torch.zeros((batch_size,), device=device)
 
         cell_type_existence_weight = float(getattr(lo, "cell_type_existence_weight", 0.0) or 0.0)
+        prototype_anchor_weight = float(getattr(lo, "prototype_anchor_weight", 0.0) or 0.0)
+        prototype_separation_weight = float(getattr(lo, "prototype_separation_weight", 0.0) or 0.0)
+        residual_zero_mean_weight = float(getattr(lo, "residual_zero_mean_weight", 0.0) or 0.0)
+        residual_embedding_norm_weight = float(getattr(lo, "residual_embedding_norm_weight", 0.0) or 0.0)
         if cell_type_existence_weight > 0:
             if not self.model_config.predict_cell_prop:
                 raise ValueError(
@@ -1305,6 +1392,45 @@ class VAE(BaseAE):
                 cell_type_existence_loss = torch.zeros((batch_size,), device=device)
         else:
             cell_type_existence_loss = torch.zeros((batch_size,), device=device)
+
+        if prototype_anchor_weight > 0:
+            if prototype_recon_x_all_types_log is None:
+                raise ValueError(
+                    "prototype_anchor_weight > 0 requires prototype_recon_x_all_types_log."
+                )
+            prototype_anchor_loss = (prototype_recon_x_all_types_log[:1] - self.g_mean.unsqueeze(0)).pow(2).mean(
+                dim=(1, 2)
+            ).expand(batch_size)
+        else:
+            prototype_anchor_loss = torch.zeros((batch_size,), device=device)
+
+        if prototype_separation_weight > 0:
+            if prototype_recon_x_all_types_log is None:
+                raise ValueError(
+                    "prototype_separation_weight > 0 requires prototype_recon_x_all_types_log."
+                )
+            proto = prototype_recon_x_all_types_log[:1].squeeze(0).transpose(0, 1)
+            proto_norm = F.normalize(proto, p=2, dim=1, eps=EPS)
+            cosine = proto_norm @ proto_norm.transpose(0, 1)
+            n_proto = cosine.shape[0]
+            off_diag = ~torch.eye(n_proto, device=cosine.device, dtype=torch.bool)
+            prototype_separation_loss = cosine[off_diag].mean().reshape(1).expand(batch_size)
+        else:
+            prototype_separation_loss = torch.zeros((batch_size,), device=device)
+
+        if residual_zero_mean_weight > 0:
+            if z_res is None:
+                raise ValueError("residual_zero_mean_weight > 0 requires z_res.")
+            residual_zero_mean_loss = z_res.mean(dim=0).pow(2).mean().reshape(1).expand(batch_size)
+        else:
+            residual_zero_mean_loss = torch.zeros((batch_size,), device=device)
+
+        if residual_embedding_norm_weight > 0:
+            if z_res is None:
+                raise ValueError("residual_embedding_norm_weight > 0 requires z_res.")
+            residual_embedding_norm_loss = z_res.pow(2).mean(dim=(1, 2))
+        else:
+            residual_embedding_norm_loss = torch.zeros((batch_size,), device=device)
 
         # --- 3. KL Divergence (Cell Proportions - Dirichlet) ---
         kld_p, cell_prop_loss = self._cell_prop_dirichlet_loss(
@@ -1361,6 +1487,10 @@ class VAE(BaseAE):
             + inter_sample_similarity_weight * inter_sample_similarity_loss
             + cell_type_sct_gep_weight * cell_type_sct_gep_loss
             + cell_type_existence_weight * cell_type_existence_loss
+            + prototype_anchor_weight * prototype_anchor_loss
+            + prototype_separation_weight * prototype_separation_loss
+            + residual_zero_mean_weight * residual_zero_mean_loss
+            + residual_embedding_norm_weight * residual_embedding_norm_loss
             # + z_score_reg_weight * (1 / mean_z_scores)
         ).mean()
 
@@ -1376,6 +1506,10 @@ class VAE(BaseAE):
             attractor=attractor_loss.mean(),
             cell_type_sct_gep=cell_type_sct_gep_loss.mean(),
             cell_type_existence=cell_type_existence_loss.mean(),
+            prototype_anchor=prototype_anchor_loss.mean(),
+            prototype_separation=prototype_separation_loss.mean(),
+            residual_zero_mean=residual_zero_mean_loss.mean(),
+            residual_embedding_norm=residual_embedding_norm_loss.mean(),
             hierarchical_code=hierarchical_code_loss.mean(),
             z_score_reciprocal=(1 / mean_z_scores).mean(),
             z_score_kl_loss=z_score_kl_loss.mean(),
