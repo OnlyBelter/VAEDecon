@@ -9,6 +9,7 @@ import torch
 import vaedecon.data.datasets as datasets_module
 from vaedecon.configs.default_config import GEPDatasetConfig
 from vaedecon.data.datasets import GEPDataset
+from vaedecon.data.datasets import GEPPreprocessor
 from vaedecon.data.datasets import build_matched_sct_gep_training_targets
 from vaedecon.data.datasets import _write_true_sct_gep_targets_into
 from vaedecon.models.vae.vae_model import VAE, to_log_space
@@ -100,6 +101,68 @@ def test_write_true_sct_gep_targets_into_uses_preindexed_rows_and_reports_count(
     np.testing.assert_allclose(true_sct_gep_dest[0, :, 0], np.array([1.0, 2.0], dtype=np.float32))
     np.testing.assert_allclose(true_sct_gep_dest[0, :, 1], np.array([3.0, 4.0], dtype=np.float32))
     np.testing.assert_allclose(true_sct_gep_dest[1, :, 0], np.array([5.0, 6.0], dtype=np.float32))
+
+
+def test_gep_preprocessor_uses_direct_path_for_small_source_counts(monkeypatch):
+    preprocessor = GEPPreprocessor(chunk_size=2)
+    call_order: list[str] = []
+
+    def _fake_direct(**_kwargs):
+        call_order.append("direct")
+        return {
+            "data_array": np.zeros((1, 1), dtype=np.float32),
+            "labels_array": None,
+            "gene_list": ["g1"],
+            "sample_ids": ["s1"],
+            "cell_types": [],
+        }
+
+    def _fake_staged(**_kwargs):
+        call_order.append("staged")
+        return {
+            "data_array": np.zeros((1, 1), dtype=np.float32),
+            "labels_array": None,
+            "gene_list": ["g1"],
+            "sample_ids": ["s1"],
+            "cell_types": [],
+        }
+
+    monkeypatch.setattr(preprocessor, "_run_direct_pipeline", _fake_direct)
+    monkeypatch.setattr(preprocessor, "_run_staged_pipeline", _fake_staged)
+
+    preprocessor.run(file_paths=[f"file_{i}.h5ad" for i in range(12)])
+    assert call_order == ["direct"]
+
+
+def test_gep_preprocessor_uses_staged_path_only_above_threshold(monkeypatch):
+    preprocessor = GEPPreprocessor(chunk_size=2)
+    call_order: list[str] = []
+
+    def _fake_direct(**_kwargs):
+        call_order.append("direct")
+        return {
+            "data_array": np.zeros((1, 1), dtype=np.float32),
+            "labels_array": None,
+            "gene_list": ["g1"],
+            "sample_ids": ["s1"],
+            "cell_types": [],
+        }
+
+    def _fake_staged(**_kwargs):
+        call_order.append("staged")
+        return {
+            "data_array": np.zeros((1, 1), dtype=np.float32),
+            "labels_array": None,
+            "gene_list": ["g1"],
+            "sample_ids": ["s1"],
+            "cell_types": [],
+        }
+
+    monkeypatch.setattr(preprocessor, "_run_direct_pipeline", _fake_direct)
+    monkeypatch.setattr(preprocessor, "_run_staged_pipeline", _fake_staged)
+
+    preprocessor.run(file_paths=[f"file_{i}.h5ad" for i in range(13)])
+    assert call_order == ["staged"]
 
 
 def test_gepdataset_caches_true_sct_gep_and_masks_nonbulk_rows(tmp_path: Path):
