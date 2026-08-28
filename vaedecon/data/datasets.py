@@ -198,6 +198,67 @@ def _load_cached_aligned_sct_geps(
     return sct_exp_processor.get_exp()
 
 
+def _filter_sample2cell_mapping(
+    sample2cell_fp: Path,
+    raw_bulk_sample_ids: list[str],
+) -> pd.DataFrame:
+    """Filter one sample-to-cell mapping file to the requested bulk samples."""
+    sample2cell_df_all = pd.read_csv(sample2cell_fp, index_col=0)
+    if sample2cell_df_all.empty:
+        return pd.DataFrame(columns=["cell_type", "selected_cell_id"])
+
+    filtered_mapping_df = sample2cell_df_all.loc[
+        sample2cell_df_all.index.astype(str).isin(raw_bulk_sample_ids),
+        ["cell_type", "selected_cell_id"],
+    ].copy()
+    filtered_mapping_df["selected_cell_id"] = filtered_mapping_df["selected_cell_id"].astype(str)
+    filtered_mapping_df = (
+        filtered_mapping_df
+        .reset_index()
+        .drop_duplicates(subset=["index", "cell_type"], keep="first")
+        .rename(columns={"index": "sample_id"})
+        .set_index("sample_id")
+    )
+    return filtered_mapping_df
+
+
+def _materialize_true_sct_gep_targets(
+    raw_bulk_sample_ids: list[str],
+    target_gene_list: list[str],
+    cell_types: list[str],
+    filtered_mapping_df: pd.DataFrame,
+    aligned_sct_geps_df: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build dense matched targets from a filtered mapping and aligned SCT rows."""
+    n_samples = len(raw_bulk_sample_ids)
+    n_genes = len(target_gene_list)
+    n_cell_types = len(cell_types)
+    true_sct_gep = np.zeros((n_samples, n_genes, n_cell_types), dtype=np.float32)
+    true_sct_gep_present_mask = np.zeros((n_samples, n_cell_types), dtype=bool)
+    cell_type_to_idx = {cell_type: idx for idx, cell_type in enumerate(cell_types)}
+
+    if filtered_mapping_df.empty or aligned_sct_geps_df.empty:
+        return true_sct_gep, true_sct_gep_present_mask
+
+    for sample_idx, sample_id in enumerate(raw_bulk_sample_ids):
+        if sample_id not in filtered_mapping_df.index:
+            continue
+        sample_rows = filtered_mapping_df.loc[[sample_id], :]
+        for _, row in sample_rows.iterrows():
+            cell_type = str(row["cell_type"])
+            selected_cell_id = str(row["selected_cell_id"])
+            cell_type_idx = cell_type_to_idx.get(cell_type)
+            if cell_type_idx is None or selected_cell_id not in aligned_sct_geps_df.index:
+                continue
+            true_sct_gep[sample_idx, :, cell_type_idx] = aligned_sct_geps_df.loc[selected_cell_id, :].to_numpy(
+                dtype=np.float32,
+                copy=False,
+            )
+            true_sct_gep_present_mask[sample_idx, cell_type_idx] = True
+
+    return true_sct_gep, true_sct_gep_present_mask
+
+
 def build_matched_sct_gep_training_targets(
     sct_gep_dataset_file_path: Union[str, Path],
     sample2cell_id_file_path: Union[str, Path],
@@ -219,8 +280,8 @@ def build_matched_sct_gep_training_targets(
     if not sample2cell_fp.exists():
         raise FileNotFoundError(f"Sample to cell ID mapping file not found: {sample2cell_fp}")
 
-    sample2cell_df_all = pd.read_csv(sample2cell_fp, index_col=0)
-    if sample2cell_df_all.empty:
+    filtered_mapping_df = _filter_sample2cell_mapping(sample2cell_fp, raw_bulk_sample_ids)
+    if filtered_mapping_df.empty:
         return {
             "sample_ids": processed_bulk_sample_ids,
             "gene_list": target_gene_list,
@@ -231,19 +292,6 @@ def build_matched_sct_gep_training_targets(
             "aligned_sct_geps_df": pd.DataFrame(columns=target_gene_list),
         }
 
-    filtered_mapping_df = sample2cell_df_all.loc[
-        sample2cell_df_all.index.astype(str).isin(raw_bulk_sample_ids),
-        ["cell_type", "selected_cell_id"],
-    ].copy()
-    filtered_mapping_df["selected_cell_id"] = filtered_mapping_df["selected_cell_id"].astype(str)
-    filtered_mapping_df = (
-        filtered_mapping_df
-        .reset_index()
-        .drop_duplicates(subset=["index", "cell_type"], keep="first")
-        .rename(columns={"index": "sample_id"})
-        .set_index("sample_id")
-    )
-
     unique_sct_cell_ids = list(dict.fromkeys(filtered_mapping_df["selected_cell_id"].tolist()))
     aligned_sct_geps_df = _load_cached_aligned_sct_geps(
         sct_gep_fp=sct_gep_fp,
@@ -253,28 +301,13 @@ def build_matched_sct_gep_training_targets(
         sct_query_cache_file_path=sct_query_cache_file_path,
     )
 
-    n_samples = len(processed_bulk_sample_ids)
-    n_genes = len(target_gene_list)
-    n_cell_types = len(cell_types)
-    true_sct_gep = np.zeros((n_samples, n_genes, n_cell_types), dtype=np.float32)
-    true_sct_gep_present_mask = np.zeros((n_samples, n_cell_types), dtype=bool)
-    cell_type_to_idx = {cell_type: idx for idx, cell_type in enumerate(cell_types)}
-
-    for sample_idx, sample_id in enumerate(raw_bulk_sample_ids):
-        if sample_id not in filtered_mapping_df.index:
-            continue
-        sample_rows = filtered_mapping_df.loc[[sample_id], :]
-        for _, row in sample_rows.iterrows():
-            cell_type = str(row["cell_type"])
-            selected_cell_id = str(row["selected_cell_id"])
-            cell_type_idx = cell_type_to_idx.get(cell_type)
-            if cell_type_idx is None or selected_cell_id not in aligned_sct_geps_df.index:
-                continue
-            true_sct_gep[sample_idx, :, cell_type_idx] = aligned_sct_geps_df.loc[selected_cell_id, :].to_numpy(
-                dtype=np.float32,
-                copy=False,
-            )
-            true_sct_gep_present_mask[sample_idx, cell_type_idx] = True
+    true_sct_gep, true_sct_gep_present_mask = _materialize_true_sct_gep_targets(
+        raw_bulk_sample_ids=raw_bulk_sample_ids,
+        target_gene_list=target_gene_list,
+        cell_types=cell_types,
+        filtered_mapping_df=filtered_mapping_df,
+        aligned_sct_geps_df=aligned_sct_geps_df,
+    )
 
     return {
         "sample_ids": processed_bulk_sample_ids,
@@ -1007,6 +1040,7 @@ class GEPDataset(Dataset):
         for row_idx, sample_id in enumerate(sample_ids):
             sample_id_to_positions.setdefault(str(sample_id), []).append(row_idx)
 
+        grouped_target_sets: dict[str, dict[str, Any]] = {}
         for target_set_name, target_cfg in self.config.training_target_sets.items():
             raw_bulk_sample_ids = _load_bulk_sample_ids_from_file(target_cfg.training_set_file_path)
             bulk_sample_ids = _namespace_sample_ids(
@@ -1041,19 +1075,46 @@ class GEPDataset(Dataset):
                     f"IDs are duplicated: {preview}"
                 )
 
-            matched_targets = build_matched_sct_gep_training_targets(
-                sct_gep_dataset_file_path=target_cfg.training_sct_gep_file_path,
-                sample2cell_id_file_path=target_cfg.training_set_sample2cell_id_file_path,
-                bulk_sample_ids=raw_bulk_sample_ids,
-                target_gene_list=gene_list,
-                cell_types=cell_types,
-                sample_id_namespace=str(target_set_name),
-            )
+            sample2cell_fp = Path(target_cfg.training_set_sample2cell_id_file_path)
+            filtered_mapping_df = _filter_sample2cell_mapping(sample2cell_fp, raw_bulk_sample_ids)
+            sct_gep_fp = Path(target_cfg.training_sct_gep_file_path)
+            resolved_sct_gep_fp = str(sct_gep_fp.expanduser().resolve())
 
-            true_sct_gep[np.asarray(row_positions), :, :] = matched_targets["true_sct_gep"]
-            true_sct_gep_present_mask[np.asarray(row_positions), :] = matched_targets[
-                "true_sct_gep_present_mask"
-            ]
+            group_entry = grouped_target_sets.setdefault(
+                resolved_sct_gep_fp,
+                {
+                    "sct_gep_fp": sct_gep_fp,
+                    "items": [],
+                    "selected_cell_ids": [],
+                },
+            )
+            group_entry["items"].append(
+                {
+                    "raw_bulk_sample_ids": raw_bulk_sample_ids,
+                    "row_positions": np.asarray(row_positions),
+                    "filtered_mapping_df": filtered_mapping_df,
+                }
+            )
+            if not filtered_mapping_df.empty:
+                group_entry["selected_cell_ids"].extend(filtered_mapping_df["selected_cell_id"].tolist())
+
+        for group_entry in grouped_target_sets.values():
+            unique_sct_cell_ids = list(dict.fromkeys(group_entry["selected_cell_ids"]))
+            aligned_sct_geps_df = _load_cached_aligned_sct_geps(
+                sct_gep_fp=Path(group_entry["sct_gep_fp"]),
+                selected_cell_ids=unique_sct_cell_ids,
+                target_gene_list=gene_list,
+            )
+            for item in group_entry["items"]:
+                matched_true_sct_gep, matched_present_mask = _materialize_true_sct_gep_targets(
+                    raw_bulk_sample_ids=item["raw_bulk_sample_ids"],
+                    target_gene_list=gene_list,
+                    cell_types=cell_types,
+                    filtered_mapping_df=item["filtered_mapping_df"],
+                    aligned_sct_geps_df=aligned_sct_geps_df,
+                )
+                true_sct_gep[item["row_positions"], :, :] = matched_true_sct_gep
+                true_sct_gep_present_mask[item["row_positions"], :] = matched_present_mask
 
         return true_sct_gep, true_sct_gep_present_mask
 

@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+import vaedecon.data.datasets as datasets_module
 from vaedecon.configs.default_config import GEPDatasetConfig
 from vaedecon.data.datasets import GEPDataset
 from vaedecon.data.datasets import build_matched_sct_gep_training_targets
@@ -244,6 +245,89 @@ def test_gepdataset_namespaces_duplicate_bulk_sample_ids_across_training_sets(tm
         dataset[2].true_sct_gep[:, 0].numpy(),
         aligned_b.loc["cell_c", :].to_numpy(dtype=np.float32),
     )
+
+
+def test_gepdataset_loads_shared_sct_reference_once_per_run(tmp_path: Path, monkeypatch):
+    genes = ["gene_a", "gene_b"]
+    bulk_a_path = tmp_path / "bulk_a.h5ad"
+    bulk_b_path = tmp_path / "bulk_b.h5ad"
+    ref_sct_path = tmp_path / "shared_ref_sct.h5ad"
+    mapping_a_path = tmp_path / "sample2cell_a.csv"
+    mapping_b_path = tmp_path / "sample2cell_b.csv"
+
+    _write_h5ad(
+        bulk_a_path,
+        x=np.array([[2.0, 4.0], [3.0, 9.0]], dtype=np.float32),
+        obs_names=["sample_1", "sample_2"],
+        var_names=genes,
+        obs=pd.DataFrame({"CT1": [1.0, 1.0]}, index=["sample_1", "sample_2"]),
+    )
+    _write_h5ad(
+        bulk_b_path,
+        x=np.array([[5.0, 7.0], [11.0, 13.0]], dtype=np.float32),
+        obs_names=["sample_3", "sample_4"],
+        var_names=genes,
+        obs=pd.DataFrame({"CT1": [1.0, 1.0]}, index=["sample_3", "sample_4"]),
+    )
+    _write_h5ad(
+        ref_sct_path,
+        x=np.array([[1.0, 2.0], [3.0, 4.0], [10.0, 20.0], [30.0, 40.0]], dtype=np.float32),
+        obs_names=["cell_a", "cell_b", "cell_c", "cell_d"],
+        var_names=genes,
+        obs=pd.DataFrame(index=["cell_a", "cell_b", "cell_c", "cell_d"]),
+    )
+    pd.DataFrame(
+        {
+            "cell_type": ["CT1", "CT1"],
+            "selected_cell_id": ["cell_a", "cell_b"],
+        },
+        index=["sample_1", "sample_2"],
+    ).to_csv(mapping_a_path)
+    pd.DataFrame(
+        {
+            "cell_type": ["CT1", "CT1"],
+            "selected_cell_id": ["cell_c", "cell_d"],
+        },
+        index=["sample_3", "sample_4"],
+    ).to_csv(mapping_b_path)
+
+    original_read_h5ad = datasets_module.ReadH5AD
+    shared_load_counter = {"count": 0}
+
+    class CountingReadH5AD:
+        def __init__(self, file_path, *args, **kwargs):
+            if Path(file_path).expanduser().resolve() == ref_sct_path.resolve():
+                shared_load_counter["count"] += 1
+            self._inner = original_read_h5ad(file_path, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(datasets_module, "ReadH5AD", CountingReadH5AD)
+
+    dataset = GEPDataset(
+        GEPDatasetConfig(
+            file_paths=[bulk_a_path, bulk_b_path],
+            processed_data_dir=tmp_path / "processed",
+            force_reprocess=True,
+            scaling_by_constant=False,
+            training_target_sets={
+                "Train_set1": {
+                    "training_set_file_path": bulk_a_path,
+                    "training_set_sample2cell_id_file_path": mapping_a_path,
+                    "training_sct_gep_file_path": ref_sct_path,
+                },
+                "Train_set2": {
+                    "training_set_file_path": bulk_b_path,
+                    "training_set_sample2cell_id_file_path": mapping_b_path,
+                    "training_sct_gep_file_path": ref_sct_path,
+                },
+            },
+        )
+    )
+
+    assert shared_load_counter["count"] == 1
+    assert dataset.true_sct_gep_present_mask.tolist() == [[True], [True], [True], [True]]
 
 
 def test_matched_sct_gep_loss_masks_low_prop_cell_types():
