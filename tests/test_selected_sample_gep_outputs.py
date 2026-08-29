@@ -1,6 +1,8 @@
 import json
+import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 pytest.importorskip("umap")
 pytest.importorskip("statsmodels")
@@ -20,6 +22,7 @@ from vaedecon.plot.evaluate_result import (
     _draw_empty_selected_sample_panel,
     _filter_selected_samples_by_true_prop,
     _format_threshold_for_filename,
+    plot_single_cell_gep,
 )
 
 
@@ -484,3 +487,80 @@ def test_save_selected_sample_similarity_outputs_empty_case_skips_clustermap(tmp
 
     assert called_outputs["clustermap"] == 0
     assert (tmp_path / "index.html").exists()
+
+
+def test_plot_single_cell_gep_only_generates_ccc_similarity_outputs(tmp_path, monkeypatch):
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("matplotlib.pyplot")
+
+    class _DummyDataset:
+        def get_sample_ids(self):
+            return ["s1", "s2"]
+
+        def get_gene_list(self):
+            return ["g1", "g2"]
+
+    sc_gep_result_dir = tmp_path / "sc_gep"
+    sc_gep_result_dir.mkdir()
+
+    selected_sample2cell_id = pd.DataFrame(
+        {
+            "cell_type": ["Cancer Cells", "Cancer Cells"],
+            "selected_cell_id": ["cell_s1", "cell_s2"],
+        },
+        index=["s1", "s2"],
+    )
+    selected_sample2cell_id_fp = tmp_path / "selected_sample2cell_id.csv"
+    selected_sample2cell_id.to_csv(selected_sample2cell_id_fp)
+
+    y_true = pd.DataFrame(
+        {
+            "cell_s1": [1.0, 2.0],
+            "cell_s2": [1.5, 2.5],
+        },
+        index=["g1", "g2"],
+    )
+    y_true.to_csv(sc_gep_result_dir / "sct_gep_Cancer Cells_from_2_bulksamples.csv")
+
+    def _fake_compare_y_y_pred_plot(**_kwargs):
+        return None
+
+    def _fake_compare_y_y_pred_subplot(**_kwargs):
+        return None
+
+    def _fake_save_similarity(**_kwargs):
+        similarity_dir = tmp_path / "captured_ccc"
+        similarity_dir.mkdir(exist_ok=True)
+        (similarity_dir / "marker.txt").write_text("ccc")
+
+    def _fail_if_cosine_called(*_args, **_kwargs):
+        raise AssertionError("HVG5000 cosine output workflow should not run.")
+
+    monkeypatch.setattr("vaedecon.plot.evaluate_result.compare_y_y_pred_plot", _fake_compare_y_y_pred_plot)
+    monkeypatch.setattr(
+        "vaedecon.plot.evaluate_result.compare_y_y_pred_subplot",
+        _fake_compare_y_y_pred_subplot,
+    )
+    monkeypatch.setattr(
+        "vaedecon.plot.evaluate_result._save_selected_sample_similarity_outputs",
+        _fake_save_similarity,
+    )
+    monkeypatch.setattr(
+        "vaedecon.plot.evaluate_result._save_selected_sample_hvg_cosine_similarity_outputs",
+        _fail_if_cosine_called,
+    )
+
+    plot_single_cell_gep(
+        pred_a={"recon_x_all_types": torch.tensor(np.ones((2, 2, 1), dtype=np.float32))},
+        test_set=_DummyDataset(),
+        cell_types=["Cancer Cells"],
+        sc_gep_result_dir=str(sc_gep_result_dir),
+        n_samples=2,
+        max_visualize_samples=2,
+        figure_format="png",
+        selected_sample2cell_id_file_path=str(selected_sample2cell_id_fp),
+        sct_gep_file_path="dummy_sct_reference.h5ad",
+    )
+
+    assert (sc_gep_result_dir / "inter_sample_similarity_ccc").exists()
+    assert not (sc_gep_result_dir / "inter_sample_similarity_hvg5000_cosine").exists()
