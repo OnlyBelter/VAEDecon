@@ -1,11 +1,13 @@
 from pathlib import Path
 
+import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
 import torch
 
 from vaedecon.configs import VAEDeconConfig, LossCoefficient
+from vaedecon.utility.read_file import get_gene_mean_std_across_cell_types
 from vaedecon.workflow.inference import VAEDeconPredictor
 import vaedecon.workflow.train as train_workflow
 from vaedecon.workflow.train import VAEDeconTrainer, train_vaedecon
@@ -33,6 +35,18 @@ class _DummyMatchedSCTDataset:
 
     def get_sample_ids(self):
         return self._sample_ids
+
+
+def _write_test_h5ad(path: Path, x: np.ndarray, obs_names: list[str], var_names: list[str], obs: pd.DataFrame) -> None:
+    adata = ad.AnnData(
+        X=np.asarray(x, dtype=np.float32),
+        obs=obs.copy(),
+        var=pd.DataFrame(index=pd.Index(list(var_names), dtype=object)),
+    )
+    adata.obs.index = pd.Index(list(obs_names), dtype=object)
+    adata.obs_names = pd.Index(list(obs_names), dtype=object)
+    adata.var_names = pd.Index(list(var_names), dtype=object)
+    adata.write_h5ad(path)
 
 
 def test_trainer_prefers_dedicated_sct_reference_for_gene_mean_std(tmp_path: Path):
@@ -125,6 +139,71 @@ def test_trainer_keeps_gene_mean_std_output_under_model_dir(tmp_path: Path):
     assert trainer._build_gene_mean_std_output_path() == (
         tmp_path / "final_model" / "gene_mean_std_log2p1_scaled_by_20.0.csv"
     )
+
+
+def test_get_gene_mean_std_across_cell_types_logs_progress_and_aligns_genes(tmp_path: Path, caplog):
+    sct_path = tmp_path / "sct.h5ad"
+    gene_list_fp = tmp_path / "gene_list.txt"
+    cell_type_fp = tmp_path / "cell_types.txt"
+    result_fp = tmp_path / "gene_mean_std.csv"
+
+    gene_list = ["g2", "g1", "g3"]
+    gene_list_fp.write_text("g2\ng1\ng3\n", encoding="utf-8")
+    cell_type_fp.write_text("CT1\nCT2\n", encoding="utf-8")
+
+    cpm_values = np.array(
+        [
+            [250000.0, 750000.0],
+            [500000.0, 500000.0],
+            [1000000.0, 0.0],
+            [500000.0, 500000.0],
+        ],
+        dtype=np.float32,
+    )
+    log_space_values = np.log2(cpm_values + 1.0).astype(np.float32)
+    _write_test_h5ad(
+        sct_path,
+        x=log_space_values,
+        obs_names=["cell_1", "cell_2", "cell_3", "cell_4"],
+        var_names=["g1", "g2"],
+        obs=pd.DataFrame(
+            {
+                "CT1": [1, 1, 0, 0],
+                "CT2": [0, 0, 1, 1],
+            },
+            index=["cell_1", "cell_2", "cell_3", "cell_4"],
+        ),
+    )
+
+    with caplog.at_level("INFO"):
+        get_gene_mean_std_across_cell_types(
+            sct_dataset_fp=str(sct_path),
+            result_fp=result_fp,
+            gene_list_fp=gene_list_fp,
+            cell_type_fp=cell_type_fp,
+            scaling_by_constant=False,
+            log2p1=True,
+        )
+
+    out_df = pd.read_csv(result_fp, index_col=0)
+    assert list(out_df.index) == gene_list
+    assert out_df.columns.tolist() == ["CT1_avg", "CT1_std", "CT2_avg", "CT2_std"]
+
+    expected = pd.DataFrame(
+        {
+            "CT1_avg": [np.log2(625000.0 + 1.0), np.log2(375000.0 + 1.0), 0.0],
+            "CT1_std": [np.log2(125000.0 + 1.0), np.log2(125000.0 + 1.0), 0.0],
+            "CT2_avg": [np.log2(250000.0 + 1.0), np.log2(750000.0 + 1.0), 0.0],
+            "CT2_std": [np.log2(250000.0 + 1.0), np.log2(250000.0 + 1.0), 0.0],
+        },
+        index=gene_list,
+    )
+    np.testing.assert_allclose(out_df.values, expected.values, rtol=1e-5, atol=1e-5)
+
+    joined_logs = "\n".join(caplog.messages)
+    assert "Computing gene mean/std across 2 cell types using 2/3 aligned genes" in joined_logs
+    assert "Gene mean/std 1/2: CT1 (2 cells)" in joined_logs
+    assert "Gene mean/std 2/2: CT2 (2 cells)" in joined_logs
 
 
 def test_loss_coefficient_defaults_and_validation_cross_sample_gene_var_weight():

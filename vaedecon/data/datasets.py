@@ -14,8 +14,9 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset
 from torch.utils.data._utils.collate import default_collate
+from tqdm.auto import tqdm
 
-from ..utility.read_file import ReadH5AD
+from ..utility.read_file import ReadExp, ReadH5AD
 from ..utility import non_log2log_cpm, check_dir, log_message
 from ..configs import GEPDatasetConfig
 
@@ -27,6 +28,7 @@ logger.addHandler(console)
 logger.setLevel(logging.INFO)
 
 _DEFAULT_MAX_PARALLEL_SOURCE_FILE_LOADS = 2
+_LARGE_DATASET_DIRECT_PREPROCESSING_THRESHOLD = 12
 
 
 class DatasetOutput(OrderedDict):
@@ -249,7 +251,13 @@ def _load_cached_aligned_sct_geps(
     missing_ids = [cid for cid in selected_cell_ids if cid not in cached_index]
     if missing_ids:
         sct_loader = ReadH5AD(sct_gep_fp, backed="r")
-        fetched_df = sct_loader.get_df(obs_names=missing_ids)
+        try:
+            fetched_df = sct_loader.get_df(
+                obs_names=missing_ids,
+                var_names=target_gene_list,
+            )
+        finally:
+            sct_loader.close()
         if not fetched_df.empty:
             cached_df = pd.concat([cached_df, fetched_df], axis=0)
             cached_df = cached_df[~cached_df.index.duplicated(keep="last")]
@@ -268,13 +276,17 @@ def _load_cached_aligned_sct_geps(
                 except Exception as e:
                     logger.warning(f"Failed to write SCT query cache {cache_fp}: {e}")
 
-    present_ids = [cid for cid in selected_cell_ids if cid in set(cached_df.index.tolist())]
+    cached_index = set(cached_df.index.tolist())
+    present_ids = [cid for cid in selected_cell_ids if cid in cached_index]
     if cache_sct_query_results:
         sct_geps_df_raw = cached_df.loc[present_ids, :]
     else:
         sct_loader = ReadH5AD(sct_gep_fp, backed="r")
         try:
-            sct_geps_df_raw = sct_loader.get_df(obs_names=present_ids)
+            sct_geps_df_raw = sct_loader.get_df(
+                obs_names=present_ids,
+                var_names=target_gene_list,
+            )
         finally:
             sct_loader.close()
 
@@ -353,29 +365,44 @@ def _write_true_sct_gep_targets_into(
     aligned_sct_geps_df: pd.DataFrame,
     true_sct_gep_dest: np.ndarray,
     true_sct_gep_present_mask_dest: np.ndarray,
-) -> None:
+    progress_bar: Optional[Any] = None,
+) -> int:
     """Write matched targets directly into destination arrays without a large temporary tensor."""
     if filtered_mapping_df.empty or aligned_sct_geps_df.empty:
-        return
+        return 0
 
     cell_type_to_idx = {cell_type: idx for idx, cell_type in enumerate(cell_types)}
-    for sample_idx, sample_id in enumerate(raw_bulk_sample_ids):
-        if sample_id not in filtered_mapping_df.index:
-            continue
+    sample_id_to_dataset_row = {
+        str(sample_id): int(row_positions[sample_idx])
+        for sample_idx, sample_id in enumerate(raw_bulk_sample_ids)
+    }
+    sct_row_by_id = {
+        str(cell_id): idx for idx, cell_id in enumerate(aligned_sct_geps_df.index.tolist())
+    }
+    sct_values = aligned_sct_geps_df.to_numpy(dtype=np.float32, copy=False)
 
-        dataset_row_idx = int(row_positions[sample_idx])
-        sample_rows = filtered_mapping_df.loc[[sample_id], :]
-        for _, row in sample_rows.iterrows():
-            cell_type = str(row["cell_type"])
-            selected_cell_id = str(row["selected_cell_id"])
-            cell_type_idx = cell_type_to_idx.get(cell_type)
-            if cell_type_idx is None or selected_cell_id not in aligned_sct_geps_df.index:
-                continue
-            true_sct_gep_dest[dataset_row_idx, :, cell_type_idx] = aligned_sct_geps_df.loc[selected_cell_id, :].to_numpy(
-                dtype=np.float32,
-                copy=False,
-            )
-            true_sct_gep_present_mask_dest[dataset_row_idx, cell_type_idx] = True
+    write_records: list[tuple[int, int, int]] = []
+    for row in filtered_mapping_df.reset_index().itertuples(index=False):
+        dataset_row_idx = sample_id_to_dataset_row.get(str(row.sample_id))
+        cell_type_idx = cell_type_to_idx.get(str(row.cell_type))
+        sct_row_idx = sct_row_by_id.get(str(row.selected_cell_id))
+        if dataset_row_idx is None or cell_type_idx is None or sct_row_idx is None:
+            continue
+        write_records.append((dataset_row_idx, cell_type_idx, sct_row_idx))
+
+    batched_progress = 0
+    for dataset_row_idx, cell_type_idx, sct_row_idx in write_records:
+        true_sct_gep_dest[dataset_row_idx, :, cell_type_idx] = sct_values[sct_row_idx]
+        true_sct_gep_present_mask_dest[dataset_row_idx, cell_type_idx] = True
+        batched_progress += 1
+        if progress_bar is not None and batched_progress >= 256:
+            progress_bar.update(batched_progress)
+            batched_progress = 0
+
+    if progress_bar is not None and batched_progress > 0:
+        progress_bar.update(batched_progress)
+
+    return len(write_records)
 
 
 def build_matched_sct_gep_training_targets(
@@ -725,6 +752,103 @@ class GEPPreprocessor:
         if max_parallel_source_file_loads is not None:
             self.max_parallel_source_file_loads = max(1, int(max_parallel_source_file_loads))
 
+        if self._should_use_staged_preprocessing(file_paths):
+            log_message(
+                f"Using staged large-dataset preprocessing path for {len(file_paths)} source files."
+            )
+            return self._run_staged_pipeline(
+                file_paths=file_paths,
+                gene_list_file=gene_list_file,
+                common_gene_list_path=common_gene_list_path,
+                remove_low_var_genes=remove_low_var_genes,
+                min_var=min_var,
+                cell_cell2ave_exp_file_path=cell_cell2ave_exp_file_path,
+                sample_id_namespace_by_path=sample_id_namespace_by_path,
+                source_group_key_by_path=source_group_key_by_path,
+            )
+
+        log_message(
+            f"Using direct small-dataset preprocessing path for {len(file_paths)} source files."
+        )
+        return self._run_direct_pipeline(
+            file_paths=file_paths,
+            gene_list_file=gene_list_file,
+            remove_low_var_genes=remove_low_var_genes,
+            min_var=min_var,
+            cell_cell2ave_exp_file_path=cell_cell2ave_exp_file_path,
+            sample_id_namespace_by_path=sample_id_namespace_by_path,
+        )
+
+    @staticmethod
+    def _should_use_staged_preprocessing(
+        file_paths: Sequence[Union[str, Path]],
+    ) -> bool:
+        """Use the staged/common-gene-aware path only for genuinely large source counts."""
+        return len(file_paths) > _LARGE_DATASET_DIRECT_PREPROCESSING_THRESHOLD
+
+    def _run_direct_pipeline(
+        self,
+        *,
+        file_paths: Sequence[Union[str, Path]],
+        gene_list_file: Optional[Union[str, Path]] = None,
+        remove_low_var_genes: bool = False,
+        min_var: float = 1.0,
+        cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None,
+        sample_id_namespace_by_path: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Legacy direct load/merge preprocessing path for smaller source counts."""
+        log_message("Step 1: Loading and merging data...")
+        gep_data_df, cell_prop_df = self._load_and_merge_data(
+            file_paths=file_paths,
+            sample_id_namespace_by_path=sample_id_namespace_by_path,
+        )
+
+        log_message("Step 2: Gene filtering...")
+        if gene_list_file is not None:
+            gep_data_df = self._apply_gene_list_filter(gep_data_df, Path(gene_list_file))
+
+        if remove_low_var_genes:
+            ref_path = Path(cell_cell2ave_exp_file_path) if cell_cell2ave_exp_file_path else None
+            gep_data_df = self._apply_low_var_gene_removal_from_frame(
+                gep_data_df=gep_data_df,
+                min_var=min_var,
+                cell_cell2ave_exp_file_path=ref_path,
+            )
+        else:
+            log_message("Step 2: Skipping low-variance gene filtering.")
+
+        log_message("Step 3: Applying transformations...")
+        gep_data_df = self._apply_transformation_chunked(gep_data_df, chunk_size=self.chunk_size)
+
+        labels_array: Optional[np.ndarray] = None
+        final_cell_types: list[str] = []
+        if not cell_prop_df.empty:
+            cell_prop_df = cell_prop_df.loc[gep_data_df.index]
+            labels_array = cell_prop_df.values.astype(np.float32, copy=False)
+            final_cell_types = cell_prop_df.columns.astype(str).tolist()
+
+        log_message(f"Final processed array shape: {gep_data_df.shape}")
+        return {
+            "data_array": gep_data_df.values.astype(np.float32, copy=False),
+            "labels_array": labels_array,
+            "gene_list": gep_data_df.columns.astype(str).tolist(),
+            "sample_ids": gep_data_df.index.astype(str).tolist(),
+            "cell_types": final_cell_types,
+        }
+
+    def _run_staged_pipeline(
+        self,
+        *,
+        file_paths: Sequence[Union[str, Path]],
+        gene_list_file: Optional[Union[str, Path]] = None,
+        common_gene_list_path: Optional[Union[str, Path]] = None,
+        remove_low_var_genes: bool = False,
+        min_var: float = 1.0,
+        cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None,
+        sample_id_namespace_by_path: Optional[Dict[str, str]] = None,
+        source_group_key_by_path: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Staged/common-gene-aware preprocessing path for large source counts."""
         log_message("Step 1: Discovering common genes...")
         initial_target_gene_list = _load_or_create_cached_common_gene_list(
             file_paths=file_paths,
@@ -767,6 +891,108 @@ class GEPPreprocessor:
             )
         finally:
             self._cleanup_temp_dir()
+
+    def _load_and_merge_data(
+        self,
+        file_paths: Sequence[Union[str, Path]],
+        sample_id_namespace_by_path: Optional[Dict[str, str]] = None,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Load each file directly and merge into one DataFrame."""
+        all_data_dfs: List[pd.DataFrame] = []
+        all_cell_prop_dfs: List[pd.DataFrame] = []
+        load_jobs: list[tuple[Union[str, Path], Optional[str]]] = []
+        for path_like in file_paths:
+            namespace = None
+            if sample_id_namespace_by_path:
+                namespace = sample_id_namespace_by_path.get(
+                    str(Path(path_like).expanduser().resolve())
+                )
+            load_jobs.append((path_like, namespace))
+
+        max_workers = min(self.max_parallel_source_file_loads, len(load_jobs))
+        if max_workers > 1:
+            log_message(
+                f"Loading {len(load_jobs)} source files with {max_workers} worker threads..."
+            )
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                loaded_frames = list(
+                    executor.map(
+                        lambda job: _load_dataset_frames_from_path(job[0], namespace=job[1]),
+                        load_jobs,
+                    )
+                )
+        else:
+            loaded_frames = [
+                _load_dataset_frames_from_path(path_like, namespace=namespace)
+                for path_like, namespace in load_jobs
+            ]
+
+        for gep_data_df, cell_prop_df in loaded_frames:
+            all_data_dfs.append(gep_data_df)
+            all_cell_prop_dfs.append(cell_prop_df)
+
+        if not all_data_dfs:
+            raise ValueError("No data loaded. Please check file_paths.")
+
+        log_message("Merging datasets...")
+        gep_data_df = pd.concat(all_data_dfs, axis=0, join="inner")
+        cell_prop_df = pd.concat(all_cell_prop_dfs, axis=0, join="inner")
+
+        del all_data_dfs, all_cell_prop_dfs
+        gc.collect()
+
+        if not cell_prop_df.empty:
+            if len(gep_data_df) != len(cell_prop_df):
+                raise ValueError("Sample count mismatch after merge.")
+            if not np.all(gep_data_df.index == cell_prop_df.index):
+                raise ValueError("Sample ID mismatch after merge.")
+
+        log_message(f"Merged data shape: {gep_data_df.shape}")
+        return gep_data_df, cell_prop_df
+
+    @staticmethod
+    def _apply_gene_list_filter(
+        gep_data_df: pd.DataFrame,
+        gene_list_file: Path,
+    ) -> pd.DataFrame:
+        """Apply target gene list alignment/filtering for the direct preprocessing path."""
+        target_genes = load_gene_list(gene_list_file)
+        gep_exp_obj = ReadExp(gep_data_df, exp_type="TPM")
+        gep_exp_obj.align_with_gene_list(gene_list=target_genes, fill_not_exist=True)
+        result = gep_exp_obj.get_exp()
+        log_message(f"After gene list filtering: {result.shape}")
+        return result
+
+    @staticmethod
+    def _apply_low_var_gene_removal_from_frame(
+        gep_data_df: pd.DataFrame,
+        min_var: float,
+        cell_cell2ave_exp_file_path: Optional[Path],
+    ) -> pd.DataFrame:
+        """Legacy low-variance gene filtering for the direct preprocessing path."""
+        n_genes_before = gep_data_df.shape[1]
+
+        log_message("Computing gene variances...")
+        gene_variances = gep_data_df.var(axis=0)
+        genes_to_keep = gene_variances > min_var
+        gep_data_df = gep_data_df.loc[:, genes_to_keep]
+
+        if cell_cell2ave_exp_file_path is not None:
+            try:
+                cell_ave_exp_df = pd.read_csv(cell_cell2ave_exp_file_path, index_col=0)
+                genes_in_ref = cell_ave_exp_df.index
+                common_genes = gep_data_df.columns.intersection(genes_in_ref)
+                gep_data_df = gep_data_df[common_genes]
+                del cell_ave_exp_df
+            except Exception as e:
+                logger.error(f"Error processing reference file: {e}")
+
+        n_genes_after = gep_data_df.shape[1]
+        log_message(
+            f"Gene filtering: {n_genes_before} → {n_genes_after} genes "
+            f"(removed {n_genes_before - n_genes_after})"
+        )
+        return gep_data_df
 
     def _prepare_temp_dir(self) -> None:
         """Create a fresh temporary preprocessing directory."""
@@ -1430,14 +1656,18 @@ class GEPDataset(Dataset):
             dtype=np.float32,
             shape=(n_samples, n_genes, n_cell_types),
         )
-        true_sct_gep[:] = 0.0
         true_sct_gep_present_mask = np.lib.format.open_memmap(
             true_sct_gep_present_mask_path,
             mode="w+",
             dtype=bool,
             shape=(n_samples, n_cell_types),
         )
-        true_sct_gep_present_mask[:] = False
+        # `open_memmap(..., mode="w+")` creates zero-initialized files, so skipping
+        # the explicit full-array fill avoids an immediate multi-GB write.
+        log_message(
+            "Building matched sctGEP targets "
+            f"({n_samples} samples x {n_genes} genes x {n_cell_types} cell types)..."
+        )
 
         sample_id_to_positions: Dict[str, list[int]] = {}
         for row_idx, sample_id in enumerate(sample_ids):
@@ -1501,27 +1731,53 @@ class GEPDataset(Dataset):
             if not filtered_mapping_df.empty:
                 group_entry["selected_cell_ids"].extend(filtered_mapping_df["selected_cell_id"].tolist())
 
-        for group_entry in grouped_target_sets.values():
+        for group_idx, group_entry in enumerate(grouped_target_sets.values(), start=1):
             unique_sct_cell_ids = list(dict.fromkeys(group_entry["selected_cell_ids"]))
+            log_message(
+                "Matched sctGEP group "
+                f"{group_idx}/{len(grouped_target_sets)}: loading {len(unique_sct_cell_ids)} "
+                f"reference cells from {group_entry['sct_gep_fp']}"
+            )
             aligned_sct_geps_df = _load_cached_aligned_sct_geps(
                 sct_gep_fp=Path(group_entry["sct_gep_fp"]),
                 selected_cell_ids=unique_sct_cell_ids,
                 target_gene_list=gene_list,
             )
-            for item in group_entry["items"]:
-                _write_true_sct_gep_targets_into(
-                    raw_bulk_sample_ids=item["raw_bulk_sample_ids"],
-                    row_positions=item["row_positions"],
-                    cell_types=cell_types,
-                    filtered_mapping_df=item["filtered_mapping_df"],
-                    aligned_sct_geps_df=aligned_sct_geps_df,
-                    true_sct_gep_dest=true_sct_gep,
-                    true_sct_gep_present_mask_dest=true_sct_gep_present_mask,
-                )
+            total_assignments = int(
+                sum(len(item["filtered_mapping_df"]) for item in group_entry["items"])
+            )
+            log_message(
+                "Matched sctGEP group "
+                f"{group_idx}/{len(grouped_target_sets)}: writing about {total_assignments} "
+                "sample-cell-type assignments..."
+            )
+            progress_bar = tqdm(
+                total=total_assignments,
+                desc=f"matched_sct_gep {group_idx}/{len(grouped_target_sets)}",
+                unit="assign",
+                leave=False,
+            )
+            try:
+                for item in group_entry["items"]:
+                    _write_true_sct_gep_targets_into(
+                        raw_bulk_sample_ids=item["raw_bulk_sample_ids"],
+                        row_positions=item["row_positions"],
+                        cell_types=cell_types,
+                        filtered_mapping_df=item["filtered_mapping_df"],
+                        aligned_sct_geps_df=aligned_sct_geps_df,
+                        true_sct_gep_dest=true_sct_gep,
+                        true_sct_gep_present_mask_dest=true_sct_gep_present_mask,
+                        progress_bar=progress_bar,
+                    )
+            finally:
+                progress_bar.close()
             if hasattr(true_sct_gep, "flush"):
                 true_sct_gep.flush()
             if hasattr(true_sct_gep_present_mask, "flush"):
                 true_sct_gep_present_mask.flush()
+            log_message(
+                f"Matched sctGEP group {group_idx}/{len(grouped_target_sets)} finished."
+            )
             del aligned_sct_geps_df
             gc.collect()
 

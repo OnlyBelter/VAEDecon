@@ -1767,21 +1767,12 @@ def plot_single_cell_gep(
     check_dir(Path(sc_gep_result_dir))
     similarity_result_dir = os.path.join(sc_gep_result_dir, "inter_sample_similarity_ccc")
     check_dir(Path(similarity_result_dir))
-    cosine_similarity_result_dir = os.path.join(sc_gep_result_dir, "inter_sample_similarity_hvg5000_cosine")
-    check_dir(Path(cosine_similarity_result_dir))
     recon_sc_gep = pred_a["recon_x_all_types"].detach().cpu().numpy()
     sample_ids = test_set.get_sample_ids()
     gene_list = test_set.get_gene_list()
 
     # cell ids may have duplicate records
     selected_sample2cell_id = pd.read_csv(selected_sample2cell_id_file_path, index_col=0)
-    cell_type_to_hvg_genes: Dict[str, List[str]] = {}
-    if sct_gep_file_path is not None and str(sct_gep_file_path).strip() != "":
-        cell_type_to_hvg_genes = _load_top_hvg_genes_per_cell_type_from_sct_reference(
-            sct_gep_file_path=sct_gep_file_path,
-            target_cell_types=cell_types,
-            n_top_genes=5000,
-        )
 
     metrics_all_cell_types: Dict[str, Dict[str, float]] = {}
     all_cell_type_plot_inputs = []
@@ -1860,24 +1851,6 @@ def plot_single_cell_gep(
             threshold=filtered_min_true_cell_prop,
             figure_format=figure_format,
         )
-        if sct_gep_file_path is not None and str(sct_gep_file_path).strip() != "":
-            _save_selected_sample_hvg_cosine_similarity_outputs(
-                cell_type=cell_type,
-                y_true=y,
-                y_pred=y_pred_df,
-                sample_ids=_filter_selected_samples_by_true_prop(
-                    selected_true_cell_prop=selected_true_cell_prop,
-                    cell_type=cell_type,
-                    sample_ids=query_ids,
-                    min_true_cell_prop=filtered_min_true_cell_prop,
-                ),
-                hvg_genes=cell_type_to_hvg_genes.get(cell_type, []),
-                sct_gep_file_path=sct_gep_file_path,
-                similarity_result_dir=cosine_similarity_result_dir,
-                threshold=filtered_min_true_cell_prop,
-                figure_format=figure_format,
-                requested_n_top_hvgs=5000,
-            )
 
     def _plot_all_cell_types_figure(
         filtered: bool,
