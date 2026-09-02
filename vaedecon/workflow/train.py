@@ -48,6 +48,12 @@ def _read_gene_list_file(path_like: str | Path) -> list[str]:
     return Path(path_like).read_text(encoding="utf-8").splitlines()
 
 
+def _write_list_file(path_like: str | Path, values: list[str]) -> None:
+    """Write one string per line to a text artifact."""
+    path_obj = Path(path_like)
+    path_obj.write_text("".join(f"{value}\n" for value in values), encoding="utf-8")
+
+
 def _small_text_file_fingerprint(path_like: Optional[str | Path]) -> Optional[dict[str, str]]:
     """Return a compact fingerprint for a small text artifact such as a gene list."""
     resolved_path = _resolve_path_for_fingerprint(path_like)
@@ -234,7 +240,7 @@ class VAEDeconTrainer:
             return
         gene_list_path = Path(model_gene_list_fp)
         gene_list_path.parent.mkdir(parents=True, exist_ok=True)
-        GEPCacheManager.save_list_txt(self._canonical_stage_gene_list, gene_list_path)
+        _write_list_file(gene_list_path, self._canonical_stage_gene_list)
         logger.info(
             "Synchronized canonical staged-training gene list to %s (%s genes).",
             gene_list_path,
@@ -994,7 +1000,7 @@ class VAEDeconTrainer:
                 )
                 if file_gene_list != self._canonical_stage_gene_list:
                     model_gene_list_path.parent.mkdir(parents=True, exist_ok=True)
-                    GEPCacheManager.save_list_txt(self._canonical_stage_gene_list, model_gene_list_path)
+                    _write_list_file(model_gene_list_path, self._canonical_stage_gene_list)
                     logger.warning(
                         "Rewrote stale canonical gene list artifact at %s to match the base training dataset (%s genes).",
                         model_gene_list_path,
