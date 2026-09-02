@@ -48,12 +48,26 @@ def _read_gene_list_file(path_like: str | Path) -> list[str]:
     return Path(path_like).read_text(encoding="utf-8").splitlines()
 
 
+def _small_text_file_fingerprint(path_like: Optional[str | Path]) -> Optional[dict[str, str]]:
+    """Return a compact fingerprint for a small text artifact such as a gene list."""
+    resolved_path = _resolve_path_for_fingerprint(path_like)
+    if resolved_path is None:
+        return None
+    path_obj = Path(resolved_path)
+    if not path_obj.exists():
+        return {"path": resolved_path, "content_sha256": "missing"}
+    content = path_obj.read_text(encoding="utf-8")
+    return {
+        "path": resolved_path,
+        "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    }
+
 
 def _cuda_usable() -> bool:
+
     if not torch.cuda.is_available():
         return False
     try:
-        x = torch.tensor([0.0], device="cuda")
         (x + 1).sum().item()
         return True
     except Exception:
@@ -806,7 +820,7 @@ class VAEDeconTrainer:
             for set_name, cfg in sorted(training_target_sets.items())
         }
         payload = {
-            "version": 3,
+            "version": 4,
             "file_paths": [
                 _resolve_path_for_fingerprint(path)
                 for path in training_file_paths
@@ -816,7 +830,7 @@ class VAEDeconTrainer:
             "scaling_factor": float(self.config.data.scaling_factor),
             "remove_low_var_genes": bool(self.config.data.remove_low_var_genes),
             "min_var": float(self.config.data.min_var),
-            "gene_list_file": _resolve_path_for_fingerprint(
+            "gene_list_file": _small_text_file_fingerprint(
                 gene_list_file if gene_list_file is not None else getattr(self.config.data, "gene_list_file", None)
             ),
             "cell_cell2ave_exp_file_path": _resolve_path_for_fingerprint(
