@@ -42,6 +42,13 @@ def _resolve_path_for_fingerprint(path_like: Optional[str | Path]) -> Optional[s
         return None
     return str(Path(path_like).expanduser().resolve())
 
+
+def _read_gene_list_file(path_like: str | Path) -> list[str]:
+    """Read one gene-per-line gene list artifact."""
+    return Path(path_like).read_text(encoding="utf-8").splitlines()
+
+
+
 def _cuda_usable() -> bool:
     if not torch.cuda.is_available():
         return False
@@ -785,6 +792,7 @@ class VAEDeconTrainer:
         *,
         training_file_paths: list[str | Path],
         training_target_sets: dict,
+        gene_list_file: Optional[str | Path] = None,
     ) -> str:
         """Return a stable content fingerprint for the processed training dataset cache."""
         training_targets_payload = {
@@ -798,7 +806,7 @@ class VAEDeconTrainer:
             for set_name, cfg in sorted(training_target_sets.items())
         }
         payload = {
-            "version": 2,
+            "version": 3,
             "file_paths": [
                 _resolve_path_for_fingerprint(path)
                 for path in training_file_paths
@@ -808,7 +816,9 @@ class VAEDeconTrainer:
             "scaling_factor": float(self.config.data.scaling_factor),
             "remove_low_var_genes": bool(self.config.data.remove_low_var_genes),
             "min_var": float(self.config.data.min_var),
-            "gene_list_file": _resolve_path_for_fingerprint(getattr(self.config.data, "gene_list_file", None)),
+            "gene_list_file": _resolve_path_for_fingerprint(
+                gene_list_file if gene_list_file is not None else getattr(self.config.data, "gene_list_file", None)
+            ),
             "cell_cell2ave_exp_file_path": _resolve_path_for_fingerprint(
                 getattr(self.config.data, "cell_cell2ave_exp_file_path", None)
             ),
@@ -825,11 +835,13 @@ class VAEDeconTrainer:
         *,
         training_file_paths: list[str | Path],
         training_target_sets: dict,
+        gene_list_file: Optional[str | Path] = None,
     ) -> Path:
         """Build the shared processed-training cache directory for the current dataset inputs."""
         fingerprint = self._build_training_dataset_cache_fingerprint(
             training_file_paths=training_file_paths,
             training_target_sets=training_target_sets,
+            gene_list_file=gene_list_file,
         )
         return Path(self.config.data.data_dir) / "processed_training_sets" / fingerprint
 
@@ -852,6 +864,7 @@ class VAEDeconTrainer:
         self._processed_training_set_dir = self._resolve_processed_training_set_dir(
             training_file_paths=training_file_paths,
             training_target_sets=training_target_sets,
+            gene_list_file=gene_list_file or self.config.data.gene_list_file,
         )
 
         return GEPDatasetConfig(
@@ -885,10 +898,8 @@ class VAEDeconTrainer:
         stage_cfg,
     ) -> tuple[GEPDataset, any, any]:
         """Build one stage-local dataset and split it into train/val subsets."""
-        stage_gene_list_file = self.config.data.gene_list_file
-        model_gene_list_fp = getattr(self.config.model, "input_gene_list_fp", None)
-        if model_gene_list_fp and Path(model_gene_list_fp).exists():
-            stage_gene_list_file = model_gene_list_fp
+        stage_gene_list_file = self._resolve_canonical_stage_gene_list_file()
+        canonical_gene_list = self._load_canonical_stage_gene_list(stage_gene_list_file)
 
         dataset_config = self._build_gepdataset_config(
             require_pure_sct_gep=bool(getattr(stage_cfg, "require_pure_sct_gep", False)),
@@ -897,6 +908,12 @@ class VAEDeconTrainer:
             gene_list_file=stage_gene_list_file,
         )
         dataset = GEPDataset(config=dataset_config)
+        self._validate_stage_dataset_gene_list(
+            stage_name=str(getattr(stage_cfg, "name", "unknown_stage")),
+            dataset=dataset,
+            expected_gene_list=canonical_gene_list,
+            gene_list_file=stage_gene_list_file,
+        )
 
         debug_overfit_cfg = self.config.training.debug_overfit
         if debug_overfit_cfg.enabled:
@@ -907,6 +924,63 @@ class VAEDeconTrainer:
                 [self.config.training.train_split, self.config.training.val_split]
             )
         return dataset, train_set, val_set
+
+    def _resolve_canonical_stage_gene_list_file(self) -> Optional[str | Path]:
+        """Return the canonical gene-list artifact that all staged datasets must reuse."""
+        model_gene_list_fp = getattr(self.config.model, "input_gene_list_fp", None)
+        if model_gene_list_fp and Path(model_gene_list_fp).exists():
+            return model_gene_list_fp
+        return self.config.data.gene_list_file
+
+    @staticmethod
+    def _load_canonical_stage_gene_list(
+        gene_list_file: Optional[str | Path],
+    ) -> Optional[list[str]]:
+        """Load the canonical stage gene list when an artifact path is available."""
+        if gene_list_file is None:
+            return None
+        gene_list_path = Path(gene_list_file)
+        if not gene_list_path.exists():
+            return None
+        return [str(gene) for gene in _read_gene_list_file(gene_list_path)]
+
+    @staticmethod
+    def _validate_stage_dataset_gene_list(
+        *,
+        stage_name: str,
+        dataset: GEPDataset,
+        expected_gene_list: Optional[list[str]],
+        gene_list_file: Optional[str | Path],
+    ) -> None:
+        """Fail fast if a staged dataset does not match the canonical model gene list."""
+        if expected_gene_list is None:
+            return
+        actual_gene_list = [str(gene) for gene in dataset.get_gene_list()]
+        if actual_gene_list == expected_gene_list:
+            return
+
+        expected_len = len(expected_gene_list)
+        actual_len = len(actual_gene_list)
+        first_mismatch = next(
+            (
+                idx for idx, (expected_gene, actual_gene) in enumerate(
+                    zip(expected_gene_list, actual_gene_list)
+                )
+                if expected_gene != actual_gene
+            ),
+            None,
+        )
+        mismatch_msg = (
+            f"first mismatch at index {first_mismatch}: "
+            f"expected {expected_gene_list[first_mismatch]!r}, got {actual_gene_list[first_mismatch]!r}"
+            if first_mismatch is not None
+            else "one gene list is a strict prefix of the other"
+        )
+        raise RuntimeError(
+            f"Stage {stage_name!r} loaded a dataset gene list that does not match the canonical "
+            f"model gene list from {gene_list_file}. Expected {expected_len} genes, got {actual_len}; "
+            f"{mismatch_msg}."
+        )
 
     @staticmethod
     def _resolve_stage_named_modules(model) -> Dict[str, torch.nn.Module]:
