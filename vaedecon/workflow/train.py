@@ -88,6 +88,7 @@ class VAEDeconTrainer:
         self.model_dir: Path | str = ''
         # self._vae_config: Optional[ModelConfig] = None  # cached, built once in _prepare_data
         self._processed_training_set_dir: Optional[Path] = None  # exposed for cleanup after training
+        self._canonical_stage_gene_list: Optional[list[str]] = None
 
         self._setup_logging()
         self._setup_device()
@@ -183,6 +184,7 @@ class VAEDeconTrainer:
         # Update input_dim, gene_mean_std_fp, and build ModelConfig once
         # Build and cache ModelConfig here; _create_model reuses it
         self.config.model = self._build_vae_config(dataset=dataset)
+        self._set_canonical_stage_gene_list(dataset)
         save_metadata(dataset=dataset, model_config=self.config.model)
 
         # TODO, only calculate gene mean/std when we need it, such as GNN or predict_gep_residual is true.
@@ -198,6 +200,21 @@ class VAEDeconTrainer:
             self.config.model.training_sct_per_sample_residual_var_fp = per_sample_var_fp
 
         return dataset, train_set, val_set
+
+    def _set_canonical_stage_gene_list(self, dataset: GEPDataset) -> None:
+        """Persist the base training gene list as the canonical staged-training gene space."""
+        self._canonical_stage_gene_list = [str(gene) for gene in dataset.get_gene_list()]
+        model_gene_list_fp = getattr(self.config.model, "input_gene_list_fp", None)
+        if model_gene_list_fp is None:
+            return
+        gene_list_path = Path(model_gene_list_fp)
+        check_dir(gene_list_path.parent)
+        GEPCacheManager.save_list_txt(self._canonical_stage_gene_list, gene_list_path)
+        logger.info(
+            "Synchronized canonical staged-training gene list to %s (%s genes).",
+            gene_list_path,
+            len(self._canonical_stage_gene_list),
+        )
 
     def _build_debug_overfit_subsets(
         self,
@@ -942,15 +959,34 @@ class VAEDeconTrainer:
     def _resolve_canonical_stage_gene_list_file(self) -> Optional[str | Path]:
         """Return the canonical gene-list artifact that all staged datasets must reuse."""
         model_gene_list_fp = getattr(self.config.model, "input_gene_list_fp", None)
-        if model_gene_list_fp and Path(model_gene_list_fp).exists():
+        if model_gene_list_fp:
+            model_gene_list_path = Path(model_gene_list_fp)
+            if self._canonical_stage_gene_list is not None:
+                file_gene_list = (
+                    [str(gene) for gene in _read_gene_list_file(model_gene_list_path)]
+                    if model_gene_list_path.exists()
+                    else None
+                )
+                if file_gene_list != self._canonical_stage_gene_list:
+                    check_dir(model_gene_list_path.parent)
+                    GEPCacheManager.save_list_txt(self._canonical_stage_gene_list, model_gene_list_path)
+                    logger.warning(
+                        "Rewrote stale canonical gene list artifact at %s to match the base training dataset (%s genes).",
+                        model_gene_list_path,
+                        len(self._canonical_stage_gene_list),
+                    )
+            if model_gene_list_path.exists():
+                return model_gene_list_path
             return model_gene_list_fp
         return self.config.data.gene_list_file
 
-    @staticmethod
     def _load_canonical_stage_gene_list(
+        self,
         gene_list_file: Optional[str | Path],
     ) -> Optional[list[str]]:
         """Load the canonical stage gene list when an artifact path is available."""
+        if self._canonical_stage_gene_list is not None:
+            return list(self._canonical_stage_gene_list)
         if gene_list_file is None:
             return None
         gene_list_path = Path(gene_list_file)
