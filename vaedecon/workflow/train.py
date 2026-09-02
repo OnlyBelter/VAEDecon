@@ -147,6 +147,16 @@ class VAEDeconTrainer:
 
         logger.info(f"Results will be saved to: {self.result_dir}")
 
+    def _resolve_base_dataset_stage_cfg(self):
+        """Choose which configured stage defines the canonical base dataset for staged runs."""
+        staged_training_cfg = getattr(self.config.training, "staged_training", None)
+        if staged_training_cfg is None or not staged_training_cfg.enabled:
+            return None
+        configured_stages = list(staged_training_cfg.stages or [])
+        if not configured_stages:
+            return None
+        return configured_stages[0]
+
     def _prepare_data(self) -> Tuple[GEPDataset, any, any]:
         """Load, preprocess, and split the training data"""
         logger.info("Loading and preparing data...")
@@ -161,7 +171,22 @@ class VAEDeconTrainer:
                 )
 
         # Load GEP dataset, PPI and Pathway data will be handled in each specified encoder class.
-        gep_dataset_config = self._build_gepdataset_config()  # training file paths and preprocessing params
+        base_stage_cfg = self._resolve_base_dataset_stage_cfg()
+        if base_stage_cfg is None:
+            gep_dataset_config = self._build_gepdataset_config()  # training file paths and preprocessing params
+        else:
+            logger.info(
+                "Preparing canonical base dataset from staged-training anchor stage: %s",
+                base_stage_cfg.name,
+            )
+            gep_dataset_config = self._build_gepdataset_config(
+                require_pure_sct_gep=bool(getattr(base_stage_cfg, "require_pure_sct_gep", False)),
+                require_mixed_bulk=bool(getattr(base_stage_cfg, "require_mixed_bulk", False)),
+                enable_direct_sct_gep_supervision=bool(
+                    getattr(base_stage_cfg, "enable_direct_sct_gep_supervision", True)
+                ),
+                gene_list_file=self.config.data.gene_list_file,
+            )
         dataset = GEPDataset(config=gep_dataset_config)
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
@@ -208,7 +233,7 @@ class VAEDeconTrainer:
         if model_gene_list_fp is None:
             return
         gene_list_path = Path(model_gene_list_fp)
-        check_dir(gene_list_path.parent)
+        gene_list_path.parent.mkdir(parents=True, exist_ok=True)
         GEPCacheManager.save_list_txt(self._canonical_stage_gene_list, gene_list_path)
         logger.info(
             "Synchronized canonical staged-training gene list to %s (%s genes).",
@@ -968,7 +993,7 @@ class VAEDeconTrainer:
                     else None
                 )
                 if file_gene_list != self._canonical_stage_gene_list:
-                    check_dir(model_gene_list_path.parent)
+                    model_gene_list_path.parent.mkdir(parents=True, exist_ok=True)
                     GEPCacheManager.save_list_txt(self._canonical_stage_gene_list, model_gene_list_path)
                     logger.warning(
                         "Rewrote stale canonical gene list artifact at %s to match the base training dataset (%s genes).",
