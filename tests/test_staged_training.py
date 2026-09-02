@@ -1,10 +1,12 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 import torch
 
 from vaedecon.configs import VAEDeconConfig
+from vaedecon.models.vae.vae_model import VAE
 import vaedecon.workflow.inference as inference_workflow
 from vaedecon.workflow.train import VAEDeconTrainer
 
@@ -60,6 +62,54 @@ def _base_staged_training_dict() -> dict:
     }
 
 
+def _three_stage_staged_training_dict() -> dict:
+    return {
+        "enabled": True,
+        "stages": [
+            {
+                "name": "cell_prop_predictor_pretrain",
+                "max_epochs": 5,
+                "train_modules": ["cell_prop_predictor"],
+                "freeze_modules": ["encoders", "decoder"],
+                "learning_rate_scale": 1.0,
+                "require_mixed_bulk": True,
+                "early_stopping": {
+                    "monitor": "val_loss",
+                    "patience": 2,
+                    "min_delta": 0.0,
+                },
+            },
+            {
+                "name": "pure_sct_gep_pretrain",
+                "max_epochs": 5,
+                "train_modules": ["encoders", "decoder"],
+                "freeze_modules": ["cell_prop_predictor"],
+                "learning_rate_scale": 1.0,
+                "require_pure_sct_gep": True,
+                "use_ground_truth_cell_prop": True,
+                "early_stopping": {
+                    "monitor": "val_loss",
+                    "patience": 2,
+                    "min_delta": 0.0,
+                },
+            },
+            {
+                "name": "mixed_bulk_joint_finetune",
+                "max_epochs": 5,
+                "train_modules": ["cell_prop_predictor", "encoders", "decoder"],
+                "freeze_modules": [],
+                "learning_rate_scale": 0.1,
+                "require_mixed_bulk": True,
+                "early_stopping": {
+                    "monitor": "val_loss",
+                    "patience": 2,
+                    "min_delta": 0.0,
+                },
+            },
+        ],
+    }
+
+
 def _base_staged_config_dict(tmp_path: Path) -> dict:
     predictor_alias = "cell_prop_predictor"
     return {
@@ -88,6 +138,14 @@ def _base_staged_config_dict(tmp_path: Path) -> dict:
             },
         },
     }
+
+
+def _three_stage_config_dict(tmp_path: Path) -> dict:
+    config = _base_staged_config_dict(tmp_path)
+    config["data"]["simu_bulk_file_path"] = [str(tmp_path / "train_bulk.h5ad")]
+    config["data"]["gene_mean_std_sct_gep_file_path"] = str(tmp_path / "gene_mean_std_sct.h5ad")
+    config["training"]["staged_training"] = _three_stage_staged_training_dict()
+    return config
 
 
 class DummyStageModel(torch.nn.Module):
@@ -322,6 +380,32 @@ def test_stage1_monitor_is_forced_to_val_cell_prop_loss(tmp_path: Path):
     assert loaded.training.staged_training.stages[0].early_stopping.monitor == "val_cell_prop_loss"
 
 
+def test_three_stage_config_defaults_disable_direct_sct_supervision_for_new_stages(tmp_path: Path):
+    loaded = VAEDeconConfig.from_dict(_three_stage_config_dict(tmp_path))
+
+    assert loaded.training.staged_training is not None
+    stages = {stage.name: stage for stage in loaded.training.staged_training.stages}
+    assert stages["cell_prop_predictor_pretrain"].enable_direct_sct_gep_supervision is False
+    assert stages["pure_sct_gep_pretrain"].enable_direct_sct_gep_supervision is False
+    assert stages["mixed_bulk_joint_finetune"].enable_direct_sct_gep_supervision is False
+
+
+def test_three_stage_config_requires_pure_sct_inputs_for_stage2(tmp_path: Path):
+    config_dict = _three_stage_config_dict(tmp_path)
+    config_dict["data"]["sct_file_path"] = []
+
+    with pytest.raises(ValueError, match="requires pure sctGEP inputs"):
+        VAEDeconConfig.from_dict(config_dict)
+
+
+def test_three_stage_config_requires_mixed_bulk_inputs_for_stage3(tmp_path: Path):
+    config_dict = _three_stage_config_dict(tmp_path)
+    config_dict["data"]["simu_bulk_file_path"] = []
+
+    with pytest.raises(ValueError, match="requires mixed bulk inputs"):
+        VAEDeconConfig.from_dict(config_dict)
+
+
 def test_stage1_training_config_always_logs_cell_prop_loss(tmp_path: Path):
     config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
     config.training.prog_bar_metrics = ["loss", "kld"]
@@ -377,6 +461,41 @@ def test_stage2_loss_plot_is_saved_from_losses_csv(tmp_path: Path):
     )
 
     assert (stage_dir / "loss.png").exists()
+
+
+def test_stage_dataset_input_resolution_respects_three_stage_data_semantics(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(_three_stage_config_dict(tmp_path))
+    trainer = VAEDeconTrainer(config=config)
+
+    pure_paths, pure_targets = trainer._resolve_training_dataset_inputs(
+        require_pure_sct_gep=True,
+        enable_direct_sct_gep_supervision=False,
+    )
+    mixed_paths, mixed_targets = trainer._resolve_training_dataset_inputs(
+        require_mixed_bulk=True,
+        enable_direct_sct_gep_supervision=False,
+    )
+
+    assert pure_paths == [str(tmp_path / "train_sct.h5ad")]
+    assert pure_targets == {}
+    assert mixed_paths == [str(tmp_path / "train_bulk.h5ad")]
+    assert mixed_targets == {}
+
+
+def test_stage_loss_overrides_disable_direct_sct_supervision_for_three_stage_defaults(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(_three_stage_config_dict(tmp_path))
+    trainer = VAEDeconTrainer(config=config)
+    stages = {stage.name: stage for stage in config.training.staged_training.stages}
+
+    stage1_overrides = trainer._merge_stage_loss_overrides(stages["cell_prop_predictor_pretrain"])
+    stage2_overrides = trainer._merge_stage_loss_overrides(stages["pure_sct_gep_pretrain"])
+    stage3_overrides = trainer._merge_stage_loss_overrides(stages["mixed_bulk_joint_finetune"])
+
+    assert stage1_overrides["cell_type_sct_gep_weight"] == pytest.approx(0.0)
+    assert stage2_overrides["cell_type_sct_gep_weight"] == pytest.approx(0.0)
+    assert stage2_overrides["cell_prop"] == pytest.approx(0.0)
+    assert stage3_overrides["cell_type_sct_gep_weight"] == pytest.approx(0.0)
+    assert stage3_overrides["cell_prop"] == pytest.approx(0.0)
 
 
 def test_load_cell_prop_predictor_checkpoint_updates_only_predictor_weights(tmp_path: Path):
@@ -508,6 +627,24 @@ def test_stage_local_test_prediction_is_skipped_for_joint_finetune(tmp_path: Pat
     assert trainer._should_run_stage_local_test_set_prediction("cell_prop_predictor_pretrain") is True
     assert trainer._should_run_stage_local_test_set_prediction("reconstruction_training") is True
     assert trainer._should_run_stage_local_test_set_prediction("joint_finetune") is False
+    assert trainer._should_run_stage_local_test_set_prediction("mixed_bulk_joint_finetune") is False
+
+
+def test_resolve_effective_cell_prop_uses_ground_truth_when_stage_flag_is_set():
+    dummy_model = object.__new__(VAE)
+    dummy_model.model_config = SimpleNamespace(predict_cell_prop=True)
+    dummy_model.current_stage_use_ground_truth_cell_prop = True
+
+    labels = torch.tensor([[0.8, 0.2]], dtype=torch.float32)
+    predicted = torch.tensor([[0.1, 0.9]], dtype=torch.float32)
+
+    effective = VAE._resolve_effective_cell_prop(
+        dummy_model,
+        labels=labels,
+        predicted_cell_prop=predicted,
+    )
+
+    assert torch.equal(effective, labels)
 
 
 def test_final_model_test_prediction_targets_final_model_test_results(

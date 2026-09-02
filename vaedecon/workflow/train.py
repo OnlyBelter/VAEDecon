@@ -672,19 +672,50 @@ class VAEDeconTrainer:
         trainer_config.per_device_eval_batch_size = self.config.training.batch_size
         return trainer_config
 
-    def _resolve_training_dataset_inputs(self) -> tuple[list[str | Path], dict]:
+    def _resolve_training_dataset_inputs(
+        self,
+        *,
+        require_pure_sct_gep: bool = False,
+        require_mixed_bulk: bool = False,
+        enable_direct_sct_gep_supervision: Optional[bool] = None,
+    ) -> tuple[list[str | Path], dict]:
         """Resolve training file paths and matched-target settings for the dataset."""
         simu_paths = [
             path for path in (self.config.data.simu_bulk_file_path or [])
             if path is not None and str(path).strip() != ""
         ]
-        sct_paths  = self.config.data.sct_file_path or []
-        training_file_paths = [p for p in simu_paths + sct_paths if p is not None]
+        sct_paths = [
+            path for path in (self.config.data.sct_file_path or [])
+            if path is not None and str(path).strip() != ""
+        ]
+        if require_pure_sct_gep and require_mixed_bulk:
+            raise ValueError("A stage cannot require both pure sctGEP and mixed bulk inputs.")
+
+        if require_pure_sct_gep:
+            if not sct_paths:
+                raise ValueError("This staged-training stage requires pure sctGEP inputs, but data.sct_file_path is empty.")
+            training_file_paths = list(sct_paths)
+        elif require_mixed_bulk:
+            if not simu_paths:
+                raise ValueError("This staged-training stage requires mixed bulk inputs, but data.simu_bulk_file_path is empty.")
+            training_file_paths = list(simu_paths)
+        else:
+            training_file_paths = [p for p in simu_paths + sct_paths if p is not None]
+
         matched_sct_gep_weight = float(
             getattr(self.config.model.loss_coefficient, "cell_type_sct_gep_weight", 0.0) or 0.0
         )
         training_target_sets = {}
-        if matched_sct_gep_weight > 0:
+        if enable_direct_sct_gep_supervision is None:
+            matched_supervision_enabled = matched_sct_gep_weight > 0 and not require_pure_sct_gep
+        else:
+            matched_supervision_enabled = (
+                matched_sct_gep_weight > 0
+                and bool(enable_direct_sct_gep_supervision)
+                and not require_pure_sct_gep
+            )
+
+        if matched_supervision_enabled:
             training_target_sets = dict(self.config.data.training_target_sets or {})
             if not training_target_sets:
                 raise ValueError(
@@ -802,11 +833,22 @@ class VAEDeconTrainer:
         )
         return Path(self.config.data.data_dir) / "processed_training_sets" / fingerprint
 
-    def _build_gepdataset_config(self) -> GEPDatasetConfig:
+    def _build_gepdataset_config(
+        self,
+        *,
+        require_pure_sct_gep: bool = False,
+        require_mixed_bulk: bool = False,
+        enable_direct_sct_gep_supervision: Optional[bool] = None,
+        gene_list_file: Optional[str | Path] = None,
+    ) -> GEPDatasetConfig:
         """
         Build a config dict for GEPDataset from self.config.data
         """
-        training_file_paths, training_target_sets = self._resolve_training_dataset_inputs()
+        training_file_paths, training_target_sets = self._resolve_training_dataset_inputs(
+            require_pure_sct_gep=require_pure_sct_gep,
+            require_mixed_bulk=require_mixed_bulk,
+            enable_direct_sct_gep_supervision=enable_direct_sct_gep_supervision,
+        )
         self._processed_training_set_dir = self._resolve_processed_training_set_dir(
             training_file_paths=training_file_paths,
             training_target_sets=training_target_sets,
@@ -822,7 +864,7 @@ class VAEDeconTrainer:
             chunk_size=self.config.data.chunk_size,
             min_var=self.config.data.min_var,
             scaling_factor=self.config.data.scaling_factor,
-            gene_list_file=self.config.data.gene_list_file,
+            gene_list_file=gene_list_file or self.config.data.gene_list_file,
             cell_cell2ave_exp_file_path=self.config.data.cell_cell2ave_exp_file_path,
             gene_mean_std_source=self.config.data.gene_mean_std_source,
             gene_mean_std_sct_gep_file_path=self.config.data.gene_mean_std_sct_gep_file_path,
@@ -836,6 +878,35 @@ class VAEDeconTrainer:
             training_sct_gep_cell_prop_threshold=self.config.data.training_sct_gep_cell_prop_threshold,
             processed_data_dir=self._processed_training_set_dir,
         )
+
+    def _build_stage_dataset_and_subsets(
+        self,
+        *,
+        stage_cfg,
+    ) -> tuple[GEPDataset, any, any]:
+        """Build one stage-local dataset and split it into train/val subsets."""
+        stage_gene_list_file = self.config.data.gene_list_file
+        model_gene_list_fp = getattr(self.config.model, "input_gene_list_fp", None)
+        if model_gene_list_fp and Path(model_gene_list_fp).exists():
+            stage_gene_list_file = model_gene_list_fp
+
+        dataset_config = self._build_gepdataset_config(
+            require_pure_sct_gep=bool(getattr(stage_cfg, "require_pure_sct_gep", False)),
+            require_mixed_bulk=bool(getattr(stage_cfg, "require_mixed_bulk", False)),
+            enable_direct_sct_gep_supervision=bool(getattr(stage_cfg, "enable_direct_sct_gep_supervision", True)),
+            gene_list_file=stage_gene_list_file,
+        )
+        dataset = GEPDataset(config=dataset_config)
+
+        debug_overfit_cfg = self.config.training.debug_overfit
+        if debug_overfit_cfg.enabled:
+            train_set, val_set = self._build_debug_overfit_subsets(dataset)
+        else:
+            train_set, val_set = random_split(
+                dataset,
+                [self.config.training.train_split, self.config.training.val_split]
+            )
+        return dataset, train_set, val_set
 
     @staticmethod
     def _resolve_stage_named_modules(model) -> Dict[str, torch.nn.Module]:
@@ -880,16 +951,22 @@ class VAEDeconTrainer:
         train_module_set = set(train_modules)
         for module, module_aliases in grouped_modules.values():
             is_trainable = any(alias in train_module_set for alias in module_aliases)
-            for parameter in module.parameters():
-                parameter.requires_grad = is_trainable
-            if is_trainable:
-                module.train()
+            if isinstance(module, torch.nn.Parameter):
+                module.requires_grad = is_trainable
+                target_mode = "train" if is_trainable else "eval"
                 for module_name in module_aliases:
-                    module_mode_overrides[module_name] = "train"
+                    module_mode_overrides[module_name] = target_mode
             else:
-                module.eval()
-                for module_name in module_aliases:
-                    module_mode_overrides[module_name] = "eval"
+                for parameter in module.parameters():
+                    parameter.requires_grad = is_trainable
+                if is_trainable:
+                    module.train()
+                    for module_name in module_aliases:
+                        module_mode_overrides[module_name] = "train"
+                else:
+                    module.eval()
+                    for module_name in module_aliases:
+                        module_mode_overrides[module_name] = "eval"
         return module_mode_overrides
 
     @staticmethod
@@ -1006,9 +1083,25 @@ class VAEDeconTrainer:
         return stage_training_config
 
     @staticmethod
-    def _set_stage_runtime_context(model, *, stage_name: str) -> None:
+    def _set_stage_runtime_context(model, *, stage_name: str, use_ground_truth_cell_prop: bool = False) -> None:
         base_model = _unwrap_stage_model(model)
         setattr(base_model, "current_stage_name", stage_name)
+        setattr(base_model, "current_stage_use_ground_truth_cell_prop", bool(use_ground_truth_cell_prop))
+
+    @staticmethod
+    def _merge_stage_loss_overrides(stage_cfg) -> Dict[str, float]:
+        """Apply stage-local default objective switches on top of explicit overrides."""
+        merged = dict(stage_cfg.loss_overrides)
+        if stage_cfg.name == "cell_prop_predictor_pretrain":
+            merged.setdefault("cell_type_sct_gep_weight", 0.0)
+        if not getattr(stage_cfg, "enable_direct_sct_gep_supervision", True):
+            merged["cell_type_sct_gep_weight"] = 0.0
+        if stage_cfg.name in {"pure_sct_gep_pretrain", "mixed_bulk_joint_finetune"}:
+            merged.setdefault("cell_prop", 0.0)
+            merged.setdefault("kld_p", 0.0)
+            merged.setdefault("inter_sample_similarity_weight", 0.0)
+            merged.setdefault("cell_type_existence_weight", 0.0)
+        return merged
 
     @staticmethod
     def _resolve_stage_checkpoint_paths(stage_dir: Path) -> tuple[Path, Path]:
@@ -1086,7 +1179,7 @@ class VAEDeconTrainer:
     @staticmethod
     def _should_run_stage_local_test_set_prediction(stage_name: str) -> bool:
         """Keep stage-local test results only for the earlier staged-training phases."""
-        return stage_name != "joint_finetune"
+        return stage_name not in {"joint_finetune", "mixed_bulk_joint_finetune"}
 
     def _run_final_model_test_set_prediction(
         self,
@@ -1248,8 +1341,6 @@ class VAEDeconTrainer:
         self,
         *,
         model,
-        train_set,
-        val_set,
         trainer_config: TrainingConfig,
     ) -> None:
         staged_training_cfg = trainer_config.staged_training
@@ -1294,7 +1385,11 @@ class VAEDeconTrainer:
                     init_checkpoint_path,
                 )
                 if (
-                    stage_cfg.name in {"reconstruction_training", "prototype_training"}
+                    stage_cfg.name in {
+                        "pure_sct_gep_pretrain",
+                        "reconstruction_training",
+                        "prototype_training",
+                    }
                     and direct_predecessor not in executed_stage_best_checkpoints
                 ):
                     self._load_cell_prop_predictor_checkpoint(model, init_checkpoint_path)
@@ -1302,12 +1397,17 @@ class VAEDeconTrainer:
                     self._load_stage_checkpoint(model, init_checkpoint_path)
 
             self._reset_stage_loss_overrides(model, base_model_config)
-            self._apply_stage_loss_overrides(model, stage_cfg.loss_overrides)
-            self._set_stage_runtime_context(model, stage_name=stage_cfg.name)
+            self._apply_stage_loss_overrides(model, self._merge_stage_loss_overrides(stage_cfg))
+            self._set_stage_runtime_context(
+                model,
+                stage_name=stage_cfg.name,
+                use_ground_truth_cell_prop=bool(getattr(stage_cfg, "use_ground_truth_cell_prop", False)),
+            )
             module_mode_overrides = self._apply_stage_module_trainability(
                 model,
                 train_modules=list(stage_cfg.train_modules),
             )
+            stage_dataset, stage_train_set, stage_val_set = self._build_stage_dataset_and_subsets(stage_cfg=stage_cfg)
 
             stage_training_config = self._build_stage_training_config(
                 base_training_config,
@@ -1329,8 +1429,8 @@ class VAEDeconTrainer:
             stage_trainer = BaseTrainerL(
                 model=model,
                 result_dir=str(stage_dir),
-                train_dataset=train_set,
-                eval_dataset=val_set,
+                train_dataset=stage_train_set,
+                eval_dataset=stage_val_set,
                 training_config=stage_training_config,
                 data_config=self.config.data,
                 n_early_stopping_patience=stage_cfg.early_stopping.patience,
@@ -1363,6 +1463,15 @@ class VAEDeconTrainer:
                 {
                     "stage_name": stage_cfg.name,
                     "stage_dir": str(stage_dir),
+                    "dataset_size": int(len(stage_dataset)),
+                    "train_size": int(len(stage_train_set)),
+                    "val_size": int(len(stage_val_set)) if stage_val_set is not None else 0,
+                    "require_pure_sct_gep": bool(getattr(stage_cfg, "require_pure_sct_gep", False)),
+                    "require_mixed_bulk": bool(getattr(stage_cfg, "require_mixed_bulk", False)),
+                    "use_ground_truth_cell_prop": bool(getattr(stage_cfg, "use_ground_truth_cell_prop", False)),
+                    "enable_direct_sct_gep_supervision": bool(
+                        getattr(stage_cfg, "enable_direct_sct_gep_supervision", True)
+                    ),
                     "init_source": init_source,
                     "init_checkpoint": str(init_checkpoint_path) if init_checkpoint_path is not None else "",
                     "best_checkpoint": str(best_ckpt_path),
@@ -1418,8 +1527,6 @@ class VAEDeconTrainer:
         if staged_training_cfg is not None and staged_training_cfg.enabled:
             self._train_with_staged_training(
                 model=model,
-                train_set=train_set,
-                val_set=val_set,
                 trainer_config=trainer_config,
             )
         else:

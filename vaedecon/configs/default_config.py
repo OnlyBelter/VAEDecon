@@ -370,6 +370,8 @@ class StagedTrainingStageConfig(BaseModel):
 
     name: Literal[
         "cell_prop_predictor_pretrain",
+        "pure_sct_gep_pretrain",
+        "mixed_bulk_joint_finetune",
         "prototype_training",
         "residual_training",
         "reconstruction_training",
@@ -399,6 +401,25 @@ class StagedTrainingStageConfig(BaseModel):
     early_stopping: StageEarlyStoppingConfig = Field(
         default_factory=StageEarlyStoppingConfig,
         description="Stage-local early stopping settings.",
+    )
+    require_pure_sct_gep: bool = Field(
+        default=False,
+        description="If true, this stage trains only on data.sct_file_path inputs.",
+    )
+    require_mixed_bulk: bool = Field(
+        default=False,
+        description="If true, this stage trains only on data.simu_bulk_file_path inputs.",
+    )
+    use_ground_truth_cell_prop: bool = Field(
+        default=False,
+        description="If true, use batch labels as downstream cell proportions during this stage.",
+    )
+    enable_direct_sct_gep_supervision: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Whether to keep matched direct sctGEP supervision enabled for this stage. "
+            "If omitted, stage-type-specific defaults are applied."
+        ),
     )
 
     @field_validator("train_modules", "freeze_modules")
@@ -451,6 +472,30 @@ class StagedTrainingStageConfig(BaseModel):
             )
         if self.name == "cell_prop_predictor_pretrain":
             self.early_stopping.monitor = "val_cell_prop_loss"
+            if self.enable_direct_sct_gep_supervision is None:
+                self.enable_direct_sct_gep_supervision = False
+        if self.require_pure_sct_gep and self.require_mixed_bulk:
+            raise ValueError(
+                "A staged-training stage cannot require both pure sctGEP and mixed bulk inputs."
+            )
+        if self.name == "pure_sct_gep_pretrain":
+            if self.enable_direct_sct_gep_supervision is None:
+                self.enable_direct_sct_gep_supervision = False
+            if not self.require_pure_sct_gep:
+                raise ValueError("pure_sct_gep_pretrain requires require_pure_sct_gep=True")
+            if self.require_mixed_bulk:
+                raise ValueError("pure_sct_gep_pretrain cannot require mixed bulk inputs")
+            if not self.use_ground_truth_cell_prop:
+                raise ValueError("pure_sct_gep_pretrain requires use_ground_truth_cell_prop=True")
+        if self.name == "mixed_bulk_joint_finetune":
+            if self.enable_direct_sct_gep_supervision is None:
+                self.enable_direct_sct_gep_supervision = False
+            if not self.require_mixed_bulk:
+                raise ValueError("mixed_bulk_joint_finetune requires require_mixed_bulk=True")
+            if self.require_pure_sct_gep:
+                raise ValueError("mixed_bulk_joint_finetune cannot require pure sctGEP inputs")
+        if self.enable_direct_sct_gep_supervision is None:
+            self.enable_direct_sct_gep_supervision = True
         if self.name == "prototype_training":
             required = {"prototype_bank", "prototype_decoder"}
             missing = sorted(required - set(self.train_modules))
@@ -1958,6 +2003,8 @@ class VAEDeconConfig:
                     )
             if any(
                 stage_name in {
+                    "pure_sct_gep_pretrain",
+                    "mixed_bulk_joint_finetune",
                     "prototype_training",
                     "residual_training",
                     "reconstruction_training",
@@ -1976,6 +2023,26 @@ class VAEDeconConfig:
                         "training.staged_training later stages require "
                         "model.encoder_output_routing.decoder_context_source to use the cell_prop_predictor alias"
                     )
+            stage_configs_by_name = {stage.name: stage for stage in staged_training.stages}
+            for stage_name in selected_stages:
+                stage_cfg = stage_configs_by_name[stage_name]
+                if stage_cfg.require_pure_sct_gep and not data.sct_file_path:
+                    raise ValueError(
+                        f"Stage {stage_name!r} requires pure sctGEP inputs but data.sct_file_path is empty."
+                    )
+                if stage_cfg.require_mixed_bulk and not data.simu_bulk_file_path:
+                    raise ValueError(
+                        f"Stage {stage_name!r} requires mixed bulk inputs but data.simu_bulk_file_path is empty."
+                    )
+                if stage_cfg.enable_direct_sct_gep_supervision and stage_cfg.require_mixed_bulk:
+                    matched_sct_weight = float(
+                        getattr(model.loss_coefficient, "cell_type_sct_gep_weight", 0.0) or 0.0
+                    )
+                    if matched_sct_weight > 0 and not data.training_target_sets:
+                        raise ValueError(
+                            f"Stage {stage_name!r} enables direct sctGEP supervision with "
+                            "cell_type_sct_gep_weight > 0, but data.training_target_sets is empty."
+                        )
 
         adaptive_schedule = training.adaptive_aux_loss_schedule
         if adaptive_schedule is None or not adaptive_schedule.enabled:

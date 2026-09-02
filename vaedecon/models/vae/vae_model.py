@@ -307,6 +307,7 @@ class VAE(BaseAE):
         )
         self.use_prototype_bank = bool(getattr(model_config, "use_prototype_bank", False))
         self.current_stage_name = "joint_finetune"
+        self.current_stage_use_ground_truth_cell_prop = False
         self.prototype_bank = None
         self.prototype_decoder = None
         self.residual_decoder = self.decoder
@@ -684,6 +685,14 @@ class VAE(BaseAE):
         predicted_cell_prop: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Resolve which cell proportions should be used downstream."""
+        if bool(getattr(self, "current_stage_use_ground_truth_cell_prop", False)):
+            if has_usable_labels(labels):
+                return labels
+            raise ValueError(
+                "current_stage_use_ground_truth_cell_prop=True requires ground-truth "
+                "cell-fraction labels, but no usable labels were provided."
+            )
+
         if self.model_config.predict_cell_prop:
             if predicted_cell_prop is None:
                 raise ValueError(
