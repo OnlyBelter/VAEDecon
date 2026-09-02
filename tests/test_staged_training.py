@@ -499,6 +499,14 @@ def test_base_dataset_stage_cfg_uses_first_configured_stage_for_staged_runs(tmp_
     assert base_stage_cfg.require_pure_sct_gep is False
 
 
+def test_stage_dataset_disables_low_var_filter_once_canonical_gene_list_is_fixed(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(_three_stage_config_dict(tmp_path))
+    trainer = VAEDeconTrainer(config=config)
+
+    assert trainer._resolve_stage_remove_low_var_genes(canonical_gene_list=["A", "B"]) is False
+    assert trainer._resolve_stage_remove_low_var_genes(canonical_gene_list=None) is True
+
+
 def test_stage_loss_overrides_disable_direct_sct_supervision_for_three_stage_defaults(tmp_path: Path):
     config = VAEDeconConfig.from_dict(_three_stage_config_dict(tmp_path))
     trainer = VAEDeconTrainer(config=config)

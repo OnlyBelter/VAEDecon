@@ -855,6 +855,7 @@ class VAEDeconTrainer:
         training_file_paths: list[str | Path],
         training_target_sets: dict,
         gene_list_file: Optional[str | Path] = None,
+        remove_low_var_genes: Optional[bool] = None,
     ) -> str:
         """Return a stable content fingerprint for the processed training dataset cache."""
         training_targets_payload = {
@@ -876,7 +877,9 @@ class VAEDeconTrainer:
             ],
             "scaling_by_constant": self.config.data.scaling_by_constant,
             "scaling_factor": float(self.config.data.scaling_factor),
-            "remove_low_var_genes": bool(self.config.data.remove_low_var_genes),
+            "remove_low_var_genes": bool(
+                self.config.data.remove_low_var_genes if remove_low_var_genes is None else remove_low_var_genes
+            ),
             "min_var": float(self.config.data.min_var),
             "gene_list_file": _small_text_file_fingerprint(
                 gene_list_file if gene_list_file is not None else getattr(self.config.data, "gene_list_file", None)
@@ -898,12 +901,14 @@ class VAEDeconTrainer:
         training_file_paths: list[str | Path],
         training_target_sets: dict,
         gene_list_file: Optional[str | Path] = None,
+        remove_low_var_genes: Optional[bool] = None,
     ) -> Path:
         """Build the shared processed-training cache directory for the current dataset inputs."""
         fingerprint = self._build_training_dataset_cache_fingerprint(
             training_file_paths=training_file_paths,
             training_target_sets=training_target_sets,
             gene_list_file=gene_list_file,
+            remove_low_var_genes=remove_low_var_genes,
         )
         return Path(self.config.data.data_dir) / "processed_training_sets" / fingerprint
 
@@ -914,6 +919,7 @@ class VAEDeconTrainer:
         require_mixed_bulk: bool = False,
         enable_direct_sct_gep_supervision: Optional[bool] = None,
         gene_list_file: Optional[str | Path] = None,
+        remove_low_var_genes: Optional[bool] = None,
     ) -> GEPDatasetConfig:
         """
         Build a config dict for GEPDataset from self.config.data
@@ -927,12 +933,15 @@ class VAEDeconTrainer:
             training_file_paths=training_file_paths,
             training_target_sets=training_target_sets,
             gene_list_file=gene_list_file or self.config.data.gene_list_file,
+            remove_low_var_genes=remove_low_var_genes,
         )
 
         return GEPDatasetConfig(
             file_paths=training_file_paths,
             scaling_by_constant=self.config.data.scaling_by_constant,
-            remove_low_var_genes=self.config.data.remove_low_var_genes,
+            remove_low_var_genes=(
+                self.config.data.remove_low_var_genes if remove_low_var_genes is None else remove_low_var_genes
+            ),
             force_reprocess=self.config.data.force_reprocess,
             max_parallel_source_file_loads=self.config.data.max_parallel_source_file_loads,
             use_memmap=self.config.data.use_memmap,
@@ -954,6 +963,16 @@ class VAEDeconTrainer:
             processed_data_dir=self._processed_training_set_dir,
         )
 
+    def _resolve_stage_remove_low_var_genes(
+        self,
+        *,
+        canonical_gene_list: Optional[list[str]],
+    ) -> bool:
+        """Disable stage-local low-variance filtering once the canonical gene list is fixed."""
+        if canonical_gene_list is not None:
+            return False
+        return bool(self.config.data.remove_low_var_genes)
+
     def _build_stage_dataset_and_subsets(
         self,
         *,
@@ -962,12 +981,16 @@ class VAEDeconTrainer:
         """Build one stage-local dataset and split it into train/val subsets."""
         stage_gene_list_file = self._resolve_canonical_stage_gene_list_file()
         canonical_gene_list = self._load_canonical_stage_gene_list(stage_gene_list_file)
+        stage_remove_low_var_genes = self._resolve_stage_remove_low_var_genes(
+            canonical_gene_list=canonical_gene_list,
+        )
 
         dataset_config = self._build_gepdataset_config(
             require_pure_sct_gep=bool(getattr(stage_cfg, "require_pure_sct_gep", False)),
             require_mixed_bulk=bool(getattr(stage_cfg, "require_mixed_bulk", False)),
             enable_direct_sct_gep_supervision=bool(getattr(stage_cfg, "enable_direct_sct_gep_supervision", True)),
             gene_list_file=stage_gene_list_file,
+            remove_low_var_genes=stage_remove_low_var_genes,
         )
         dataset = GEPDataset(config=dataset_config)
         self._validate_stage_dataset_gene_list(
