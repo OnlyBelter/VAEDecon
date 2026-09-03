@@ -1272,8 +1272,6 @@ class VAEDeconTrainer:
         merged = dict(stage_cfg.loss_overrides)
         if stage_cfg.name == "cell_prop_predictor_pretrain":
             merged.setdefault("cell_type_sct_gep_weight", 0.0)
-        if not getattr(stage_cfg, "enable_direct_sct_gep_supervision", True):
-            merged["cell_type_sct_gep_weight"] = 0.0
         if stage_cfg.name in {"pure_sct_gep_pretrain", "mixed_bulk_joint_finetune"}:
             merged.setdefault("cell_prop", 0.0)
             merged.setdefault("kld_p", 0.0)

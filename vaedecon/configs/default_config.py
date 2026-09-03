@@ -2026,6 +2026,12 @@ class VAEDeconConfig:
             stage_configs_by_name = {stage.name: stage for stage in staged_training.stages}
             for stage_name in selected_stages:
                 stage_cfg = stage_configs_by_name[stage_name]
+
+                def _effective_stage_loss_weight(loss_name: str) -> float:
+                    if loss_name in stage_cfg.loss_overrides:
+                        return float(stage_cfg.loss_overrides[loss_name] or 0.0)
+                    return float(getattr(model.loss_coefficient, loss_name, 0.0) or 0.0)
+
                 if stage_cfg.require_pure_sct_gep and not data.sct_file_path:
                     raise ValueError(
                         f"Stage {stage_name!r} requires pure sctGEP inputs but data.sct_file_path is empty."
@@ -2034,10 +2040,18 @@ class VAEDeconConfig:
                     raise ValueError(
                         f"Stage {stage_name!r} requires mixed bulk inputs but data.simu_bulk_file_path is empty."
                     )
+                if not stage_cfg.enable_direct_sct_gep_supervision:
+                    for loss_name in ("cell_type_sct_gep_weight", "inter_sample_similarity_weight"):
+                        effective_weight = _effective_stage_loss_weight(loss_name)
+                        if effective_weight > 0:
+                            raise ValueError(
+                                f"Stage {stage_name!r} disables direct sctGEP supervision "
+                                f"(enable_direct_sct_gep_supervision=False), but the effective "
+                                f"{loss_name} is {effective_weight} > 0. Set that stage's "
+                                f"loss_overrides['{loss_name}'] to 0, or enable direct sctGEP supervision."
+                            )
                 if stage_cfg.enable_direct_sct_gep_supervision and stage_cfg.require_mixed_bulk:
-                    matched_sct_weight = float(
-                        getattr(model.loss_coefficient, "cell_type_sct_gep_weight", 0.0) or 0.0
-                    )
+                    matched_sct_weight = _effective_stage_loss_weight("cell_type_sct_gep_weight")
                     if matched_sct_weight > 0 and not data.training_target_sets:
                         raise ValueError(
                             f"Stage {stage_name!r} enables direct sctGEP supervision with "

@@ -516,11 +516,32 @@ def test_stage_loss_overrides_disable_direct_sct_supervision_for_three_stage_def
     stage2_overrides = trainer._merge_stage_loss_overrides(stages["pure_sct_gep_pretrain"])
     stage3_overrides = trainer._merge_stage_loss_overrides(stages["mixed_bulk_joint_finetune"])
 
-    assert stage1_overrides["cell_type_sct_gep_weight"] == pytest.approx(0.0)
-    assert stage2_overrides["cell_type_sct_gep_weight"] == pytest.approx(0.0)
-    assert stage2_overrides["cell_prop"] == pytest.approx(0.0)
-    assert stage3_overrides["cell_type_sct_gep_weight"] == pytest.approx(0.0)
-    assert stage3_overrides["cell_prop"] == pytest.approx(0.0)
+    assert stage1_overrides.get("cell_type_sct_gep_weight", 0.0) == pytest.approx(0.0)
+    assert "inter_sample_similarity_weight" not in stage1_overrides
+    assert stage2_overrides.get("cell_type_sct_gep_weight", 0.0) == pytest.approx(0.0)
+    assert stage2_overrides.get("cell_prop", 0.0) == pytest.approx(0.0)
+    assert stage2_overrides.get("inter_sample_similarity_weight", 0.0) == pytest.approx(0.0)
+    assert stage3_overrides.get("cell_type_sct_gep_weight", 0.0) == pytest.approx(0.0)
+    assert stage3_overrides.get("cell_prop", 0.0) == pytest.approx(0.0)
+    assert stage3_overrides.get("inter_sample_similarity_weight", 0.0) == pytest.approx(0.0)
+
+
+def test_staged_training_rejects_inter_sample_similarity_without_direct_supervision(tmp_path: Path):
+    config_dict = _three_stage_config_dict(tmp_path)
+    for stage_cfg in config_dict["training"]["staged_training"]["stages"]:
+        stage_cfg.setdefault("loss_overrides", {})
+        stage_cfg["loss_overrides"]["inter_sample_similarity_weight"] = 123.0
+    with pytest.raises(ValueError, match="disables direct sctGEP supervision"):
+        VAEDeconConfig.from_dict(config_dict)
+
+
+def test_staged_training_rejects_matched_sct_loss_without_direct_supervision(tmp_path: Path):
+    config_dict = _three_stage_config_dict(tmp_path)
+    for stage_cfg in config_dict["training"]["staged_training"]["stages"]:
+        stage_cfg.setdefault("loss_overrides", {})
+        stage_cfg["loss_overrides"]["cell_type_sct_gep_weight"] = 321.0
+    with pytest.raises(ValueError, match="disables direct sctGEP supervision"):
+        VAEDeconConfig.from_dict(config_dict)
 
 
 def test_load_cell_prop_predictor_checkpoint_updates_only_predictor_weights(tmp_path: Path):
