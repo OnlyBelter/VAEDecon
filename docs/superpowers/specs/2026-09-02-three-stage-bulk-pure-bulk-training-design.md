@@ -1,11 +1,15 @@
 # Three-stage bulk-pure-bulk staged training design
 
-Last updated: 2026-09-01
+Last updated: 2026-09-03
 
 ## Status
 
 This document revises the earlier four-stage prototype-residual proposal into a
 new three-stage workflow.
+
+This workflow is a potential improvement for inferring full `sctGEP` directly
+from mixed bulk data, and it is currently under active development on the
+`dev` branch.
 
 The revised design keeps the current Stage 1 cell-proportion training, then
 uses pure `sctGEP` reconstruction as a pretraining stage for the full GEP
