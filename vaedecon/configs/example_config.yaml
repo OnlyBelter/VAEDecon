@@ -205,7 +205,7 @@ model:
     kld_p: 0.0  # Only valid for 'softplus'; keep 0 for 'sigmoid', 'softmax', and 'sigmoid_all_norm'.
     cell_prop: 0  # Set > 0 to supervise known training fractions for any enabled cell-proportion activation mode.
     beta: 2
-    gamma: 0.005
+    gamma: 0.005  # Big gamma strengthens hierarchy-aware repulsion: unrelated cell types separate more, while sibling subtypes are allowed a higher cosine similarity.
     attractor_weight: 0.0  # weight for the attractor loss (default 0.0)
     # 'ave' means using the average mu and logvar across cell types, 'sep' means calculate kld for each cell type separately
     kld_type: 'ave'

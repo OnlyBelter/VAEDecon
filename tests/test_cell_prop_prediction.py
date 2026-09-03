@@ -22,6 +22,7 @@ from vaedecon.trainers.base_trainer import (
     _step_adaptive_aux_loss_schedule,
 )
 from vaedecon.utility import log_exp2cpm_tensor, non_log2cpm_tensor
+from vaedecon.utility.hierarchical_encoding import HIERARCHICAL_ENCODING
 from vaedecon.workflow.workflow import _detach_model_output_to_cpu, evaluate_model
 
 
@@ -179,6 +180,75 @@ def test_has_usable_labels_handles_empty_tensor():
     assert not has_usable_labels(None)
     assert not has_usable_labels(torch.empty(0))
     assert has_usable_labels(torch.tensor([[0.7, 0.3]], dtype=torch.float32))
+
+
+def test_build_hierarchy_repulsion_margin_relaxes_sibling_pairs():
+    hierarchical_targets = torch.tensor(
+        [
+            HIERARCHICAL_ENCODING["Non-plasma B cells"],
+            HIERARCHICAL_ENCODING["Plasma B cells"],
+            HIERARCHICAL_ENCODING["CAFs"],
+            HIERARCHICAL_ENCODING["CD4 T"],
+        ],
+        dtype=torch.float32,
+    )
+
+    margin = VAE._build_hierarchy_repulsion_margin(
+        hierarchical_targets,
+        base_margin=0.0,
+        alpha=0.5,
+    )
+
+    assert margin.shape == (4, 4)
+    assert torch.allclose(torch.diag(margin), torch.zeros(4, dtype=torch.float32))
+    assert margin[0, 1] == pytest.approx(0.5)
+    assert margin[0, 3] == pytest.approx(0.25)
+    assert margin[0, 2] == pytest.approx(0.0)
+    assert margin[0, 1] > margin[0, 3] > margin[0, 2]
+
+
+def test_repulsion_loss_uses_hierarchy_specific_margin_when_available():
+    dummy = _build_dummy_vae(cell_prop_weight=0.0, training=True)
+    sibling_targets = torch.tensor(
+        [
+            HIERARCHICAL_ENCODING["Non-plasma B cells"],
+            HIERARCHICAL_ENCODING["Plasma B cells"],
+        ],
+        dtype=torch.float32,
+    )
+    dummy.hierarchical_repulsion_margin = VAE._build_hierarchy_repulsion_margin(
+        sibling_targets,
+        base_margin=0.0,
+        alpha=0.5,
+    )
+
+    cosine = 0.4
+    sibling_mu_types = torch.tensor(
+        [
+            [
+                [1.0, cosine],
+                [0.0, (1.0 - cosine ** 2) ** 0.5],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+
+    relaxed_loss = VAE._repulsion_loss(
+        dummy,
+        mu_types=sibling_mu_types,
+        gamma=1.0,
+    )
+
+    assert torch.allclose(relaxed_loss, torch.tensor([0.0], dtype=torch.float32))
+
+    del dummy.hierarchical_repulsion_margin
+    fallback_loss = VAE._repulsion_loss(
+        dummy,
+        mu_types=sibling_mu_types,
+        gamma=1.0,
+        margin=0.0,
+    )
+    assert torch.allclose(fallback_loss, torch.tensor([0.4], dtype=torch.float32), atol=1e-6)
 
 
 def test_resolve_effective_cell_prop_uses_ground_truth_when_prediction_disabled():

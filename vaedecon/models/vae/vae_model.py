@@ -39,6 +39,9 @@ from ...utility.hierarchical_encoding import HIERARCHICAL_ENCODING
 
 logger = logging.getLogger(__name__)
 
+HIERARCHY_REPULSION_BASE_MARGIN = 0.0
+HIERARCHY_REPULSION_MARGIN_ALPHA = 0.5
+
 
 def _clamp_log2_expression_before_exp(
     x_log2: torch.Tensor,
@@ -300,6 +303,14 @@ class VAE(BaseAE):
         self.register_buffer(
             "hierarchical_code_targets",
             torch.tensor(hierarchical_targets, dtype=torch.float32),
+        )
+        self.register_buffer(
+            "hierarchical_repulsion_margin",
+            self._build_hierarchy_repulsion_margin(
+                self.hierarchical_code_targets,
+                base_margin=HIERARCHY_REPULSION_BASE_MARGIN,
+                alpha=HIERARCHY_REPULSION_MARGIN_ALPHA,
+            ),
         )
         self.cell_prop_activation_function = model_config.cell_prop_activation_function
         self.cancer_cell_type_index = None
@@ -1891,25 +1902,66 @@ class VAE(BaseAE):
         return torch.zeros(batch_size, device=device)
 
     @staticmethod
+    def _build_hierarchy_repulsion_margin(
+        hierarchical_targets: torch.Tensor,
+        *,
+        base_margin: float = 0.0,
+        alpha: float = 0.5,
+    ) -> torch.Tensor:
+        """
+        Build a pair-specific cosine margin from binary hierarchy codes.
+
+        Related cell types receive a larger allowed cosine similarity, so the
+        repulsion term stays soft for sibling subtypes while remaining strict
+        for unrelated pairs.
+        """
+        if hierarchical_targets.ndim != 2:
+            raise ValueError(
+                "hierarchical_targets must have shape (n_cell_types, n_codes), "
+                f"got {hierarchical_targets.shape}"
+            )
+        if base_margin < 0 or alpha < 0:
+            raise ValueError(
+                f"base_margin and alpha must be non-negative, got {base_margin}, {alpha}"
+            )
+
+        normalized_targets = F.normalize(
+            hierarchical_targets.float(),
+            p=2,
+            dim=1,
+            eps=EPS,
+        )
+        hierarchy_similarity = normalized_targets @ normalized_targets.transpose(0, 1)
+        hierarchy_similarity = torch.clamp(hierarchy_similarity, min=0.0, max=1.0)
+        margin = base_margin + alpha * hierarchy_similarity
+        margin.fill_diagonal_(0.0)
+        return margin
+
     def _repulsion_loss(
+            self,
             mu_types: torch.Tensor,
             gamma: float,
             margin: float = 0.0,
     ) -> torch.Tensor:
         """
         Repulsion between cell-type centroids in latent space.
-        Uses a cosine-similarity hinge penalty to encourage orthogonality between
+        Uses a cosine-similarity hinge penalty to encourage separation between
         different cell-type embeddings.
 
-        Loss per pair:  max(0, cos(i, j) - margin)
-        → zero gradient when cosine similarity is <= margin (default 0).
+        Loss per pair:  max(0, cos(i, j) - margin_ij)
+        → zero gradient when cosine similarity is <= margin_ij.
         → linear penalty when embeddings become more similar (cosine increases).
+
+        When available, `self.hierarchical_repulsion_margin` supplies a
+        pair-specific margin matrix derived from hierarchy codes, allowing
+        sibling subtypes to remain more similar than unrelated cell types.
 
         Args:
             mu_types : (B, L, C)  cell-type centroid means in latent space.
             gamma    : float       loss weight; if 0, returns zeros immediately.
-            margin   : float       maximum allowed cosine similarity between any
-                                  two centroids (default 0.0 for orthogonality).
+            margin   : float       fallback scalar margin used only when a
+                                  pair-specific hierarchy margin matrix is
+                                  unavailable.
 
         Returns:
             repulsion_loss : (B,)  per-sample repulsion scalar.
@@ -1924,13 +1976,25 @@ class VAE(BaseAE):
         x = F.normalize(x, p=2, dim=2, eps=EPS)
         cos_matrix = x @ x.transpose(1, 2)  # (B, C, C)
 
+        margin_matrix = getattr(self, "hierarchical_repulsion_margin", None)
+        if margin_matrix is None or tuple(margin_matrix.shape) != (n_cell_types, n_cell_types):
+            margin_matrix = torch.full(
+                (n_cell_types, n_cell_types),
+                fill_value=margin,
+                device=device,
+                dtype=mu_types.dtype,
+            )
+            margin_matrix.fill_diagonal_(0.0)
+        else:
+            margin_matrix = margin_matrix.to(device=device, dtype=mu_types.dtype)
+
         # Upper triangle mask — count each pair (i, j) only once
         triu_mask = torch.triu(
             torch.ones(n_cell_types, n_cell_types, device=device), diagonal=1
         ).unsqueeze(0)  # (1, C, C)
 
-        # Hinge penalty: penalize only pairs with cosine similarity above margin
-        hinge = torch.clamp(cos_matrix - margin, min=0.0)  # (B, C, C)
+        # Hinge penalty: penalize only pairs with cosine similarity above their allowed margin.
+        hinge = torch.clamp(cos_matrix - margin_matrix.unsqueeze(0), min=0.0)  # (B, C, C)
         hinge = hinge * triu_mask  # upper triangle only
 
         # Normalize by number of pairs so loss scale is independent of C
