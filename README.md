@@ -1,176 +1,247 @@
 # VAEDecon
 
-**Gene expression deconvolution by single cell generative model**
+**Cell-type-specific gene expression deconvolution by a single-cell generative model**
 
-VAEDecon is a deep learning-based tool for deconvolving bulk gene expression profiles (GEPs) into cell-type-specific GEPs. It leverages a Variational Autoencoder (VAE) trained on single-cell-type RNA-seq (sctRNA-seq) and simulated bulk RNA-seq data to learn cell-type-specific representations and estimate the expression patterns of each composition of bulk tissues, such as the tumor microenvironment.
+VAEDecon is a deep learning framework for deconvolving bulk gene expression
+profiles into cell-type proportions and cell-type-specific gene expression
+profiles. The current `main` branch uses a staged workflow to reduce the
+difficulty of optimizing cell-proportion inference and cell-type-specific gene
+expression reconstruction jointly from the beginning, where both tasks can
+have large errors. By separating cell-proportion learning, reconstruction
+learning, and joint fine-tuning, the workflow helps balance inference
+accuracy for both cell proportions and cell-type-specific expression
+profiles.
 
 ## Features
-- **Generative Modeling**: Uses VAEs to reduce the high-dimensionality and decompose bulk GEPs in the latent space to create a compact representation for each cell type's GEPs.
-- **Multi-Encoder Support**: Supports MLP, Residual MLP, Transformer, and GNN encoders.
-- **Hybrid Fusion**: Combines different encoders using Product of Experts (PoE) for robust representations.
-- **Visualization**: Built-in tools for plotting cell proportions, latent spaces, and gene expression profiles.
+
+- **Three-stage training workflow** for cell-proportion predictor pretraining,
+  cell-type-specific gene expression profile (GEP) reconstruction training,
+  and joint fine-tuning
+- **Dedicated DeSide-style predictor branch** for cell-proportion
+  learning in Stage 1
+- **Multi-encoder VAE backbone** with `EncoderMLP`, `EncoderResMLP`,
+  `GeneTransformerEncoder`, `EncoderPathNet`, `EncoderSGNN`, and
+  `EncoderHybrid`
+- **Inter-sample similarity loss** preserves sample-level variation within the
+  same cell type so reconstructed cell-type-specific GEPs do not collapse to
+  an over-smoothed average.
+- **Hierarchy-aware repulsion loss** separates the latent embeddings of
+  different cell types while preserving the hierarchy described in
+  [Hierarchical structure of cell types](#hierarchical-structure-of-cell-types).
+- **Residual GEP learning** lets the model predict sample-specific deviations
+  around the average GEP profile of each cell type instead of learning only a
+  single fixed profile.
 
 ## Installation
 
+### Install from source
+
+From the repository root:
+
 ```bash
-# conda is recommended
 conda create -n vaedecon python=3.12
 conda activate vaedecon
 
-# Install PyTables
-conda install -c conda-forge hdf5 pytables=3.10.2
-
-# Install PyTorch
-# if you have a GPU, install pytorch with CUDA support first
-# For linux or Windows, please refer to https://pytorch.org/get-started/previous-versions/
-pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu126
-# For Mac OS
+# PyTorch
+# For Linux or Windows with CUDA, install a compatible CUDA build first.
 pip install torch==2.11.0 torchvision==0.26.0
 
-# Install VAEDecon
+# Install VAEDecon in editable mode
+pip install -e .
+
+```
+
+### Install the packaged release
+
+```bash
 pip install vaedecon
 ```
 
-## Quick Start
+## Quick start
 
-### 1. Training a Model
+### 1. Train a model
 
-You can train a model using the `train_vaedecon` function. It supports configuration via a YAML file or a Python object.
+You can train from a YAML file or a `VAEDeconConfig` object.
 
-**Using a Configuration File:**
+**Using a YAML config file**
+
 ```python
 from vaedecon.workflow import train_vaedecon
 
-# Train using the packaged example config
-import importlib.resources as resources
-import yaml
-from vaedecon.configs import VAEDeconConfig
+final_config = train_vaedecon(
+    config_file="vaedecon/configs/example_config.yaml"
+)
 
-example_cfg = resources.files("vaedecon.configs").joinpath("example_config.yaml").read_text()
-config = VAEDeconConfig.from_dict(yaml.safe_load(example_cfg))
-model_dir = train_vaedecon(config=config)
-print(f"Model saved to: {model_dir}")
+print(final_config.model.model_dir)
 ```
 
-**Using a Python Configuration Object:**
+**Using a Python config object**
+
 ```python
 from vaedecon.workflow import train_vaedecon
 from vaedecon.configs import VAEDeconConfig
 
 config = VAEDeconConfig()
 config.training.num_epochs = 100
-config.model.latent_dim = 10
+config.model.latent_dim = 48
+config.model.encoders = ["EncoderMLP"]
 
-model_dir = train_vaedecon(config=config)
+final_config = train_vaedecon(config=config)
+print(final_config.model.model_dir)
 ```
 
-### 2. Inference (Prediction)
-
-Once you have a trained model, you can use `predict_vaedecon` to estimate cell proportions in new bulk data.
+### 2. Run inference on one dataset
 
 ```python
 from vaedecon.workflow import predict_vaedecon
 
 results = predict_vaedecon(
-    model_dir='./output/vae/final_model',  # Path to your trained model
-    data_file_path='./datasets/test_data.h5ad',  # Path to bulk data
-    visualize=True  # Generate plots automatically
+    model_dir="./output/vae/my_run/final_model",
+    data_file_path="./datasets/test_data.h5ad",
+    visualize=True,
 )
 
-print(f"Predicted cell proportions shape: {results['pred_cell_prop'].shape}")
+print(results["pred_cell_prop"].shape)
 ```
 
-## Data Format
+### 3. Run inference for all configured test sets
 
-- **Single-Cell Data**: Should be provided as `.h5ad` files (AnnData) containing raw counts or log-normalized expression.
-- **Bulk Data**: Can be `.h5ad` or `.csv` files. Rows should represent samples and columns should represent genes.
+If `data_file_path` is omitted, `predict_vaedecon()` uses
+`config.data.test_sets`.
 
-## Configuration
+```python
+from vaedecon.workflow import predict_vaedecon
+from vaedecon.configs import VAEDeconConfig
 
-The `VAEDeconConfig` object controls all aspects of the pipeline. Key sections include:
-- `data`: Paths to datasets and preprocessing options.
-- `model`: Network architecture (encoders, latent dimensions, loss coefficients).
-- `training`: Batch size, learning rate, epochs, device selection.
-- `evaluation`: Visualization settings and metrics.
+config = VAEDeconConfig.from_yaml("vaedecon/configs/example_config.yaml")
 
-See `configs/example_config.yaml` for a complete example.
+all_results = predict_vaedecon(
+    model_dir="./output/vae/my_run/final_model",
+    config=config,
+    data_file_path=None,
+    visualize=True,
+)
+```
 
-## How cell proportions are learned
+## Staged training workflow
 
-`VAEDecon` can either use known cell fractions during training or learn to
-predict them from bulk expression. The behavior is controlled by
-`model.predict_cell_prop`, `model.loss_coefficient.cell_prop`, and
-`model.loss_coefficient.kld_p`.
+The current code base supports staged training through
+`training.staged_training`.
 
-When you enable cell proportion prediction with `predict_cell_prop: true`, the
-active encoder adds a cell proportion head that outputs a positive concentration
-vector `dd_alpha` for each sample. The model then uses that vector in three
-ways:
+The configured stage names are currently:
 
-1. It converts `dd_alpha` to the deterministic Dirichlet mean
-   `dd_alpha / sum(dd_alpha)` for the forward cell-proportion output.
-2. It uses the predicted proportions to weight the reconstructed
-   cell-type-specific GEPs when rebuilding the bulk profile.
-3. It can regularize `dd_alpha` with a Dirichlet KL term and compare the
-   Dirichlet mean against known training-set cell fractions through the
-   supervised `cell_prop` loss term.
+1. `cell_prop_predictor_pretrain`
+2. `reconstruction_training`
+3. `joint_finetune`
 
-To train this branch with direct supervision and optional Dirichlet
-regularization, set these options:
+These stages define the staged workflow on `main`:
+
+1. **Stage 1: `cell_prop_predictor_pretrain`**
+   Train the optional dedicated predictor branch so cell proportions stabilize
+   before reconstruction learning.
+2. **Stage 2: `reconstruction_training`**
+   Train the encoder and decoder while freezing the dedicated predictor
+   branch for cell-type-specific gene expression profile (GEP) reconstruction from the input mixed bulk data.
+3. **Stage 3: `joint_finetune`**
+   Fine-tune the cell proportion predictor branch, encoders, and decoder together using a smaller learning rate.
+
+The staged-training validator enforces the canonical contiguous order:
+
+```text
+cell_prop_predictor_pretrain -> reconstruction_training -> joint_finetune
+```
+
+### Minimal staged-training example
 
 ```yaml
-model:
-  predict_cell_prop: true
-  loss_coefficient:
-    kld_p: 0.1
-    cell_prop: 1.0
+training:
+  staged_training:
+    enabled: true
+    run_stages:
+      - cell_prop_predictor_pretrain
+      - reconstruction_training
+      - joint_finetune
+    stage_init_checkpoints: {}
+    stages:
+      - name: cell_prop_predictor_pretrain
+        max_epochs: 300
+        train_modules: ["cell_prop_predictor"]
+        freeze_modules: ["encoders", "decoder"]
+        learning_rate_scale: 1.0
+        loss_overrides:
+          cell_prop: 1.0e4
+          cell_type_sct_gep_weight: 0.0
+          hierarchical_code_weight: 0.0
+          cross_sample_gene_var_weight: 0.0
+        early_stopping:
+          monitor: "val_cell_prop_loss"
+          patience: 30
+          min_delta: 0.0
+      - name: reconstruction_training
+        max_epochs: 500
+        train_modules: ["encoders", "decoder"]
+        freeze_modules: ["cell_prop_predictor"]
+        learning_rate_scale: 1.0
+        loss_overrides:
+          cell_prop: 0.0
+        early_stopping:
+          monitor: "val_loss"
+          patience: 50
+          min_delta: 0.0
+      - name: joint_finetune
+        max_epochs: 100
+        train_modules: ["cell_prop_predictor", "encoders", "decoder"]
+        freeze_modules: []
+        learning_rate_scale: 0.1
+        early_stopping:
+          monitor: "val_loss"
+          patience: 20
+          min_delta: 0.0
 ```
 
-When `predict_cell_prop: true` and `loss_coefficient.cell_prop > 0`, the
-training dataset must include cell fraction labels. During inference, labels are
-not required. The trained model predicts cell proportions directly from bulk
-expression, saves them to `predicted_cell_prop.csv`, and reports the
-deterministic Dirichlet mean instead of a sampled composition vector.
+Each staged run writes per-stage outputs and a
+`staged_training_summary.csv` artifact.
 
-## How the Dirichlet distribution is used
+## Stage 1 cell-proportion prediction and DeSide
 
-The Dirichlet distribution gives the model a natural way to represent cell
-fractions because it produces positive vectors that sum to one. In
-`VAEDecon`, the encoder does not predict proportions directly. Instead, it
-predicts the Dirichlet concentration parameters `dd_alpha`, using a `softplus`
-layer so every entry stays positive.
+VAEDecon uses `DeSideCellPropPredictor` in Stage 1 for cell-proportion
+prediction and bulk-context extraction before reconstruction training.
+Stage 1 (`cell_prop_predictor_pretrain`) is therefore the dedicated
+cell-proportion learning stage in the staged workflow.
 
-This design lets the model represent both the estimated composition and its
-concentration pattern across cell types:
+The Stage 1 cell-proportion predictor follows **DeSide**:
 
-- larger `dd_alpha` values indicate stronger concentration on specific
-  proportions
-- the normalized vector `dd_alpha / sum(dd_alpha)` gives the mean-style
-  proportion estimate used for both forward prediction and supervision
+- X. Xiong, Y. Liu, D. Pu, Z. Yang, Z. Bi, L. Tian, & X. Li, DeSide: A unified deep learning approach for cellular deconvolution of tumor microenvironment, Proc. Natl. Acad. Sci. U.S.A. 121 (46) e2407096121, https://doi.org/10.1073/pnas.2407096121 (2024).
 
-The VAE code also computes a KL divergence between `Dirichlet(dd_alpha)` and a
-uniform Dirichlet prior and reports it as `kld_p`. You can control the strength
-of that regularization with `loss_coefficient.kld_p`. The supervised training
-path uses `loss_coefficient.cell_prop` to match the Dirichlet mean to known
-training fractions when labels are available.
+## Data and configuration
+
+VAEDecon uses one YAML configuration file to control data loading, staged
+training, model architecture, loss terms, and evaluation outputs. In practice,
+you will mainly edit the `data`, `training`, `model`, and `evaluation`
+sections.
+
+For detailed configuration options and workflow notes, see:
+
+- `vaedecon/configs/example_config.yaml`
+- `docs/`
+
 
 ## Examples
 
-Check the `examples/` directory for complete scripts:
-- `examples/train_example.py`: Various ways to configure and run training.
-- `examples/inference_example.py`: Batch prediction, visualization, and TCGA analysis.
+See the `examples/` directory for runnable scripts:
 
-## Hierarchical Structure of cell types
+- `examples/train_example.py`
+- `examples/inference_example.py`
+
+## Hierarchical structure of cell types
 
 ```mermaid
 flowchart LR
-    %% Root node
     TME["Tumor Microenvironment (TME)"] --> Lym["Lymphoid lineage"]
     TME --> Mye["Myeloid lineage"]
     TME --> Stro["Stromal lineage"]
     TME --> Cancer["Tumor compartment"]
 
-    %% Lymphoid branch
     Lym --> NK["NK"]
     Lym --> B_cells["B cells"]
     B_cells --> Non_plasma_B["Non-plasma B cells"]
@@ -182,7 +253,6 @@ flowchart LR
     T_cells --> CD8_T_eff["Effector CD8 T cells"]
     T_cells --> DN_T["Double-negative-like T cells"]
 
-    %% Myeloid branch
     Mye --> Mono["Mononuclear phagocytes"]
     Mono --> Monocytes["Monocytes"]
     Mono --> Macrophages["Macrophages"]
@@ -191,16 +261,13 @@ flowchart LR
     Mye --> Mast_cells["Mast cells"]
     Mye --> Neutrophils["Neutrophils"]
 
-    %% Stromal branch
     Stro --> Endo["Endothelial cells"]
     Stro --> Fib["Fibroblasts"]
     Fib --> CAFs["Cancer-associated fibroblasts (CAFs)"]
     Fib --> Myofibroblasts["Myofibroblasts"]
 
-    %% Tumor branch
     Cancer --> Cancer_cells["Cancer cells"]
 
-    %% Styling
     style TME fill:#f9f,stroke:#333,stroke-width:2px
     style Lym fill:#bbf,stroke:#333
     style Mye fill:#bfb,stroke:#333
