@@ -223,7 +223,8 @@ sections.
 For detailed configuration options and workflow notes, see:
 
 - `vaedecon/configs/example_config.yaml`
-- `docs/`
+- `docs/configuration.md`
+- `docs/superpowers/specs/`
 
 
 ## Examples
