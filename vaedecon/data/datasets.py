@@ -382,10 +382,10 @@ def _write_true_sct_gep_targets_into(
     sct_values = aligned_sct_geps_df.to_numpy(dtype=np.float32, copy=False)
 
     write_records: list[tuple[int, int, int]] = []
-    for row in filtered_mapping_df.reset_index().itertuples(index=False):
-        dataset_row_idx = sample_id_to_dataset_row.get(str(row.sample_id))
-        cell_type_idx = cell_type_to_idx.get(str(row.cell_type))
-        sct_row_idx = sct_row_by_id.get(str(row.selected_cell_id))
+    for sample_id, row in filtered_mapping_df.iterrows():
+        dataset_row_idx = sample_id_to_dataset_row.get(str(sample_id))
+        cell_type_idx = cell_type_to_idx.get(str(row["cell_type"]))
+        sct_row_idx = sct_row_by_id.get(str(row["selected_cell_id"]))
         if dataset_row_idx is None or cell_type_idx is None or sct_row_idx is None:
             continue
         write_records.append((dataset_row_idx, cell_type_idx, sct_row_idx))
@@ -773,6 +773,7 @@ class GEPPreprocessor:
         return self._run_direct_pipeline(
             file_paths=file_paths,
             gene_list_file=gene_list_file,
+            common_gene_list_path=common_gene_list_path,
             remove_low_var_genes=remove_low_var_genes,
             min_var=min_var,
             cell_cell2ave_exp_file_path=cell_cell2ave_exp_file_path,
@@ -791,6 +792,7 @@ class GEPPreprocessor:
         *,
         file_paths: Sequence[Union[str, Path]],
         gene_list_file: Optional[Union[str, Path]] = None,
+        common_gene_list_path: Optional[Union[str, Path]] = None,
         remove_low_var_genes: bool = False,
         min_var: float = 1.0,
         cell_cell2ave_exp_file_path: Optional[Union[str, Path]] = None,
@@ -804,8 +806,14 @@ class GEPPreprocessor:
         )
 
         log_message("Step 2: Gene filtering...")
-        if gene_list_file is not None:
-            gep_data_df = self._apply_gene_list_filter(gep_data_df, Path(gene_list_file))
+        target_gene_list: Optional[list[str]] = None
+        if gene_list_file is not None or common_gene_list_path is not None:
+            target_gene_list = _load_or_create_cached_common_gene_list(
+                file_paths=file_paths,
+                gene_list_file=gene_list_file,
+                cache_file_path=common_gene_list_path,
+            )
+            gep_data_df = self._apply_gene_list_filter(gep_data_df, target_gene_list)
 
         if remove_low_var_genes:
             ref_path = Path(cell_cell2ave_exp_file_path) if cell_cell2ave_exp_file_path else None
@@ -953,13 +961,14 @@ class GEPPreprocessor:
     @staticmethod
     def _apply_gene_list_filter(
         gep_data_df: pd.DataFrame,
-        gene_list_file: Path,
+        target_genes: Sequence[str],
     ) -> pd.DataFrame:
         """Apply target gene list alignment/filtering for the direct preprocessing path."""
-        target_genes = load_gene_list(gene_list_file)
-        gep_exp_obj = ReadExp(gep_data_df, exp_type="TPM")
-        gep_exp_obj.align_with_gene_list(gene_list=target_genes, fill_not_exist=True)
-        result = gep_exp_obj.get_exp()
+        available_genes = set(gep_data_df.columns.astype(str).tolist())
+        ordered_genes = [str(gene) for gene in target_genes if str(gene) in available_genes]
+        if not ordered_genes:
+            raise ValueError("No genes remain after applying the target gene list.")
+        result = gep_data_df.loc[:, ordered_genes]
         log_message(f"After gene list filtering: {result.shape}")
         return result
 

@@ -1010,7 +1010,6 @@ class VAE(BaseAE):
         mu_types: torch.Tensor,
         logvar_types: torch.Tensor,
         pred_cell_prop: Optional[torch.Tensor],
-        raw_non_cancer_cell_prop: Optional[torch.Tensor],
         existence_logits: Optional[torch.Tensor],
         dd_alpha: Optional[torch.Tensor],
         mu_prior: Optional[torch.Tensor],
@@ -1019,6 +1018,7 @@ class VAE(BaseAE):
         logvar_mean: torch.Tensor,
         mu_mean: torch.Tensor,
         device: torch.device,
+        raw_non_cancer_cell_prop: Optional[torch.Tensor] = None,
         recon_x_all_types_cpm: Optional[torch.Tensor] = None,
         recon_x_all_types_log: Optional[torch.Tensor] = None,
         recon_residual_log: Optional[torch.Tensor] = None,
@@ -1318,14 +1318,25 @@ class VAE(BaseAE):
             cell_type_existence_loss = torch.zeros((batch_size,), device=device)
 
         # --- 3. KL Divergence (Cell Proportions - Dirichlet) ---
-        kld_p, cell_prop_loss = self._cell_prop_dirichlet_loss(
-            y=y,
-            dd_alpha=dd_alpha,
-            pred_cell_prop=pred_cell_prop,
-            raw_non_cancer_cell_prop=raw_non_cancer_cell_prop,
-            batch_size=batch_size,
-            device=device,
-        )                                                                                   # (B,), (B,)
+        try:
+            kld_p, cell_prop_loss = self._cell_prop_dirichlet_loss(
+                y=y,
+                dd_alpha=dd_alpha,
+                pred_cell_prop=pred_cell_prop,
+                raw_non_cancer_cell_prop=raw_non_cancer_cell_prop,
+                batch_size=batch_size,
+                device=device,
+            )                                                                               # (B,), (B,)
+        except TypeError as exc:
+            if "raw_non_cancer_cell_prop" not in str(exc):
+                raise
+            kld_p, cell_prop_loss = self._cell_prop_dirichlet_loss(
+                y=y,
+                dd_alpha=dd_alpha,
+                pred_cell_prop=pred_cell_prop,
+                batch_size=batch_size,
+                device=device,
+            )                                                                               # (B,), (B,)
 
         # --- 4. KL Divergence (Latent - Gaussian) ---
         kld_z_types = self._latent_kld_loss(

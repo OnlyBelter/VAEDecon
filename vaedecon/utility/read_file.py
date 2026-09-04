@@ -768,12 +768,12 @@ def compute_training_sct_cross_sample_gene_var(
         # ddof=1 sample variance; zero-variance cases are benign (loss pushes toward 0)
         with np.errstate(divide='ignore', invalid='ignore'):
             var_per_gene = np.var(exp_space, axis=0, ddof=1)
-        var_per_gene = np.where(np.isfinite(var_per_gene), var_per_gene, 0.0).astype(np.float32)
+        var_per_gene = np.where(np.isfinite(var_per_gene), var_per_gene, 0.0).astype(np.float64, copy=False)
         ct2var[f"{ct}_var"] = var_per_gene
 
     # Initialize DataFrame with gene index first, so ordering matches gene_list
     var_df = pd.DataFrame(
-        np.zeros((len(gene_list), len(cell_type_list)), dtype=np.float32),
+        np.zeros((len(gene_list), len(cell_type_list)), dtype=np.float64),
         index=gene_list,
         columns=[f"{ct}_var" for ct in cell_type_list],
     )
@@ -796,7 +796,7 @@ def compute_training_sct_cross_sample_gene_var(
 
     result_fp = Path(result_fp)
     result_fp.parent.mkdir(parents=True, exist_ok=True)
-    var_df.to_csv(result_fp, float_format='%g')
+    var_df.to_csv(result_fp, float_format='%.17g')
     logger.info(f"Saved training SCT cross-sample gene variance to {result_fp}")
 
 

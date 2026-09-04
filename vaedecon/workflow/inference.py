@@ -513,10 +513,7 @@ class VAEDeconPredictor:
         Build a config dict for GEPDataset from self.config.data
         """
         # Prepare dataset
-        processed_data_dir = os.path.join(
-            os.path.dirname(data_file_path),
-            f'processed_{dataset_type}'
-        )
+        processed_data_dir = Path(data_file_path).resolve().parent / f'processed_{dataset_type}'
         if require_model_artifacts:
             input_gene_list_fp = _validate_required_model_artifact_path(
                 model_dir=self.model_dir,
@@ -536,7 +533,7 @@ class VAEDeconPredictor:
                 return None
             return Path(str(path_value))
 
-        return GEPDatasetConfig(
+        dataset_kwargs = dict(
             file_paths=[data_file_path],
             scaling_by_constant=self.config.data.scaling_by_constant,
             remove_low_var_genes=self.config.evaluation.remove_low_var_genes,
@@ -546,15 +543,23 @@ class VAEDeconPredictor:
             min_var=self.config.data.min_var,
             scaling_factor=self.config.data.scaling_factor,
             gene_mean_std_source=self.config.data.gene_mean_std_source,
-            gene_mean_std_sct_gep_file_path=_optional_path(self.config.data.gene_mean_std_sct_gep_file_path),
-            sct_gep_file_path=_optional_path(self.config.data.sct_gep_file_path),
-            pooled_sc_h5ad_path=_optional_path(self.config.data.pooled_sc_h5ad_path),
             pooled_sc_cell_type_col=self.config.data.pooled_sc_cell_type_col,
             pooled_sc_cell_subtype_col=self.config.data.pooled_sc_cell_subtype_col,
             pooled_sc_sample_size=self.config.data.pooled_sc_sample_size,
             pooled_sc_seed=self.config.data.pooled_sc_seed,
             processed_data_dir=processed_data_dir,
             gene_list_file=input_gene_list_fp,
+        )
+        optional_path_fields = {
+            "gene_mean_std_sct_gep_file_path": _optional_path(self.config.data.gene_mean_std_sct_gep_file_path),
+            "sct_gep_file_path": _optional_path(self.config.data.sct_gep_file_path),
+            "pooled_sc_h5ad_path": _optional_path(self.config.data.pooled_sc_h5ad_path),
+        }
+        dataset_kwargs.update(
+            {field_name: field_value for field_name, field_value in optional_path_fields.items() if field_value is not None}
+        )
+        return GEPDatasetConfig(
+            **dataset_kwargs,
         )
 
     def predict_and_visualize(

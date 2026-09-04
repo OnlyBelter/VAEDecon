@@ -809,7 +809,10 @@ class GEPDatasetConfig(DataConfig):
 
     use_memmap: bool = True
     chunk_size: int = 10000
-    compress: bool = False
+    compress: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("compress", "cache_compress"),
+    )
 
 
 # @dataclass
