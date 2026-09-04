@@ -1546,6 +1546,11 @@ class VAE(BaseAE):
         cell_prop_threshold: float,
     ) -> torch.Tensor:
         """Match batch-local cell-type-wise inter-sample cosine geometry in log space."""
+        pairwise_cosine_fn = getattr(
+            type(self),
+            "_pairwise_cosine_similarity_matrix",
+            VAE._pairwise_cosine_similarity_matrix,
+        )
         active_mask = true_sct_gep_present_mask & (true_cell_prop >= cell_prop_threshold)  # (B, C)
 
         per_sample_loss = torch.zeros(
@@ -1564,8 +1569,8 @@ class VAE(BaseAE):
             pred_ct = pred_all_types_log[sample_mask, :, cell_type_idx]  # (B_active, G)
             true_ct = true_all_types_log[sample_mask, :, cell_type_idx]  # (B_active, G)
 
-            pred_cosine = self._pairwise_cosine_similarity_matrix(pred_ct)
-            true_cosine = self._pairwise_cosine_similarity_matrix(true_ct)
+            pred_cosine = pairwise_cosine_fn(self, pred_ct)
+            true_cosine = pairwise_cosine_fn(self, true_ct)
 
             off_diag_mask = ~torch.eye(n_active, device=pred_cosine.device, dtype=torch.bool)
             if not off_diag_mask.any():
@@ -1590,7 +1595,13 @@ class VAE(BaseAE):
     ) -> torch.Tensor:
         """Match batch-local cell-type-wise inter-sample cosine geometry in residual space."""
         true_residual_log = true_sct_gep - self.g_mean.unsqueeze(0)
-        return self._masked_inter_sample_similarity_loss(
+        masked_similarity_fn = getattr(
+            type(self),
+            "_masked_inter_sample_similarity_loss",
+            VAE._masked_inter_sample_similarity_loss,
+        )
+        return masked_similarity_fn(
+            self,
             pred_all_types_log=pred_residual_log,
             true_all_types_log=true_residual_log,
             true_sct_gep_present_mask=true_sct_gep_present_mask,
@@ -1607,7 +1618,13 @@ class VAE(BaseAE):
         cell_prop_threshold: float,
     ) -> torch.Tensor:
         """Match batch-local cell-type-wise inter-sample cosine geometry for full sctGEPs."""
-        return self._masked_inter_sample_similarity_loss(
+        masked_similarity_fn = getattr(
+            type(self),
+            "_masked_inter_sample_similarity_loss",
+            VAE._masked_inter_sample_similarity_loss,
+        )
+        return masked_similarity_fn(
+            self,
             pred_all_types_log=pred_sct_gep_log,
             true_all_types_log=true_sct_gep,
             true_sct_gep_present_mask=true_sct_gep_present_mask,
