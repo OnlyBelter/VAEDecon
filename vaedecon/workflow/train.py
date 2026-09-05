@@ -547,11 +547,36 @@ class VAEDeconTrainer:
             )
 
         g_mean = gene_stats_df.loc[dataset.gene_list, avg_cols].to_numpy(dtype=np.float32, copy=False)
-        true_sct_gep = np.asarray(dataset.true_sct_gep, dtype=np.float32)
         present_mask = np.asarray(dataset.true_sct_gep_present_mask, dtype=bool)
+        n_samples = len(dataset)
+        n_genes = len(dataset.gene_list)
+        n_cell_types = len(dataset.cell_types)
+        bytes_per_sample = max(1, n_genes * n_cell_types * np.dtype(np.float32).itemsize)
+        target_chunk_bytes = 128 * 1024 * 1024
+        sample_chunk_size = max(1, target_chunk_bytes // bytes_per_sample)
+        logger.info(
+            "Computing training SCT per-sample residual variance in chunks: "
+            "%s samples, %s genes, %s cell types, chunk_size=%s",
+            n_samples,
+            n_genes,
+            n_cell_types,
+            sample_chunk_size,
+        )
 
-        residual = true_sct_gep - g_mean[np.newaxis, :, :]
-        per_sample_var = np.var(residual, axis=1, ddof=0).astype(np.float32, copy=False)
+        per_sample_var = np.empty((n_samples, n_cell_types), dtype=np.float32)
+        for start_idx in range(0, n_samples, sample_chunk_size):
+            end_idx = min(start_idx + sample_chunk_size, n_samples)
+            true_chunk = np.asarray(dataset.true_sct_gep[start_idx:end_idx], dtype=np.float32)
+            residual_var_chunk = np.var(true_chunk - g_mean[np.newaxis, :, :], axis=1, ddof=0)
+            per_sample_var[start_idx:end_idx] = residual_var_chunk.astype(np.float32, copy=False)
+            if end_idx < n_samples:
+                logger.info(
+                    "Computed training SCT per-sample residual variance for samples %s-%s / %s",
+                    start_idx,
+                    end_idx - 1,
+                    n_samples - 1,
+                )
+
         per_sample_var[~present_mask] = np.nan
 
         out_df = pd.DataFrame(
