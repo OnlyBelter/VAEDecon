@@ -551,9 +551,7 @@ class VAEDeconTrainer:
         n_samples = len(dataset)
         n_genes = len(dataset.gene_list)
         n_cell_types = len(dataset.cell_types)
-        bytes_per_sample = max(1, n_genes * n_cell_types * np.dtype(np.float32).itemsize)
-        target_chunk_bytes = 128 * 1024 * 1024
-        sample_chunk_size = max(1, target_chunk_bytes // bytes_per_sample)
+        sample_chunk_size = 5000
         logger.info(
             "Computing training SCT per-sample residual variance in chunks: "
             "%s samples, %s genes, %s cell types, chunk_size=%s",

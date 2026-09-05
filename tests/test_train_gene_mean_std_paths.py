@@ -33,6 +33,9 @@ class _DummyMatchedSCTDataset:
         self.true_sct_gep = np.asarray(true_sct_gep, dtype=np.float32)
         self.true_sct_gep_present_mask = np.asarray(true_sct_gep_present_mask, dtype=bool)
 
+    def __len__(self):
+        return len(self._sample_ids)
+
     def get_sample_ids(self):
         return self._sample_ids
 
@@ -345,6 +348,53 @@ def test_trainer_saves_per_sample_residual_variance_targets(tmp_path: Path):
     assert pd.isna(out_df.loc["sample_1", "CT2"])
     assert out_df.loc["sample_2", "CT1"] == pytest.approx(0.0)
     assert out_df.loc["sample_2", "CT2"] == pytest.approx(1.0)
+
+
+def test_trainer_uses_fixed_5000_sample_chunks_for_per_sample_residual_variance(tmp_path: Path, caplog):
+    model_dir = tmp_path / "final_model"
+    gene_mean_std_fp = model_dir / "gene_mean_std_log2p1_scaled_by_20.0.csv"
+    gene_mean_std_fp.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "CT1_avg": [1.0],
+            "CT1_std": [0.1],
+        },
+        index=["g1"],
+    ).to_csv(gene_mean_std_fp, float_format="%g")
+
+    config = VAEDeconConfig.from_dict(
+        {
+            "data": {
+                "gene_mean_std_source": "sct_gep",
+                "sct_gep_file_path": "./datasets/test_set_sct_gep.h5ad",
+                "scaling_by_constant": True,
+                "scaling_factor": 20.0,
+            },
+            "model": {
+                "model_dir": model_dir,
+                "learn_gep_residual": True,
+                "learn_gep_residual_mode": "mean_centered",
+                "loss_coefficient": {"per_sample_residual_var_weight": 1.0},
+            },
+        }
+    )
+    trainer = VAEDeconTrainer(config=config)
+    trainer.config.model.gene_mean_std_fp = gene_mean_std_fp
+
+    n_samples = 5001
+    dataset = _DummyMatchedSCTDataset(
+        sample_ids=[f"sample_{i}" for i in range(n_samples)],
+        gene_list=["g1"],
+        cell_types=["CT1"],
+        true_sct_gep=np.ones((n_samples, 1, 1), dtype=np.float32),
+        true_sct_gep_present_mask=np.ones((n_samples, 1), dtype=bool),
+    )
+
+    with caplog.at_level("INFO", logger=train_workflow.logger.name):
+        trainer._prepare_and_save_training_sct_per_sample_residual_var(dataset)
+
+    assert "chunk_size=5000" in caplog.text
+    assert "Computed training SCT per-sample residual variance for samples 0-4999 / 5000" in caplog.text
 
 
 def test_trainer_rejects_unused_training_target_sets_early(tmp_path: Path):
