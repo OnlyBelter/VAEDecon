@@ -220,6 +220,7 @@ model:
     z_score_kl_weight: 0.1  # Must be 0 when learn_gep_residual_mode='mean_centered'.
     z_score_reg_weight: 0.0  # Must be 0 when learn_gep_residual_mode='mean_centered'.
     hierarchical_code_weight: 0.1
+    per_sample_residual_var_weight: 0
     low_mean_std_weight: 0  # weight for low mean/std genes to fit pre-calculated gene mean and std
     low_mean_threshold: 2.0
     low_std_threshold: 1.0
