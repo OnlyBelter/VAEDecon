@@ -232,6 +232,12 @@ model:
   gnn_drop_p: 0.25
   gene_hidden_dim: 10
   gnn_topk_attention: 1024
+  gnn_gene_retention_mode: keep_isolated
+  gnn_network_cutoff: 0.5
+  gnn_edge_weight_mode: weighted_mean
+  gnn_query_mode: sample_conditioned
+  gnn_dropedge_rate: 0.0
+  gnn_attention_dropout_rate: 0.0
   using_positional_encoding: false
   mask_ratio: 0.4
 

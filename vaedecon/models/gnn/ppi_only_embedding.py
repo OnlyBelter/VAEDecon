@@ -1,6 +1,6 @@
 import os
 import logging
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 import pandas as pd
 import torch
@@ -49,6 +49,24 @@ class EncoderSGNN(BaseEncoder):
 
         # During inference, batches larger than this are split to avoid OOM.
         self.max_batch_size_for_gnn = getattr(args, 'max_batch_size_for_gnn', 32)
+        self.gnn_gene_retention_mode: Literal["keep_isolated", "drop_isolated"] = getattr(
+            args,
+            'gnn_gene_retention_mode',
+            'keep_isolated',
+        )
+        self.gnn_network_cutoff = float(getattr(args, 'gnn_network_cutoff', NETWORK_CUTOFF))
+        self.gnn_edge_weight_mode: Literal["binary_mean", "weighted_mean"] = getattr(
+            args,
+            'gnn_edge_weight_mode',
+            'weighted_mean',
+        )
+        self.gnn_query_mode: Literal["fixed", "sample_conditioned"] = getattr(
+            args,
+            'gnn_query_mode',
+            'sample_conditioned',
+        )
+        self.gnn_dropedge_rate = float(getattr(args, 'gnn_dropedge_rate', 0.0))
+        self.gnn_attention_dropout_rate = float(getattr(args, 'gnn_attention_dropout_rate', 0.0))
 
         # --- 1. Load Gene List ---
         if args.input_gene_list_fp is None or not os.path.exists(args.input_gene_list_fp):
@@ -68,12 +86,13 @@ class EncoderSGNN(BaseEncoder):
                 raise ValueError(f"Biogrid PPI must have {required_cols}")
             net = net_df[required_cols].copy()
             net.columns = ["source", "target"]
+            net["conn"] = 1.0
         else:
             required_cols = ["g1_symbol", "g2_symbol", "conn"]
             if not all(col in net_df.columns for col in required_cols):
                 raise ValueError(f"PPI file must have {required_cols}")
             net = net_df[required_cols].copy()
-            net = net[net.conn >= NETWORK_CUTOFF]  # Only keep edges above cutoff
+            net = net[net.conn >= self.gnn_network_cutoff]
             net.columns = ["source", "target", "conn"]
 
         # Use a set for O(1) membership lookup when filtering edges.
@@ -81,39 +100,65 @@ class EncoderSGNN(BaseEncoder):
         mask = net['source'].isin(gene_set) & net['target'].isin(gene_set)
         net = net[mask]
         net = net[net['source'] != net['target']]  # Remove self-loops
-        net.drop_duplicates(subset=["source", "target"], inplace=True)
+        if not net.empty:
+            pair_source = net[["source", "target"]].min(axis=1)
+            pair_target = net[["source", "target"]].max(axis=1)
+            net = (
+                net.assign(pair_source=pair_source, pair_target=pair_target)
+                .groupby(["pair_source", "pair_target"], as_index=False)["conn"]
+                .max()
+                .rename(columns={"pair_source": "source", "pair_target": "target"})
+            )
 
-        # Retain only genes that actually appear in the filtered PPI,
-        # preserving the original order from gene_list for reproducibility.
-        unique_genes_in_ppi = pd.unique(net[["source", "target"]].values.ravel("K"))
-        self.graph_gene_list = [g for g in self.gene_list if g in set(unique_genes_in_ppi)]
+        unique_genes_in_ppi = set()
+        if not net.empty:
+            unique_genes_in_ppi = set(pd.unique(net[["source", "target"]].values.ravel("K")))
+
+        if self.gnn_gene_retention_mode == "keep_isolated":
+            self.graph_gene_list = list(self.gene_list)
+        else:
+            self.graph_gene_list = [g for g in self.gene_list if g in unique_genes_in_ppi]
 
         if not self.graph_gene_list:
             raise ValueError("No common genes found between PPI and input gene list.")
 
-        # Map gene names to contiguous integer indices {0, ..., N-1}.
         gene_to_idx_map = {gene: idx for idx, gene in enumerate(self.graph_gene_list)}
-        net['source_idx'] = net['source'].map(gene_to_idx_map)
-        net['target_idx'] = net['target'].map(gene_to_idx_map)
+        input_gene_to_idx = {gene: idx for idx, gene in enumerate(self.gene_list)}
 
-        # Build edge_index in PyG format: shape [2, num_edges].
-        # Row 0 = source node indices, Row 1 = target node indices.
-        source_indices = torch.tensor(net['source_idx'].values, dtype=torch.long)
-        target_indices = torch.tensor(net['target_idx'].values, dtype=torch.long)
-        edge_index = torch.stack([source_indices, target_indices], dim=0)
+        if not net.empty:
+            net['source_idx'] = net['source'].map(gene_to_idx_map)
+            net['target_idx'] = net['target'].map(gene_to_idx_map)
+            net = net.dropna(subset=['source_idx', 'target_idx']).copy()
 
-        # PPI graphs are undirected; SAGEConv performs directed message passing,
-        # so we explicitly add both (i->j) and (j->i) directions.
-        edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)
-        # Remove duplicates after making undirected
-        edge_index = torch.unique(edge_index, dim=1)
+        if net.empty:
+            source_indices = torch.empty(0, dtype=torch.long)
+            target_indices = torch.empty(0, dtype=torch.long)
+            base_edge_weight = torch.empty(0, dtype=torch.float32)
+            edge_pair_id = torch.empty(0, dtype=torch.long)
+        else:
+            source_indices = torch.tensor(net['source_idx'].astype(int).values, dtype=torch.long)
+            target_indices = torch.tensor(net['target_idx'].astype(int).values, dtype=torch.long)
+            undirected_edge_weight = torch.tensor(net['conn'].values, dtype=torch.float32)
+            undirected_edge_ids = torch.arange(source_indices.numel(), dtype=torch.long)
+            base_edge_weight = torch.cat([undirected_edge_weight, undirected_edge_weight], dim=0)
+            edge_pair_id = torch.cat([undirected_edge_ids, undirected_edge_ids], dim=0)
+
+        edge_index = torch.stack(
+            [
+                torch.cat([source_indices, target_indices], dim=0),
+                torch.cat([target_indices, source_indices], dim=0),
+            ],
+            dim=0,
+        )
 
         # register_buffer: not a learnable parameter, but moves with .to(device)
         # and is included in state_dict for checkpointing.
         self.register_buffer('edge_index', edge_index)
+        self.register_buffer('edge_weight', base_edge_weight)
+        self.register_buffer('edge_pair_id', edge_pair_id)
 
         # Indices to slice the full input gene vector down to graph genes only.
-        self.input_gene_filter_indices = [self.gene_list.index(g) for g in self.graph_gene_list]
+        self.input_gene_filter_indices = [input_gene_to_idx[g] for g in self.graph_gene_list]
         self.register_buffer('filter_indices_tensor', torch.tensor(self.input_gene_filter_indices, dtype=torch.long))
 
         # --- 3. Load Prior Gene Features ---
@@ -143,6 +188,21 @@ class EncoderSGNN(BaseEncoder):
         
         # Determine top-k for attention
         self.topk = min(getattr(args, 'gnn_topk_attention', 1024), self.gnn_n_genes)
+        self.connected_gene_count = sum(g in unique_genes_in_ppi for g in self.graph_gene_list)
+        self.isolated_gene_count = self.gnn_n_genes - self.connected_gene_count
+        self.retained_edge_count = 0 if net.empty else int(net.shape[0])
+        self.graph_diagnostics = {
+            "configured_genes": len(self.gene_list),
+            "retained_graph_genes": self.gnn_n_genes,
+            "connected_genes": self.connected_gene_count,
+            "isolated_genes": self.isolated_gene_count,
+            "retained_edge_count": self.retained_edge_count,
+            "effective_topk": self.topk,
+            "gene_retention_mode": self.gnn_gene_retention_mode,
+            "network_cutoff": self.gnn_network_cutoff,
+            "edge_weight_mode": self.gnn_edge_weight_mode,
+            "query_mode": self.gnn_query_mode,
+        }
 
         # GNN Encoder: input feature dim = 1 (expression) + F_gene (prior features)
         self.encoder = PPIEncoder(
@@ -156,6 +216,28 @@ class EncoderSGNN(BaseEncoder):
             return_attention=getattr(args, 'return_gnn_attention', False),
             topk=self.topk,
             ppi_edge_index=edge_index,
+            ppi_edge_weight=base_edge_weight,
+            ppi_edge_pair_id=edge_pair_id,
+            edge_weight_mode=self.gnn_edge_weight_mode,
+            query_mode=self.gnn_query_mode,
+            dropedge_rate=self.gnn_dropedge_rate,
+            attention_dropout_rate=self.gnn_attention_dropout_rate,
+        )
+
+        logger.info(
+            "EncoderSGNN graph diagnostics: configured_genes=%d retained_graph_genes=%d connected_genes=%d "
+            "isolated_genes=%d retained_edges=%d topk=%d retention_mode=%s cutoff=%.3f "
+            "edge_weight_mode=%s query_mode=%s",
+            self.graph_diagnostics["configured_genes"],
+            self.graph_diagnostics["retained_graph_genes"],
+            self.graph_diagnostics["connected_genes"],
+            self.graph_diagnostics["isolated_genes"],
+            self.graph_diagnostics["retained_edge_count"],
+            self.graph_diagnostics["effective_topk"],
+            self.graph_diagnostics["gene_retention_mode"],
+            self.graph_diagnostics["network_cutoff"],
+            self.graph_diagnostics["edge_weight_mode"],
+            self.graph_diagnostics["query_mode"],
         )
 
         # Post-GNN MLP: compress the flattened attention-pooled representation
@@ -288,6 +370,7 @@ class EncoderSGNN(BaseEncoder):
             pe_to_add = pe_matrix.t().unsqueeze(0)  # [1, Latent, Types]
             exists_mask = exists.unsqueeze(1)  # [B, 1, Types]
             mu_all_types = mu_all_types + (pe_to_add * exists_mask)
+            mu_mean = torch.mean(mu_all_types, dim=2)
 
         output['mu_all_types'] = mu_all_types
         output['logvar_all_types'] = logvar_all_types
@@ -408,11 +491,17 @@ class PPIEncoder(nn.Module):
                  latent_dim: int,
                  num_nodes: int,
                  ppi_edge_index: torch.Tensor,
+                 ppi_edge_weight: torch.Tensor,
+                 ppi_edge_pair_id: torch.Tensor,
                  num_layers: int = 3,
                  drop_p: float = 0.1,
                  use_gradient_checkpointing: bool = False,
                  return_attention: bool = False,
-                 topk: int = 1024):
+                 topk: int = 1024,
+                 edge_weight_mode: Literal["binary_mean", "weighted_mean"] = "weighted_mean",
+                 query_mode: Literal["fixed", "sample_conditioned"] = "sample_conditioned",
+                 dropedge_rate: float = 0.0,
+                 attention_dropout_rate: float = 0.0):
         super().__init__()
 
         if num_layers < 1:
@@ -424,6 +513,10 @@ class PPIEncoder(nn.Module):
         self.num_layers      = num_layers       # L: number of GraphSAGE layers
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.return_attention = return_attention
+        self.edge_weight_mode = edge_weight_mode
+        self.query_mode = query_mode
+        self.dropedge_rate = float(dropedge_rate)
+        self.attention_dropout_rate = float(attention_dropout_rate)
 
         # Top-k genes to attend to per query slot; capped at N
         self.topk = min(topk, self.num_nodes)
@@ -444,7 +537,9 @@ class PPIEncoder(nn.Module):
         #   A           : sparse [N, N],  A[i,j] = 1 if gene j -> gene i
         row = ppi_edge_index[1]  # target node indices, shape [E]
         col = ppi_edge_index[0]  # source node indices, shape [E]
-        val = torch.ones(row.size(0), dtype=torch.float32, device=row.device)  # shape [E]
+        val = ppi_edge_weight.to(dtype=torch.float32)
+        if self.edge_weight_mode == "binary_mean":
+            val = torch.ones_like(val)
         adj = torch.sparse_coo_tensor(
             indices=torch.stack([row, col]),  # shape [2, E]
             values=val,                       # shape [E]
@@ -462,9 +557,13 @@ class PPIEncoder(nn.Module):
         #   - automatically moved with .to(device) / .cuda()
         #   - saved and restored in state_dict checkpoints
         #   - NOT treated as trainable parameters
-        self.register_buffer("_adj_indices", adj.indices())  # [2, E]
-        self.register_buffer("_adj_values",  adj.values())   # [E]
-        self.register_buffer("_deg",         deg)            # [N]
+        self.register_buffer("_adj_indices", adj.indices())        # [2, E]
+        self.register_buffer("_base_adj_values", adj.values())     # [E]
+        self.register_buffer("_base_deg", deg)                     # [N]
+        self.register_buffer("_edge_pair_ids", ppi_edge_pair_id)   # [E]
+        self.num_edge_pairs = int(ppi_edge_pair_id.max().item() + 1) if ppi_edge_pair_id.numel() > 0 else 0
+        self._adj_cache = None
+        self._adj_cache_device = None
 
         # ── Step 2: GraphSAGE Layer Parameters ────────────────────────────────
         # Each layer i has four components:
@@ -526,14 +625,60 @@ class PPIEncoder(nn.Module):
         # Xavier uniform init keeps initial attention scores in a stable range.
         self.attention_queries = nn.Parameter(torch.empty(1, latent_dim, gene_hidden_dim))
         nn.init.xavier_uniform_(self.attention_queries)
+        if self.query_mode == "sample_conditioned":
+            self.query_delta_mlp = nn.Sequential(
+                nn.Linear(gene_hidden_dim, gene_hidden_dim),
+                nn.GELU(),
+                nn.Linear(gene_hidden_dim, latent_dim * gene_hidden_dim),
+            )
+        else:
+            self.query_delta_mlp = None
 
         # Scale factor 1/sqrt(H): prevents dot-product scores from growing too
         # large, which would push softmax into saturation (near-zero gradients).
         self.attention_scale_factor = 1.0 / (gene_hidden_dim ** 0.5)
+        self.attention_dropout = (
+            nn.Dropout(self.attention_dropout_rate)
+            if self.attention_dropout_rate > 0
+            else nn.Identity()
+        )
 
         # Output normalization applied after flattening the pooled slots
         self.output_norm      = nn.LayerNorm(gene_hidden_dim * latent_dim)
         self.final_activation = nn.GELU()
+
+    def _get_adjacency(self, device: torch.device):
+        """Return the current sparse adjacency matrix and degree vector."""
+        if (
+            self.training
+            and self.dropedge_rate > 0
+            and self.num_edge_pairs > 0
+            and self._base_adj_values.numel() > 0
+        ):
+            keep_pair = torch.rand(self.num_edge_pairs, device=device) >= self.dropedge_rate
+            if not torch.any(keep_pair):
+                keep_pair[torch.randint(self.num_edge_pairs, (1,), device=device)] = True
+            keep_mask = keep_pair[self._edge_pair_ids]
+            edge_indices = self._adj_indices[:, keep_mask]
+            edge_values = self._base_adj_values[keep_mask]
+            adj = torch.sparse_coo_tensor(
+                edge_indices,
+                edge_values,
+                size=(self.num_nodes, self.num_nodes),
+                device=device,
+            ).coalesce()
+            deg = torch.sparse.sum(adj, dim=1).to_dense().clamp(min=1.0)
+            return adj, deg
+
+        if self._adj_cache is None or self._adj_cache_device != device:
+            self._adj_cache = torch.sparse_coo_tensor(
+                self._adj_indices,
+                self._base_adj_values,
+                size=(self.num_nodes, self.num_nodes),
+                device=device,
+            ).coalesce()
+            self._adj_cache_device = device
+        return self._adj_cache, self._base_deg
 
 
 
@@ -560,14 +705,7 @@ class PPIEncoder(nn.Module):
         # Reconstruct the sparse adjacency matrix from buffered indices and values.
         # This is a lightweight operation (no new memory allocation for the data).
         # The buffers are already on the correct device thanks to register_buffer.
-        if not hasattr(self, "_adj_cache") or self._adj_cache_device != x.device:
-            self._adj_cache = torch.sparse_coo_tensor(
-                self._adj_indices,
-                self._adj_values,
-                size=(self.num_nodes, self.num_nodes),
-            ).coalesce()
-            self._adj_cache_device = x.device
-        adj = self._adj_cache  # [N, N] sparse COO
+        adj, deg = self._get_adjacency(x.device)
 
         # ── Step 2: Multi-layer GraphSAGE Message Passing ─────────────────────
         # For each layer i, the update rule is:
@@ -612,7 +750,7 @@ class PPIEncoder(nn.Module):
             embedded_flat = embedded.permute(1, 0, 2).reshape(num_genes, batch_size * cin)  # [N, B*C]
             neigh_flat    = torch.sparse.mm(adj, embedded_flat)                              # [N, B*C]
             neigh         = neigh_flat.reshape(num_genes, batch_size, cin).permute(1, 0, 2) # [B, N, C]
-            neigh         = neigh / self._deg.view(1, num_genes, 1)                          # [B, N, C]
+            neigh         = neigh / deg.view(1, num_genes, 1)                                # [B, N, C]
 
             # ── 2b. GraphSAGE Linear Transform + Norm + Activation ────────────
             #   out : [B, N, H]
@@ -622,10 +760,19 @@ class PPIEncoder(nn.Module):
             out = self.dropout(out)        # Dropout
 
             # ── 2c. Residual (Skip) Connection ────────────────────────────────
-            #   identity : [B, N, H]  (Linear projection or Identity)
-            #   embedded : [B, N, H]  (updated node features for next layer)
-            identity = self.skip_linears[i](embedded)  # [B, N, H]
-            embedded = out + identity                  # [B, N, H]
+            # Keep a direct per-node path from the previous layer and add it to
+            # the new graph-updated features. This helps preserve each gene's
+            # original signal, stabilizes optimization, and is especially useful
+            # for isolated genes because they have little or no neighbor message.
+            #
+            # `identity` is either:
+            # 1. a learned linear projection when the feature size changes, or
+            # 2. an exact pass-through when the size already matches.
+            #
+            # Final update:
+            #   embedded_new = graph_update + skip(previous_embedded)
+            identity = self.skip_linears[i](embedded)  # [B, N, H] projected previous node state
+            embedded = out + identity                  # [B, N, H] residual sum used by the next layer
 
             layer_outputs.append(embedded)  # save h^(i) for JK fusion
 
@@ -658,10 +805,21 @@ class PPIEncoder(nn.Module):
         #   K^T    : keys transposed             [B, H, N]
         #   scores : [B, latent_dim, N]
         #            scores[b, q, n] = similarity of query q to gene n in sample b
+        query_base = self.attention_queries.expand(batch_size, -1, -1)
+        if self.query_mode == "sample_conditioned":
+            summary_graph = embedded.mean(dim=1)
+            query_delta = self.query_delta_mlp(summary_graph).reshape(
+                batch_size,
+                self.latent_dim,
+                self.gene_hidden_dim,
+            )
+            queries = query_base + query_delta
+        else:
+            queries = query_base
         attn_scores = torch.bmm(
-            self.attention_queries.expand(batch_size, -1, -1),  # [B, latent_dim, H]
-            keys.transpose(1, 2)                                 # [B, H, N]
-        ) * self.attention_scale_factor                          # [B, latent_dim, N]
+            queries,                   # [B, latent_dim, H]
+            keys.transpose(1, 2)       # [B, H, N]
+        ) * self.attention_scale_factor  # [B, latent_dim, N]
 
         # ── 4c. Top-k Sparse Attention ────────────────────────────────────────
         # Retain only the top-k highest-scoring genes per query slot.
@@ -672,6 +830,9 @@ class PPIEncoder(nn.Module):
         #   topk_weights  : [B, latent_dim, k]  softmax-normalized attention weights
         topk_scores, topk_indices = torch.topk(attn_scores, k=self.topk, dim=-1)  # [B, latent_dim, k]
         topk_weights = F.softmax(topk_scores, dim=-1)                              # [B, latent_dim, k]
+        if self.training and self.attention_dropout_rate > 0:
+            topk_weights = self.attention_dropout(topk_weights)
+            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(EPS)
 
         # ── 4d. Reconstruct Full Attention Map (optional) ─────────────────────
         # For interpretability: scatter top-k weights back into a dense [B, latent_dim, N]

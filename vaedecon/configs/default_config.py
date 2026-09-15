@@ -1155,6 +1155,36 @@ class ModelConfig(BaseModelConfig):
         gt=0,
         description="Number of top genes to keep in the cross-attention pooling layer of the GNN"
     )
+    gnn_gene_retention_mode: Literal["keep_isolated", "drop_isolated"] = Field(
+        default="keep_isolated",
+        description="Whether SGNN keeps genes without retained PPI neighbors as isolated nodes."
+    )
+    gnn_network_cutoff: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Minimum retained PPI edge weight."
+    )
+    gnn_edge_weight_mode: Literal["binary_mean", "weighted_mean"] = Field(
+        default="weighted_mean",
+        description="How SGNN aggregates neighbor messages after graph thresholding."
+    )
+    gnn_query_mode: Literal["fixed", "sample_conditioned"] = Field(
+        default="sample_conditioned",
+        description="How SGNN pooling queries are formed for each sample."
+    )
+    gnn_dropedge_rate: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="DropEdge rate applied to retained PPI edges during SGNN training."
+    )
+    gnn_attention_dropout_rate: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Dropout rate applied to sparse SGNN attention weights after softmax."
+    )
 
     # ==================== Pathway DNN Settings ====================
     input_dim_pathway: Tuple[int, int] = Field(
