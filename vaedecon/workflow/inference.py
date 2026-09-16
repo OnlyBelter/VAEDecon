@@ -4,7 +4,6 @@ Inference pipeline for VAEDecon
 import os
 import gc
 import logging
-import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -22,15 +21,6 @@ from .workflow import (
 from ..configs.default_config import VAEDeconConfig, GEPDatasetConfig, TestSetConfig, TrainingConfig
 
 logger = logging.getLogger(__name__)
-
-
-def _reset_small_test_processed_cache(processed_data_dir: str | Path) -> None:
-    """Remove stale processed test artifacts before rebuilding small test sets."""
-    cache_dir = Path(str(processed_data_dir))
-    if not cache_dir.exists():
-        return
-    shutil.rmtree(cache_dir)
-    logger.info("Removed stale processed test cache at %s before inference.", cache_dir)
 
 
 def _selected_sc_gep_cache_complete(
@@ -476,8 +466,6 @@ class VAEDeconPredictor:
             dataset_type=dataset_type,
             require_model_artifacts=True,
         )
-        if dataset_type == "test":
-            _reset_small_test_processed_cache(gep_dataset_config.processed_data_dir)
         dataset = GEPDataset(config=gep_dataset_config)
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
@@ -512,8 +500,10 @@ class VAEDeconPredictor:
         """
         Build a config dict for GEPDataset from self.config.data
         """
-        # Prepare dataset
-        processed_data_dir = Path(data_file_path).resolve().parent / f'processed_{dataset_type}'
+        persist_processed_data = dataset_type != "test"
+        processed_data_dir = None
+        if persist_processed_data:
+            processed_data_dir = Path(data_file_path).resolve().parent / f'processed_{dataset_type}'
         if require_model_artifacts:
             input_gene_list_fp = _validate_required_model_artifact_path(
                 model_dir=self.model_dir,
@@ -547,6 +537,7 @@ class VAEDeconPredictor:
             pooled_sc_cell_subtype_col=self.config.data.pooled_sc_cell_subtype_col,
             pooled_sc_sample_size=self.config.data.pooled_sc_sample_size,
             pooled_sc_seed=self.config.data.pooled_sc_seed,
+            persist_processed_data=persist_processed_data,
             processed_data_dir=processed_data_dir,
             gene_list_file=input_gene_list_fp,
         )

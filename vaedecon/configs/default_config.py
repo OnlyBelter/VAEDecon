@@ -769,7 +769,7 @@ class GEPDatasetConfig(DataConfig):
             List of input file paths. Supported: .h5ad, .csv
         processed_data_dir:
             Cache directory for processed arrays and metadata.
-            Must be provided for this implementation.
+            Required only when `persist_processed_data=True`.
         force_reprocess:
             If True, ignore cache and re-run preprocessing.
         scaling_by_constant:
@@ -793,9 +793,14 @@ class GEPDatasetConfig(DataConfig):
         compress:
             If True, use .npz compressed cache files (smaller, typically slower).
             Note: compressed .npz does not support true memmap behavior.
+        persist_processed_data:
+            If True, save processed arrays/metadata to `processed_data_dir` and
+            reuse them across runs. If False, preprocess in memory only and do
+            not write persistent dataset cache artifacts.
     """
     file_paths: List[Union[str, Path]]
     processed_data_dir: Optional[Union[str, Path]]
+    persist_processed_data: bool = True
     force_reprocess: bool = False
 
     scaling_by_constant: Union[bool, float] = True

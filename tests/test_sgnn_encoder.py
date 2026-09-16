@@ -53,7 +53,7 @@ def _build_encoder(
     **model_overrides,
 ) -> EncoderSGNN:
     gene_list_fp, gene_stats_fp, ppi_fp = _write_sgnn_fixture_files(tmp_path)
-    model = ModelConfig(
+    model_kwargs = dict(
         input_gene_list_fp=gene_list_fp,
         gene_mean_std_fp=gene_stats_fp,
         latent_dim=2,
@@ -67,8 +67,9 @@ def _build_encoder(
         gnn_topk_attention=2,
         predict_cell_prop=False,
         using_positional_encoding=False,
-        **model_overrides,
     )
+    model_kwargs.update(model_overrides)
+    model = ModelConfig(**model_kwargs)
     data = DataConfig(ppi_file_path=ppi_fp)
     position_encoding = None
     if model.using_positional_encoding:

@@ -620,7 +620,7 @@ def test_inference_builds_dataset_config_with_sct_gene_mean_std_refs(tmp_path: P
     assert dataset_cfg.pooled_sc_seed == 42
 
 
-def test_predictor_clears_stale_processed_test_cache_before_loading_dataset(
+def test_predictor_uses_in_memory_dataset_loading_for_test_sets(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -658,17 +658,14 @@ def test_predictor_clears_stale_processed_test_cache_before_loading_dataset(
         device="cpu",
     )
 
-    stale_processed_dir = tmp_path / "processed_test"
-    stale_processed_dir.mkdir(parents=True, exist_ok=True)
-    (stale_processed_dir / "common_gene_list.txt").write_text("stale_gene\n")
-
     class _DummyDataset:
         def __init__(self):
             self.data = np.zeros((1, 2), dtype=np.float32)
 
     def _fake_gepdataset(*, config):
-        assert config.processed_data_dir == stale_processed_dir
-        assert not stale_processed_dir.exists()
+        assert config.persist_processed_data is False
+        assert config.processed_data_dir is None
+        assert not (tmp_path / "processed_test").exists()
         return _DummyDataset()
 
     monkeypatch.setattr("vaedecon.workflow.inference.GEPDataset", _fake_gepdataset)
@@ -688,7 +685,7 @@ def test_predictor_clears_stale_processed_test_cache_before_loading_dataset(
     )
 
     assert results == {"ok": True}
-    assert not stale_processed_dir.exists()
+    assert not (tmp_path / "processed_test").exists()
 
 
 def test_trainer_builds_reproducible_debug_overfit_subset_and_manifest(tmp_path: Path):

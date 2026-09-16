@@ -1379,19 +1379,29 @@ class GEPDataset(Dataset):
         # Important: compressed npz does not provide true memmap arrays.
         self.compress = bool(config.compress)
         self.use_memmap = bool(config.use_memmap and not self.compress)
+        self.persist_processed_data = bool(config.persist_processed_data)
         if config.use_memmap and self.compress:
             warnings.warn(
                 "compress=True disables true memmap behavior for arrays inside .npz. "
                 "Proceeding with in-memory loading for compressed cache."
             )
+        if not self.persist_processed_data:
+            self.use_memmap = False
 
         self.chunk_size = int(config.chunk_size)
-
-        if config.processed_data_dir is None:
-            raise ValueError("processed_data_dir must not be None in this implementation.")
-
-        self.processed_data_dir = Path(config.processed_data_dir)
-        self.cache = GEPCacheManager(self.processed_data_dir, compress=self.compress)
+        self.processed_data_dir = (
+            Path(config.processed_data_dir)
+            if config.processed_data_dir is not None
+            else None
+        )
+        if self.persist_processed_data:
+            if self.processed_data_dir is None:
+                raise ValueError(
+                    "processed_data_dir must not be None when persist_processed_data=True."
+                )
+            self.cache = GEPCacheManager(self.processed_data_dir, compress=self.compress)
+        else:
+            self.cache = None
 
         # Lazy-loaded arrays
         self._data: Optional[np.ndarray] = None
@@ -1407,24 +1417,28 @@ class GEPDataset(Dataset):
         self._n_genes = 0
         self._n_cell_types = 0
 
-        has_cache = self.cache.has_required_cache()
+        if not self.persist_processed_data:
+            log_message("Preprocessing dataset in memory without writing persistent cache.")
+            self._preprocess_in_memory()
+        else:
+            has_cache = self.cache.has_required_cache()
 
-        # Try cache first unless force_reprocess=True
-        if (not config.force_reprocess) and has_cache:
-            if self._load_from_cache_metadata():
-                log_message(f"Successfully loaded cache metadata from {self.processed_data_dir}")
+            # Try cache first unless force_reprocess=True
+            if (not config.force_reprocess) and has_cache:
+                if self._load_from_cache_metadata():
+                    log_message(f"Successfully loaded cache metadata from {self.processed_data_dir}")
+                else:
+                    log_message("Cache metadata load failed. Reprocessing from scratch...")
+                    self._preprocess_and_cache()
+                    self._load_from_cache_metadata()
             else:
-                log_message("Cache metadata load failed. Reprocessing from scratch...")
+                if config.force_reprocess and has_cache:
+                    log_message(
+                        f"force_reprocess=True, rebuilding processed dataset cache at {self.processed_data_dir}"
+                    )
+                log_message("Preprocessing data from scratch...")
                 self._preprocess_and_cache()
                 self._load_from_cache_metadata()
-        else:
-            if config.force_reprocess and has_cache:
-                log_message(
-                    f"force_reprocess=True, rebuilding processed dataset cache at {self.processed_data_dir}"
-                )
-            log_message("Preprocessing data from scratch...")
-            self._preprocess_and_cache()
-            self._load_from_cache_metadata()
 
     # -------------------------------------------------------------------------
     # Lazy-loading properties
@@ -1433,6 +1447,8 @@ class GEPDataset(Dataset):
     def data(self) -> np.ndarray:
         """Lazy loading of data array."""
         if self._data is None:
+            if self.cache is None:
+                raise RuntimeError("In-memory dataset data was not initialized.")
             self._data = self.cache.load_data(use_memmap=self.use_memmap)
             log_message(f"Loaded data: shape={self._data.shape}, dtype={self._data.dtype}")
             if self._data.dtype != np.float32:
@@ -1446,6 +1462,9 @@ class GEPDataset(Dataset):
     def labels(self) -> np.ndarray:
         """Lazy loading of labels array."""
         if self._labels is None:
+            if self.cache is None:
+                self._labels = np.array([], dtype=np.float32)
+                return self._labels
             self._labels = self.cache.load_labels(use_memmap=self.use_memmap)
             log_message(f"Loaded labels: shape={self._labels.shape}, dtype={self._labels.dtype}")
             if self._labels.size > 0 and self._labels.dtype != np.float32:
@@ -1456,6 +1475,9 @@ class GEPDataset(Dataset):
     def true_sct_gep(self) -> np.ndarray:
         """Lazy loading of matched true sctGEP targets."""
         if self._true_sct_gep is None:
+            if self.cache is None:
+                self._true_sct_gep = np.array([], dtype=np.float32)
+                return self._true_sct_gep
             self._true_sct_gep = self.cache.load_optional_array(
                 array_path=self.cache.true_sct_gep_path,
                 key="true_sct_gep",
@@ -1468,6 +1490,9 @@ class GEPDataset(Dataset):
     def true_sct_gep_present_mask(self) -> np.ndarray:
         """Lazy loading of matched true-sctGEP presence masks."""
         if self._true_sct_gep_present_mask is None:
+            if self.cache is None:
+                self._true_sct_gep_present_mask = np.array([], dtype=bool)
+                return self._true_sct_gep_present_mask
             self._true_sct_gep_present_mask = self.cache.load_optional_array(
                 array_path=self.cache.true_sct_gep_present_mask_path,
                 key="true_sct_gep_present_mask",
@@ -1481,6 +1506,8 @@ class GEPDataset(Dataset):
     # -------------------------------------------------------------------------
     def _load_from_cache_metadata(self) -> bool:
         """Load metadata and small text files without loading large arrays."""
+        if self.cache is None:
+            return False
         try:
             metadata = self.cache.load_metadata()
             self.gene_list, self.sample_ids, self.cell_types = self.cache.load_text_metadata()
@@ -1533,26 +1560,38 @@ class GEPDataset(Dataset):
     # -------------------------------------------------------------------------
     # Preprocess + cache
     # -------------------------------------------------------------------------
-    def _preprocess_and_cache(self) -> None:
-        """Run preprocessing pipeline and save outputs to cache."""
+    def _run_preprocessor(
+        self,
+        *,
+        temp_dir: Optional[Path],
+        common_gene_list_path: Optional[Path],
+    ) -> Dict[str, Any]:
+        """Run preprocessing with shared config for both cached and in-memory modes."""
         preprocessor = GEPPreprocessor(
             chunk_size=self.chunk_size,
             max_parallel_source_file_loads=self.config.max_parallel_source_file_loads,
-            temp_dir=self.processed_data_dir / "_tmp_preprocess",
+            temp_dir=temp_dir,
         )
         sample_id_namespace_by_path = self._build_sample_id_namespace_by_path()
         source_group_key_by_path = self._build_source_group_key_by_path()
 
-        processed = preprocessor.run(
+        return preprocessor.run(
             file_paths=self.config.file_paths,
             gene_list_file=self.config.gene_list_file,
-            common_gene_list_path=self.cache.common_gene_list_path,
+            common_gene_list_path=common_gene_list_path,
             remove_low_var_genes=self.config.remove_low_var_genes,
             min_var=self.config.min_var,
             cell_cell2ave_exp_file_path=self.config.cell_cell2ave_exp_file_path,
             sample_id_namespace_by_path=sample_id_namespace_by_path,
             source_group_key_by_path=source_group_key_by_path,
             max_parallel_source_file_loads=self.config.max_parallel_source_file_loads,
+        )
+
+    def _preprocess_and_cache(self) -> None:
+        """Run preprocessing pipeline and save outputs to cache."""
+        processed = self._run_preprocessor(
+            temp_dir=self.processed_data_dir / "_tmp_preprocess",
+            common_gene_list_path=self.cache.common_gene_list_path,
         )
         data_array = processed["data_array"]
         labels_array = processed["labels_array"]
@@ -1636,6 +1675,51 @@ class GEPDataset(Dataset):
 
         log_message(
             f"Preprocessing complete: {self._n_samples} samples, "
+            f"{self._n_genes} genes"
+        )
+
+    def _preprocess_in_memory(self) -> None:
+        """Run preprocessing without writing persistent cache artifacts."""
+        if self.config.training_target_sets:
+            raise ValueError(
+                "persist_processed_data=False is currently supported for inference-style "
+                "datasets without training_target_sets."
+            )
+
+        processed = self._run_preprocessor(
+            temp_dir=None,
+            common_gene_list_path=None,
+        )
+        data_array = processed["data_array"]
+        labels_array = processed["labels_array"]
+        gene_list = processed["gene_list"]
+        sample_ids = processed["sample_ids"]
+        cell_types = processed["cell_types"]
+
+        log_message("Applying final array scaling...")
+        if self.apply_scaling:
+            data_array = data_array / float(self.scaling_value)
+
+        self._data = data_array.astype(np.float32, copy=False)
+        if labels_array is None:
+            self._labels = np.array([], dtype=np.float32)
+        else:
+            self._labels = labels_array.astype(np.float32, copy=False)
+        self._true_sct_gep = np.array([], dtype=np.float32)
+        self._true_sct_gep_present_mask = np.array([], dtype=bool)
+
+        self.gene_list = list(gene_list)
+        self.sample_ids = list(sample_ids)
+        self.cell_types = list(cell_types)
+        self._n_samples = len(self.sample_ids)
+        self._n_genes = len(self.gene_list)
+        self._n_cell_types = len(self.cell_types)
+
+        del processed
+        gc.collect()
+
+        log_message(
+            f"In-memory preprocessing complete: {self._n_samples} samples, "
             f"{self._n_genes} genes"
         )
 
