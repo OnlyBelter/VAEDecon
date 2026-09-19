@@ -104,24 +104,90 @@ results = predict_vaedecon(
 print(results["pred_cell_prop"].shape)
 ```
 
-### 3. Run inference for all configured test sets
+### 3. Run configured test sets with a trained model
 
-If `data_file_path` is omitted, `predict_vaedecon()` uses
-`config.data.test_sets`.
+Load the configuration saved with the trained model, then replace only its
+test-set definitions with the datasets you want to predict. Every test set
+must define `test_set_file_path`. The SCT GEP reference and sample-to-cell
+mapping are optional and enable ground-truth evaluation for simulated data.
+
+#### Simulated data with ground truth
+
+For simulated data, define `sct_gep_file_path` and
+`test_set_sample2cell_id_file_path` in addition to `test_set_file_path`.
+VAEDecon then saves predicted cell proportions and reconstructed
+sample-specific cell-type GEPs, together with ground-truth comparison metrics
+and plots.
 
 ```python
-from vaedecon.workflow import predict_vaedecon
+from pathlib import Path
+
+from vaedecon import predict_vaedecon
 from vaedecon.configs import VAEDeconConfig
 
-config = VAEDeconConfig.from_yaml("vaedecon/configs/example_config.yaml")
+model_dir = Path("./output/vae/my_run/final_model").resolve()
+evaluation_config = VAEDeconConfig.from_yaml(
+    "vaedecon/configs/evaluation_config.yaml"
+)
+trained_config = VAEDeconConfig.from_yaml(model_dir / "config.yaml")
 
-all_results = predict_vaedecon(
-    model_dir="./output/vae/my_run/final_model",
-    config=config,
-    data_file_path=None,
-    visualize=True,
+selected_test_sets = (
+    "Test_set_hnscc_pDC",
+    "Test_set_hnscc_mDC",
+    "Test_set_gbm",
+)
+trained_config.data.test_sets = {
+    name: evaluation_config.data.test_sets[name] for name in selected_test_sets
+}
+trained_config.model.model_dir = str(model_dir)
+
+results = predict_vaedecon(
+    model_dir=model_dir,
+    output_dir=str(model_dir / "test_results"),
+    config=trained_config,
+    device="auto",
 )
 ```
+
+#### Real bulk data without SCT GEP ground truth
+
+For real bulk data, such as TCGA, omit `sct_gep_file_path` and
+`test_set_sample2cell_id_file_path`. A minimal evaluation configuration is:
+
+```yaml
+data:
+  test_sets:
+    TCGA_LUAD:
+      test_set_file_path: "./datasets/tcga/TCGA_LUAD_bulk.h5ad"
+```
+
+Use the same trained-model configuration pattern to run prediction:
+
+```python
+from pathlib import Path
+
+from vaedecon import predict_vaedecon
+from vaedecon.configs import VAEDeconConfig
+
+model_dir = Path("./output/vae/my_run/final_model").resolve()
+real_bulk_config = VAEDeconConfig.from_yaml(
+    "vaedecon/configs/tcga_evaluation_config.yaml"
+)
+trained_config = VAEDeconConfig.from_yaml(model_dir / "config.yaml")
+trained_config.data.test_sets = real_bulk_config.data.test_sets
+trained_config.model.model_dir = str(model_dir)
+
+results = predict_vaedecon(
+    model_dir=model_dir,
+    output_dir=str(model_dir / "test_results"),
+    config=trained_config,
+    device="auto",
+)
+```
+
+VAEDecon still saves predicted cell proportions and reconstructed
+sample-specific cell-type GEPs. It skips cell-proportion comparison metrics
+and SCT GEP comparison metrics or plots because no ground truth is available.
 
 ## Staged training workflow
 
