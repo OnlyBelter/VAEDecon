@@ -593,18 +593,29 @@ def _compute_pairwise_ccc_matrix(
     if not common_genes:
         raise ValueError("No common genes found when computing pairwise CCC matrix.")
 
-    left_df = left_df.loc[common_genes, row_sample_ids]
-    right_df = right_df.loc[common_genes, col_sample_ids]
-
-    matrix = pd.DataFrame(index=row_sample_ids, columns=col_sample_ids, dtype=float)
-    for row_sample_id in row_sample_ids:
-        left_values = left_df[row_sample_id].to_numpy()
-        for col_sample_id in col_sample_ids:
-            matrix.at[row_sample_id, col_sample_id] = get_ccc(
-                x=left_values,
-                y=right_df[col_sample_id].to_numpy(),
-            )
-    return matrix
+    left_values = left_df.loc[common_genes, row_sample_ids].to_numpy(dtype=float)
+    right_values = right_df.loc[common_genes, col_sample_ids].to_numpy(dtype=float)
+    left_centered = left_values - left_values.mean(axis=0, keepdims=True)
+    right_centered = right_values - right_values.mean(axis=0, keepdims=True)
+    n_genes = len(common_genes)
+    left_variance = np.sum(left_centered**2, axis=0) / n_genes
+    right_variance = np.sum(right_centered**2, axis=0) / n_genes
+    covariance = left_centered.T @ right_centered / n_genes
+    mean_difference_sq = (
+        left_values.mean(axis=0)[:, np.newaxis] - right_values.mean(axis=0)[np.newaxis, :]
+    ) ** 2
+    denominator = left_variance[:, np.newaxis] + right_variance[np.newaxis, :] + mean_difference_sq
+    ccc_matrix = np.divide(
+        2 * covariance,
+        denominator,
+        out=np.full_like(covariance, np.nan),
+        where=denominator != 0,
+    )
+    return pd.DataFrame(
+        np.round(ccc_matrix, 3),
+        index=row_sample_ids,
+        columns=col_sample_ids,
+    )
 
 
 def _compute_pairwise_cosine_similarity_matrix(
