@@ -3,6 +3,7 @@ import torch
 
 from vaedecon.configs import ModelConfig
 from vaedecon.models.nn import DecoderConditionalMLP, DecoderMLP
+from vaedecon.models.vae.vae_model import VAE
 
 
 def _build_model_config(**overrides) -> ModelConfig:
@@ -68,3 +69,34 @@ def test_decoder_mlp_shape_is_unchanged():
     output = decoder(z)
 
     assert output["reconstruction"].shape == (2, 8, 3)
+
+
+def test_decoder_mlp_marks_context_fused_posterior_ablation():
+    decoder = DecoderMLP(args=_build_model_config())
+
+    assert decoder.supports_context_fused_posterior is True
+    assert not hasattr(decoder, "conditioning_projector")
+
+
+def test_context_fused_posterior_preserves_latent_shapes():
+    class DummyVAE:
+        pass
+
+    dummy = DummyVAE()
+    dummy.context_fused_posterior_head = torch.nn.LazyLinear(3 * 4 * 2)
+    dummy.model_config = type(
+        "ModelConfigStub",
+        (),
+        {"n_cell_types": 3, "latent_dim": 4},
+    )()
+
+    mu, logvar, mu_mean, logvar_mean = VAE._build_context_fused_latent_posterior(
+        dummy,
+        feature_list=[torch.randn(2, 5)],
+        decoder_bulk_context=torch.randn(2, 7),
+    )
+
+    assert mu.shape == (2, 4, 3)
+    assert logvar.shape == (2, 4, 3)
+    assert mu_mean.shape == (2, 4)
+    assert logvar_mean.shape == (2, 4)

@@ -33,6 +33,8 @@ from ...models.base import (
     has_usable_labels,
     remove_cancer_cell_type,
     resolve_cancer_cell_type_index,
+    LOGVAR_CLAMP_MAX,
+    LOGVAR_CLAMP_MIN,
 )
 from ...utility import log_exp2cpm_tensor, non_log2log_cpm_tensor, non_log2cpm_tensor
 from ...utility.hierarchical_encoding import HIERARCHICAL_ENCODING
@@ -380,12 +382,25 @@ class VAE(BaseAE):
                 dropout=self.cell_prop_head_dropout_rate,
             )
         self._use_decoder_conditioning = bool(getattr(self.decoder, "supports_conditioning", False))
+        self._use_context_fused_posterior = bool(
+            getattr(self.decoder, "supports_context_fused_posterior", False)
+            and self.cell_prop_predictor is not None
+        )
+        if self._use_context_fused_posterior and self.n_encoders != 1:
+            raise ValueError(
+                "Context-fused posterior ablation currently requires exactly one encoder."
+            )
         self.decoder_context_dim = int(
             getattr(model_config, "conditional_decoder_context_dim", 256)
         )
+        self.context_fused_posterior_head = None
+        if self._use_context_fused_posterior:
+            self.context_fused_posterior_head = nn.LazyLinear(
+                n_cell_types * latent_dim * 2
+            )
         self.decoder_context_feature_projectors = nn.ModuleList()
         self.cell_prop_predictor_context_projector = None
-        if self._use_decoder_conditioning:
+        if self._use_decoder_conditioning or self._use_context_fused_posterior:
             decoder_context_dropout = float(
                 getattr(model_config, "conditional_decoder_dropout_rate", 0.1)
             )
@@ -582,6 +597,52 @@ class VAE(BaseAE):
             strategy=self.fusion_strategy,
         )
 
+    def _build_context_fused_latent_posterior(
+        self,
+        *,
+        # Encoder feature tensors; for this ablation there is exactly one
+        # EncoderMLP feature with shape (B, 512).
+        feature_list: List[Optional[torch.Tensor]],
+        # Projected DeSide bulk summary with shape (B, context_dim), typically
+        # (B, 128) for the reference configuration.
+        bulk_context_summary: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build the standard-decoder ablation posterior from feature and context."""
+        if self.context_fused_posterior_head is None:
+            raise RuntimeError("Context-fused posterior head is not initialized.")
+        if len(feature_list) != 1 or feature_list[0] is None:
+            raise ValueError(
+                "Context-fused posterior requires one encoder with cell_prop_feature."
+            )
+        if bulk_context_summary is None:
+            raise ValueError(
+                "Context-fused posterior requires a projected bulk context."
+            )
+
+        # Directly concatenate the EncoderMLP feature and DeSide context:
+        # (B, 512) || (B, 128) -> (B, 640).
+        fused_feature = torch.cat((feature_list[0], bulk_context_summary), dim=-1)
+        mu_logvar_flat = self.context_fused_posterior_head(fused_feature)
+        mu_logvar_structured = mu_logvar_flat.reshape(
+            -1,
+            self.model_config.n_cell_types,
+            2 * self.model_config.latent_dim,
+        )
+        mu_raw, logvar_raw = torch.chunk(mu_logvar_structured, chunks=2, dim=-1)
+        mu_all_types = mu_raw.permute(0, 2, 1)
+        logvar_all_types = logvar_raw.permute(0, 2, 1)
+        logvar_all_types = torch.clamp(
+            logvar_all_types,
+            min=LOGVAR_CLAMP_MIN,
+            max=LOGVAR_CLAMP_MAX,
+        )
+        return (
+            mu_all_types,
+            logvar_all_types,
+            mu_all_types.mean(dim=-1),
+            logvar_all_types.mean(dim=-1),
+        )
+
     def _route_cell_prop_prediction(
         self,
         *,
@@ -638,7 +699,10 @@ class VAE(BaseAE):
         predictor_feature: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         """Select one encoder decoder context feature or use the fused context path."""
-        if not self._use_decoder_conditioning:
+        if not (
+            self._use_decoder_conditioning
+            or getattr(self, "_use_context_fused_posterior", False)
+        ):
             return None
 
         if self._is_cell_prop_predictor_source(self.decoder_context_source):
@@ -781,12 +845,25 @@ class VAE(BaseAE):
             predictor_raw_non_cancer_prop = getattr(predictor_out, "raw_non_cancer_cell_prop", None)
 
         # 3. Fusion (Single or Multi-Encoder)
-        mu_types, log_var_types, mu_mean, logvar_mean = self._route_latent_posterior(
-            mu_list=mu_list,
-            logvar_list=logvar_list,
-            mu_mean_list=mu_mean_list,
-            logvar_mean_list=logvar_mean_list,
+        decoder_bulk_context = self._route_decoder_bulk_context(
+            feature_list=decoder_context_feature_list,
+            predictor_feature=predictor_context_feature,
         )
+
+        if self._use_context_fused_posterior:
+            mu_types, log_var_types, mu_mean, logvar_mean = (
+                self._build_context_fused_latent_posterior(
+                    feature_list=cell_prop_feature_list,
+                    bulk_context_summary=decoder_bulk_context,
+                )
+            )
+        else:
+            mu_types, log_var_types, mu_mean, logvar_mean = self._route_latent_posterior(
+                mu_list=mu_list,
+                logvar_list=logvar_list,
+                mu_mean_list=mu_mean_list,
+                logvar_mean_list=logvar_mean_list,
+            )
 
         pred_cell_prop, dd_alpha = self._route_cell_prop_prediction(
             prop_list=prop_list,
@@ -808,11 +885,6 @@ class VAE(BaseAE):
             device=device,
         )
         mu_mean = mu_types.mean(dim=-1)
-        decoder_bulk_context = self._route_decoder_bulk_context(
-            feature_list=decoder_context_feature_list,
-            predictor_feature=predictor_context_feature,
-        )
-
         # 4. Reconstruction (Batch Decoding Optimization)
         # -------------------------------------------------------
         # Optimization: Merge Batch and CellType dimensions for one-time decoding

@@ -203,6 +203,8 @@ class DecoderMLP(BaseDecoder):
     It can decode a single latent vector (B, L) OR a batch of cell types (B, L, C).
     """
 
+    supports_context_fused_posterior = True
+
     def __init__(self, args: ModelConfig):
         super().__init__()
         self.args = args
