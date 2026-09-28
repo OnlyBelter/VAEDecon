@@ -66,6 +66,30 @@ Use `remove_low_var_genes` carefully in staged runs. The staged workflow
 depends on a shared gene space across stages, so data consistency matters more
 than aggressive per-stage filtering.
 
+#### Processed-data cache behavior
+
+`data.force_reprocess` controls whether VAEDecon rebuilds the processed-data
+cache for the current cache key:
+
+- `false` (the default) reuses a valid cache when one exists. The cache key
+  includes resolved input paths and preprocessing settings.
+- `true` ignores a valid cache for the current key and preprocesses the data
+  again.
+
+Changing training input paths selects a different cache key. If that key has
+no cache yet, VAEDecon preprocesses the inputs even when
+`force_reprocess: false`. The cache is stored under
+`data.data_dir/processed_training_sets/`.
+
+The cache key uses paths, not file contents. If you replace a file in place
+without changing its path, `force_reprocess: false` can reuse data cached from
+the previous contents. Set `force_reprocess: true` to rebuild that cache.
+
+This setting only controls preprocessing; it does not force model training.
+If the configured model directory already contains a checkpoint,
+`train_vaedecon` skips training. To train with changed data, use a new
+`training.naming_postfix` so the run uses a new model directory.
+
 ### Reference gene mean and standard deviation
 
 VAEDecon can compute reference gene mean and standard deviation from either
@@ -102,6 +126,12 @@ Each named entry can include:
 
 This section is especially relevant when you enable matched sctGEP
 supervision losses.
+
+When `model.loss_coefficient.cell_type_sct_gep_weight` is greater than zero,
+VAEDecon uses `training_set_file_path` values from these bundles as bulk
+training inputs when `data.simu_bulk_file_path` is empty. The processed-data
+cache key includes the bulk, sample-to-cell mapping, and SCT reference paths
+from each bundle.
 
 ### Training sctGEP cell-proportion threshold
 
