@@ -122,6 +122,9 @@ config. Each named entry can include:
 This is useful when you want one trained model to run across several
 benchmark or ablation datasets without rewriting the config each time.
 
+For end-to-end training and inference steps, see the
+[usage guide](usage.md).
+
 ## Training section
 
 The `training` section controls optimization, checkpointing, staged training,

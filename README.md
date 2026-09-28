@@ -111,6 +111,10 @@ test-set definitions with the datasets you want to predict. Every test set
 must define `test_set_file_path`. The SCT GEP reference and sample-to-cell
 mapping are optional and enable ground-truth evaluation for simulated data.
 
+For CLI training and prediction-only workflows, including checkpoint reuse
+with updated test sets, see the [usage guide](docs/usage.md). For field
+definitions, see the [configuration guide](docs/configuration.md).
+
 #### Simulated data with ground truth
 
 For simulated data, define `sct_gep_file_path` and
