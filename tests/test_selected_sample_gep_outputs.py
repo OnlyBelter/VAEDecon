@@ -22,8 +22,10 @@ from vaedecon.plot.evaluate_result import (
     _draw_empty_selected_sample_panel,
     _filter_selected_samples_by_true_prop,
     _format_threshold_for_filename,
+    compare_y_y_pred_plot,
     plot_single_cell_gep,
 )
+from vaedecon.utility.evaluation import calculate_single_cell_gep_metrics_per_sample
 
 
 def test_build_selected_sample_legend_label_map_uses_ground_truth_props():
@@ -142,6 +144,113 @@ def test_compute_pairwise_ccc_matrix_returns_expected_shape_and_labels():
     assert list(matrix.columns) == ["s1", "s2"]
     assert matrix.shape == (2, 2)
     assert matrix.loc["s1", "s1"] == pytest.approx(1.0)
+
+
+def test_compute_pairwise_ccc_matrix_uses_finite_gene_pairs():
+    left_df = pd.DataFrame(
+        {
+            "s1": [1.0, 2.0, 3.0, np.nan],
+            "s2": [1.0, 2.0, 3.0, 4.0],
+        },
+        index=["g1", "g2", "g3", "g4"],
+    )
+    right_df = pd.DataFrame(
+        {
+            "s1": [1.0, 2.0, 3.0, 4.0],
+            "s2": [2.0, 4.0, 6.0, 8.0],
+        },
+        index=left_df.index,
+    )
+
+    matrix = _compute_pairwise_ccc_matrix(
+        left_df=left_df,
+        right_df=right_df,
+        row_sample_ids=["s1", "s2"],
+        col_sample_ids=["s1", "s2"],
+    )
+
+    assert matrix.loc["s1", "s2"] == pytest.approx(0.364)
+    assert matrix.loc["s2", "s2"] == pytest.approx(0.4)
+
+
+def test_pairwise_ccc_clustermap_skips_undefined_matrix(tmp_path, monkeypatch, caplog):
+    def _unexpected_clustermap(*_args, **_kwargs):
+        raise AssertionError("Clustermap must not receive undefined CCC entries.")
+
+    monkeypatch.setattr("vaedecon.plot.evaluate_result.sns.clustermap", _unexpected_clustermap)
+    matrix = pd.DataFrame([[1.0, np.nan], [0.4, 1.0]], index=["s1", "s2"], columns=["s1", "s2"])
+
+    _plot_pairwise_ccc_clustermap(
+        matrix_df=matrix,
+        output_fp=tmp_path / "ccc.png",
+        title="test CCC",
+    )
+
+    assert "Skipping test CCC clustermap" in caplog.text
+
+
+def test_compare_y_y_pred_plot_excludes_nonfinite_pairs(caplog):
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("matplotlib.pyplot")
+    y_true = pd.DataFrame({"s1": [1.0, np.nan, 3.0], "s2": [4.0, 5.0, 6.0]})
+    y_pred = pd.DataFrame({"s1": [2.0, 100.0, 2.0], "s2": [4.0, 7.0, 8.0]})
+
+    compare_y_y_pred_plot(
+        y_true=y_true,
+        y_pred=y_pred,
+        show_columns=["s1", "s2"],
+        show_metrics=True,
+        model_name="nan_truth_test",
+        figure_format="png",
+    )
+
+    assert "Excluded 1 non-finite truth/prediction pairs" in caplog.text
+
+
+def test_compare_y_y_pred_subplot_excludes_nonfinite_pairs():
+    pyplot = pytest.importorskip("matplotlib.pyplot")
+    y_true = pd.DataFrame({"s1": [1.0, np.nan, 3.0], "s2": [4.0, 5.0, 6.0]})
+    y_pred = pd.DataFrame({"s1": [2.0, 100.0, 2.0], "s2": [4.0, 7.0, 8.0]})
+
+    fig, _ax, metrics = compare_y_y_pred_subplot(
+        y_true=y_true,
+        y_pred=y_pred,
+        show_columns=["s1", "s2"],
+        show_metrics=True,
+        return_metrics=True,
+        x_label="test",
+    )
+    pyplot.close(fig)
+
+    assert metrics["rmse"] == pytest.approx(np.sqrt(2.0), abs=1e-3)
+    assert np.isfinite(metrics["corr"])
+
+
+def test_calculate_single_cell_gep_metrics_excludes_nonfinite_pairs(tmp_path, caplog):
+    selected_mapping_fp = tmp_path / "selected_mapping.csv"
+    pd.DataFrame(
+        {"cell_type": ["Non-plasma B cells"], "selected_cell_id": ["cell_1"]},
+        index=["sample_1"],
+    ).to_csv(selected_mapping_fp)
+    pd.DataFrame(
+        {"cell_1": [1.0, np.nan, 3.0]},
+        index=["g1", "g2", "g3"],
+    ).to_csv(tmp_path / "sct_gep_Non-plasma B cells_from_1_bulksamples.csv")
+    pd.DataFrame(
+        {"sample_1": [2.0, 4.0, 4.0]},
+        index=["g1", "g2", "g3"],
+    ).to_csv(tmp_path / "recon_sct_gep_Non-plasma B cells_from_1_bulksamples.csv")
+
+    metrics = calculate_single_cell_gep_metrics_per_sample(
+        sc_gep_result_dir=str(tmp_path),
+        cell_types=["Non-plasma B cells"],
+        n_samples=1,
+        selected_sample2cell_id_file_path=str(selected_mapping_fp),
+    )
+
+    assert len(metrics) == 1
+    assert metrics.loc[0, "rmse"] == pytest.approx(1.0)
+    assert "Excluded 1 non-finite gene pairs" in caplog.text
 
 
 def test_compute_pairwise_cosine_similarity_matrix_returns_expected_shape_and_labels():
@@ -564,3 +673,62 @@ def test_plot_single_cell_gep_only_generates_ccc_similarity_outputs(tmp_path, mo
 
     assert (sc_gep_result_dir / "inter_sample_similarity_ccc").exists()
     assert not (sc_gep_result_dir / "inter_sample_similarity_hvg5000_cosine").exists()
+
+
+def test_plot_single_cell_gep_continues_with_nonfinite_truth(tmp_path, caplog, monkeypatch):
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("matplotlib.pyplot")
+    monkeypatch.setattr(
+        "vaedecon.plot.evaluate_result._plot_pairwise_ccc_clustermap",
+        lambda **_kwargs: None,
+    )
+
+    class _DummyDataset:
+        def get_sample_ids(self):
+            return ["s1", "s2"]
+
+        def get_gene_list(self):
+            return ["g1", "g2", "g3"]
+
+    sc_gep_result_dir = tmp_path / "sc_gep"
+    sc_gep_result_dir.mkdir()
+    selected_sample2cell_id_fp = tmp_path / "selected_sample2cell_id.csv"
+    pd.DataFrame(
+        {
+            "cell_type": ["Non-plasma B cells", "Non-plasma B cells"],
+            "selected_cell_id": ["cell_s1", "cell_s2"],
+        },
+        index=["s1", "s2"],
+    ).to_csv(selected_sample2cell_id_fp)
+    pd.DataFrame(
+        {
+            "cell_s1": [1.0, np.nan, 3.0],
+            "cell_s2": [2.0, 3.0, 4.0],
+        },
+        index=["g1", "g2", "g3"],
+    ).to_csv(sc_gep_result_dir / "sct_gep_Non-plasma B cells_from_2_bulksamples.csv")
+
+    plot_single_cell_gep(
+        pred_a={
+            "recon_x_all_types": torch.tensor(
+                [[[1.0], [2.0], [3.0]], [[2.0], [3.0], [5.0]]],
+                dtype=torch.float32,
+            )
+        },
+        test_set=_DummyDataset(),
+        cell_types=["Non-plasma B cells"],
+        sc_gep_result_dir=str(sc_gep_result_dir),
+        n_samples=2,
+        max_visualize_samples=2,
+        figure_format="png",
+        selected_sample2cell_id_file_path=str(selected_sample2cell_id_fp),
+        sct_gep_file_path="unused_reference.h5ad",
+    )
+
+    assert "Excluded 1 non-finite truth/prediction pairs" in caplog.text
+    assert (sc_gep_result_dir / "y_true_vs_y_pred_DeSide_Non-plasma B cells.png").exists()
+    assert (
+        sc_gep_result_dir
+        / "inter_sample_similarity_ccc"
+        / "Non-plasma B cells_ccc_true_prop_ge_0p005_true_vs_recon.csv"
+    ).exists()

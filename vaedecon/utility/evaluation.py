@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import List
 
@@ -5,6 +6,9 @@ import numpy as np
 import pandas as pd
 
 from .pub_func import calculate_rmse, get_ccc, get_corr
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_core_zone_of_pca(pca_data: pd.DataFrame, col_x, col_y, q_lower, q_upper):
@@ -70,8 +74,27 @@ def calculate_single_cell_gep_metrics_per_sample(
 
         common_samples = [s for s in sample_ids if s in y_pred.columns and s in y_true.columns]
         for s in common_samples:
-            yt = y_true[s].values
-            yp = y_pred[s].values
+            yt_all = y_true[s].to_numpy(dtype=float)
+            yp_all = y_pred[s].to_numpy(dtype=float)
+            finite_mask = np.isfinite(yt_all) & np.isfinite(yp_all)
+            n_excluded = int(finite_mask.size - finite_mask.sum())
+            if n_excluded:
+                logger.warning(
+                    "Excluded %d non-finite gene pairs for cell type %s, sample %s.",
+                    n_excluded,
+                    cell_type,
+                    s,
+                )
+            if finite_mask.sum() < 2:
+                logger.warning(
+                    "Skipping GEP metrics for cell type %s, sample %s: "
+                    "fewer than two finite gene pairs remain.",
+                    cell_type,
+                    s,
+                )
+                continue
+            yt = yt_all[finite_mask]
+            yp = yp_all[finite_mask]
             corr, p_value = get_corr(yp, yt, return_p_value=True)
             rmse = calculate_rmse(y_true=yt, y_pred=yp)
             ccc = get_ccc(x=yp, y=yt)

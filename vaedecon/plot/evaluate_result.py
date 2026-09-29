@@ -1,3 +1,4 @@
+import logging
 import os
 import html
 import json
@@ -22,6 +23,9 @@ from ..utility.read_file import ReadH5AD
 # from ..utility.read_file import find_sct_gep_of_bulk_sample
 from ..data import GEPDataset
 from .plot_nn import plot_corr_two_columns
+
+
+logger = logging.getLogger(__name__)
 
 
 class ScatterPlot(object):
@@ -280,13 +284,20 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
     plt.figure(figsize=figsize)
     all_x = []
     all_y = []
+    n_excluded_pairs = 0
     legend_label_map = legend_label_map or {}
     series_color_map = series_color_map or {}
     for i, col in enumerate(show_columns):
         _x = y_true.loc[:, col]
         _y = y_pred.loc[:, col]
-        all_x.append(_x)
-        all_y.append(_y)
+        x_values = pd.to_numeric(_x, errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+        y_values = pd.to_numeric(_y, errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+        finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
+        n_excluded_pairs += int(finite_mask.size - finite_mask.sum())
+        finite_x = x_values[finite_mask]
+        finite_y = y_values[finite_mask]
+        all_x.append(finite_x)
+        all_y.append(finite_y)
         alpha = 1 - 0.05 * i if i < 10 else 0.5
         scatter_kwargs = {
             "label": legend_label_map.get(col, col),
@@ -296,12 +307,18 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
         }
         if col in series_color_map:
             scatter_kwargs["color"] = series_color_map[col]
-        plt.scatter(_x, _y, **scatter_kwargs)
+        plt.scatter(finite_x, finite_y, **scatter_kwargs)
         if annotation:
             x_left, x_right = plt.xlim()
             y_bottom, y_top = plt.ylim()
             for k, v in annotation.items():
                 plt.text(x_left * 1.5, y_top * 0.8, 'k ({.4f})'.format(v[col]))
+    if n_excluded_pairs:
+        logger.warning(
+            "Excluded %d non-finite truth/prediction pairs from %s comparison.",
+            n_excluded_pairs,
+            model_name,
+        )
     x_left, x_right = plt.xlim()
     y_bottom, y_top = plt.ylim()
     x_max = x_right + x_right * 0.01
@@ -310,10 +327,16 @@ def compare_y_y_pred_plot(y_true: Union[str, pd.DataFrame], y_pred: Union[str, p
     if show_metrics:  # show metrics in test set
         all_x = np.concatenate(all_x)
         all_y = np.concatenate(all_y)
-        corr = get_corr(all_x, all_y)
-        rmse = calculate_rmse(y_true=pd.DataFrame(all_x), y_pred=pd.DataFrame(all_y))
-        plt.text(0.70 * x_max, 0.16 * y_max, 'corr = {:.3f}'.format(corr))
-        plt.text(0.70 * x_max, 0.10 * y_max, 'RMSE = {:.3f}'.format(rmse))
+        if all_x.size >= 2:
+            corr = get_corr(all_x, all_y)
+            rmse = calculate_rmse(y_true=pd.DataFrame(all_x), y_pred=pd.DataFrame(all_y))
+            plt.text(0.70 * x_max, 0.16 * y_max, 'corr = {:.3f}'.format(corr))
+            plt.text(0.70 * x_max, 0.10 * y_max, 'RMSE = {:.3f}'.format(rmse))
+        else:
+            logger.warning(
+                "Skipping correlation and RMSE for %s comparison: fewer than two finite pairs.",
+                model_name,
+            )
     if x_label:
         plt.xlabel(x_label)
     else:
@@ -411,19 +434,42 @@ def compare_y_y_pred_subplot(y_true,
     # Scatter Plotting
     all_x = []
     all_y = []
+    n_excluded_pairs = 0
     for col in show_columns:
-        _x = y_pred.loc[:, col]  # Predicted (x-axis)
-        _y = y_true.loc[:, col]  # Ground-truth (y-axis)
-        all_x.append(_x)
-        all_y.append(_y)
+        x_values = pd.to_numeric(y_pred.loc[:, col], errors="coerce").to_numpy(
+            dtype=float,
+            na_value=np.nan,
+        )
+        y_values = pd.to_numeric(y_true.loc[:, col], errors="coerce").to_numpy(
+            dtype=float,
+            na_value=np.nan,
+        )
+        finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
+        n_excluded_pairs += int(finite_mask.size - finite_mask.sum())
+        all_x.append(x_values[finite_mask])
+        all_y.append(y_values[finite_mask])
+    if n_excluded_pairs:
+        logger.warning(
+            "Excluded %d non-finite truth/prediction pairs from %s subplot.",
+            n_excluded_pairs,
+            x_label or dataset_name,
+        )
     # ── Identity Diagonal ─────────────────────────────────────────────────────
     # Compute axis limits from the actual data range rather than
     # reading plt.xlim()/plt.ylim() mid-render, which can be unreliable.
     # A small margin (2 %) is added so edge points are not clipped.
-    all_x_cat = np.concatenate(all_x)
-    all_y_cat = np.concatenate(all_y)
+    non_empty_x = [values for values in all_x if values.size]
+    non_empty_y = [values for values in all_y if values.size]
+    all_x_cat = np.concatenate(non_empty_x) if non_empty_x else np.array([], dtype=float)
+    all_y_cat = np.concatenate(non_empty_y) if non_empty_y else np.array([], dtype=float)
 
-    if collapse_columns:
+    if all_x_cat.size == 0:
+        logger.warning(
+            "No finite truth/prediction pairs are available for %s subplot.",
+            x_label or dataset_name,
+        )
+        data_min, data_max = 0.0, 1.0
+    elif collapse_columns:
         ax.scatter(all_x_cat, all_y_cat, s=1, alpha=0.65, rasterized=True, color="tab:blue")
         ax.text(
             0.02,
@@ -445,9 +491,11 @@ def compare_y_y_pred_subplot(y_true,
             }
             if col in series_color_map:
                 scatter_kwargs["color"] = series_color_map[col]
-            ax.scatter(all_x[i], all_y[i], **scatter_kwargs)
-    data_min = min(all_x_cat.min(), all_y_cat.min())
-    data_max = max(all_x_cat.max(), all_y_cat.max())
+            if all_x[i].size:
+                ax.scatter(all_x[i], all_y[i], **scatter_kwargs)
+    if all_x_cat.size:
+        data_min = min(all_x_cat.min(), all_y_cat.min())
+        data_max = max(all_x_cat.max(), all_y_cat.max())
     margin = (data_max - data_min) * 0.02
     lim_lo = data_min - margin
     lim_hi = data_max + margin
@@ -462,9 +510,16 @@ def compare_y_y_pred_subplot(y_true,
     # ── Metric Annotation ─────────────────────────────────────────────────────
     metrics = None
     if show_metrics or return_metrics:
-        corr, p_value = get_corr(all_x_cat, all_y_cat, return_p_value=True)
-        rmse = calculate_rmse(y_true=all_y_cat, y_pred=all_x_cat)
-        ccc = get_ccc(x=all_x_cat, y=all_y_cat)
+        if all_x_cat.size >= 2:
+            corr, p_value = get_corr(all_x_cat, all_y_cat, return_p_value=True)
+            ccc = get_ccc(x=all_x_cat, y=all_y_cat)
+        else:
+            corr, p_value, ccc = np.nan, np.nan, np.nan
+        rmse = (
+            calculate_rmse(y_true=all_y_cat, y_pred=all_x_cat)
+            if all_x_cat.size
+            else np.nan
+        )
         metrics = {"corr": float(corr), "p_value": float(p_value), "rmse": float(rmse), "ccc": float(ccc)}
 
     if show_metrics:
@@ -595,22 +650,46 @@ def _compute_pairwise_ccc_matrix(
 
     left_values = left_df.loc[common_genes, row_sample_ids].to_numpy(dtype=float)
     right_values = right_df.loc[common_genes, col_sample_ids].to_numpy(dtype=float)
-    left_centered = left_values - left_values.mean(axis=0, keepdims=True)
-    right_centered = right_values - right_values.mean(axis=0, keepdims=True)
-    n_genes = len(common_genes)
-    left_variance = np.sum(left_centered**2, axis=0) / n_genes
-    right_variance = np.sum(right_centered**2, axis=0) / n_genes
-    covariance = left_centered.T @ right_centered / n_genes
-    mean_difference_sq = (
-        left_values.mean(axis=0)[:, np.newaxis] - right_values.mean(axis=0)[np.newaxis, :]
-    ) ** 2
-    denominator = left_variance[:, np.newaxis] + right_variance[np.newaxis, :] + mean_difference_sq
-    ccc_matrix = np.divide(
-        2 * covariance,
-        denominator,
-        out=np.full_like(covariance, np.nan),
-        where=denominator != 0,
-    )
+    if np.isfinite(left_values).all() and np.isfinite(right_values).all():
+        left_centered = left_values - left_values.mean(axis=0, keepdims=True)
+        right_centered = right_values - right_values.mean(axis=0, keepdims=True)
+        n_genes = len(common_genes)
+        left_variance = np.sum(left_centered**2, axis=0) / n_genes
+        right_variance = np.sum(right_centered**2, axis=0) / n_genes
+        covariance = left_centered.T @ right_centered / n_genes
+        mean_difference_sq = (
+            left_values.mean(axis=0)[:, np.newaxis] - right_values.mean(axis=0)[np.newaxis, :]
+        ) ** 2
+        denominator = left_variance[:, np.newaxis] + right_variance[np.newaxis, :] + mean_difference_sq
+        ccc_matrix = np.divide(
+            2 * covariance,
+            denominator,
+            out=np.full_like(covariance, np.nan),
+            where=denominator != 0,
+        )
+    else:
+        ccc_matrix = np.full((len(row_sample_ids), len(col_sample_ids)), np.nan, dtype=float)
+        for row_idx in range(len(row_sample_ids)):
+            for col_idx in range(len(col_sample_ids)):
+                left_sample = left_values[:, row_idx]
+                right_sample = right_values[:, col_idx]
+                finite_mask = np.isfinite(left_sample) & np.isfinite(right_sample)
+                if finite_mask.sum() < 2:
+                    continue
+
+                left_finite = left_sample[finite_mask]
+                right_finite = right_sample[finite_mask]
+                left_mean = left_finite.mean()
+                right_mean = right_finite.mean()
+                left_centered = left_finite - left_mean
+                right_centered = right_finite - right_mean
+                left_variance = np.mean(left_centered**2)
+                right_variance = np.mean(right_centered**2)
+                covariance = np.mean(left_centered * right_centered)
+                denominator = left_variance + right_variance + (left_mean - right_mean) ** 2
+                if denominator > 0 and np.isfinite(denominator):
+                    ccc_matrix[row_idx, col_idx] = 2 * covariance / denominator
+
     return pd.DataFrame(
         np.round(ccc_matrix, 3),
         index=row_sample_ids,
@@ -693,14 +772,17 @@ def _plot_pairwise_similarity_heatmap(
     n_cols = max(matrix_df.shape[1], 1)
     fig_width = max(3.5, min(0.28 * n_cols + 1.8, 14))
     fig_height = max(3.0, min(0.28 * n_rows + 1.6, 14))
-    matrix_min = float(np.nanmin(matrix_df.values)) if matrix_df.size else 0.0
-    matrix_max = float(np.nanmax(matrix_df.values)) if matrix_df.size else 1.0
+    matrix_values = matrix_df.to_numpy(dtype=float)
+    finite_values = matrix_values[np.isfinite(matrix_values)]
+    matrix_min = float(finite_values.min()) if finite_values.size else 0.0
+    matrix_max = float(finite_values.max()) if finite_values.size else 1.0
     vmin = max(0.0, matrix_min)
     vmax = max(vmin, matrix_max)
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     sns.heatmap(
         matrix_df,
         ax=ax,
+        mask=~np.isfinite(matrix_values),
         cmap="vlag",
         vmin=vmin,
         vmax=vmax,
@@ -737,8 +819,17 @@ def _plot_pairwise_similarity_clustermap(
 ) -> None:
     if matrix_df.empty or min(matrix_df.shape) < 2:
         return
-    matrix_min = float(np.nanmin(matrix_df.values)) if matrix_df.size else 0.0
-    matrix_max = float(np.nanmax(matrix_df.values)) if matrix_df.size else 1.0
+    matrix_values = matrix_df.to_numpy(dtype=float)
+    if not np.isfinite(matrix_values).all():
+        logger.warning(
+            "Skipping %s clustermap because its similarity matrix contains "
+            "%d undefined entries.",
+            title,
+            int((~np.isfinite(matrix_values)).sum()),
+        )
+        return
+    matrix_min = float(matrix_values.min()) if matrix_values.size else 0.0
+    matrix_max = float(matrix_values.max()) if matrix_values.size else 1.0
     vmin = max(0.0, matrix_min)
     vmax = max(vmin, matrix_max)
     cluster_grid = sns.clustermap(
