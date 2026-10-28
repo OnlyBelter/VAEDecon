@@ -34,6 +34,16 @@ profiles.
 
 ## Installation
 
+Create and activate the shared environment before installing either the source
+checkout or the packaged release:
+
+```bash
+conda create -n vaedecon python=3.12
+conda activate vaedecon
+# Install the core scientific dependencies from conda-forge.
+conda install -c conda-forge --strict-channel-priority "numpy>=1.26,<2.3" "scipy>=1.12,<1.16" "anndata=0.12.16" pip
+```
+
 ### Install from source
 
 From the repository root:
@@ -41,9 +51,6 @@ From the repository root:
 ```bash
 git clone git@github.com:OnlyBelter/VAEDecon.git
 cd VAEDecon
-
-conda create -n vaedecon -c conda-forge --strict-channel-priority python=3.12 "numpy>=1.26,<2.3" "scipy>=1.12,<1.16" "anndata=0.12.16" pip
-conda activate vaedecon
 
 # PyTorch
 # For Linux or Windows with CUDA, install a compatible CUDA build first.
