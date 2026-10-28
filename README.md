@@ -39,7 +39,10 @@ profiles.
 From the repository root:
 
 ```bash
-conda create -n vaedecon python=3.12
+git clone git@github.com:OnlyBelter/VAEDecon.git
+cd VAEDecon
+
+conda create -n vaedecon -c conda-forge --strict-channel-priority python=3.12 "numpy>=1.26,<2.3" "scipy>=1.12,<1.16" "anndata=0.12.16" pip
 conda activate vaedecon
 
 # PyTorch
