@@ -93,7 +93,7 @@ def test_context_fused_posterior_preserves_latent_shapes():
     mu, logvar, mu_mean, logvar_mean = VAE._build_context_fused_latent_posterior(
         dummy,
         feature_list=[torch.randn(2, 5)],
-        decoder_bulk_context=torch.randn(2, 7),
+        bulk_context_summary=torch.randn(2, 7),
     )
 
     assert mu.shape == (2, 4, 3)
