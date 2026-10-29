@@ -52,9 +52,9 @@ From the repository root:
 git clone https://github.com/OnlyBelter/VAEDecon.git
 cd VAEDecon
 
-# PyTorch
+# PyTorch (here CUDA 12.6 was used)
 # For Linux or Windows with CUDA, install a compatible CUDA build first.
-pip install torch==2.11.0 torchvision==0.26.0
+pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu126
 
 # Install VAEDecon in editable mode
 pip install -e .
