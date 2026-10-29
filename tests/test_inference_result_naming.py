@@ -1,9 +1,11 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
-from vaedecon.workflow.inference import _infer_result_set_name
+from vaedecon.workflow import inference
+from vaedecon.workflow.inference import VAEDeconPredictor, _infer_result_set_name
 from vaedecon.workflow.inference import _merge_aligned_cell_prop_long_table
 from vaedecon.workflow.inference import _validate_input_file_path
 from vaedecon.workflow.inference import _build_simutme_path_suggestions
@@ -23,6 +25,50 @@ def test_infer_result_set_name_uses_full_h5ad_stem():
 
 def test_infer_result_set_name_falls_back_for_blank_stem():
     assert _infer_result_set_name("   ") == "test_set"
+
+
+def test_cell_prop_comparison_figure_is_closed_after_metrics_save(tmp_path, monkeypatch):
+    pyplot = pytest.importorskip("matplotlib.pyplot")
+    pyplot.close("all")
+
+    true_props = pd.DataFrame({"Cancer Cells": [0.1, 0.4, 0.7]}, index=["s1", "s2", "s3"])
+    predicted_props = pd.DataFrame(
+        {"Cancer Cells": [0.2, 0.5, 0.6]},
+        index=true_props.index,
+    )
+    monkeypatch.setattr(
+        inference,
+        "_save_cell_prop_comparison_table",
+        lambda **_kwargs: (true_props, predicted_props),
+    )
+
+    predictor = VAEDeconPredictor.__new__(VAEDeconPredictor)
+    predictor.config = SimpleNamespace(
+        evaluation=SimpleNamespace(
+            plot_cell_proportions=True,
+            show_metrics=True,
+            figsize=(4, 4),
+            plot_single_cell_gep=False,
+            plot_latent_space=False,
+            plot_bulk_gep=False,
+        )
+    )
+    predictor.figure_format = "png"
+    predictor._generate_visualizations(
+        results={
+            "true_cell_prop": true_props,
+            "pred_cell_prop_file_path": "available.csv",
+            "cell_types": ["Cancer Cells"],
+            "pred_a": {},
+            "cell_prop_result_dir": str(tmp_path),
+            "gep_result_dir": str(tmp_path),
+            "test_set_result_dir": str(tmp_path),
+            "test_set": None,
+        }
+    )
+
+    assert (tmp_path / "prediction_metrics.csv").exists()
+    assert pyplot.get_fignums() == []
 
 
 def test_merge_aligned_cell_prop_long_table_preserves_alignment():

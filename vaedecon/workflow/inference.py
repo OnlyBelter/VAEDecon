@@ -670,6 +670,7 @@ class VAEDeconPredictor:
         logger.info("Generating visualizations...")
 
         try:
+            import matplotlib.pyplot as plt
             from ..plot import (
                 compare_y_y_pred_subplot,
                 plot_single_cell_gep,
@@ -704,7 +705,7 @@ class VAEDeconPredictor:
                 cell_prop_result_dir=cell_prop_result_dir,
                 cell_types=cell_types,
             )
-            _, _, metrics = compare_y_y_pred_subplot(
+            cell_prop_figure, _, metrics = compare_y_y_pred_subplot(
                 y_true=aligned_true_cell_prop,
                 y_pred=aligned_pred_cell_prop,
                 show_columns=aligned_true_cell_prop.columns.tolist(),
@@ -719,10 +720,13 @@ class VAEDeconPredictor:
                 show_legend=True,
                 collapse_columns=False,
             )
-            pd.DataFrame([metrics]).to_csv(
-                os.path.join(cell_prop_result_dir, "prediction_metrics.csv"),
-                index=False,
-            )
+            try:
+                pd.DataFrame([metrics]).to_csv(
+                    os.path.join(cell_prop_result_dir, "prediction_metrics.csv"),
+                    index=False,
+                )
+            finally:
+                plt.close(cell_prop_figure)
         elif self.config.evaluation.plot_cell_proportions and pred_cell_prop_fp:
             logger.info("Skipping cell proportion comparison plot because no true cell fractions are available.")
 
