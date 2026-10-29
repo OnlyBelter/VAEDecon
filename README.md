@@ -49,7 +49,7 @@ conda install -c conda-forge --strict-channel-priority "numpy>=1.26,<2.3" "scipy
 From the repository root:
 
 ```bash
-git clone git@github.com:OnlyBelter/VAEDecon.git
+git clone https://github.com/OnlyBelter/VAEDecon.git
 cd VAEDecon
 
 # PyTorch
