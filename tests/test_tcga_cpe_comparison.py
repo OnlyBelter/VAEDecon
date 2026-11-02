@@ -9,6 +9,9 @@ SCRIPT = (
     Path(__file__).resolve().parents[2]
     / "VAEDecon_example/applications/tcga_deconvolution/predict_tcga.py"
 )
+if not SCRIPT.is_file():
+    pytest.skip("TCGA comparison script is outside this checkout", allow_module_level=True)
+
 spec = importlib.util.spec_from_file_location("tcga_prediction", SCRIPT)
 tcga_prediction = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tcga_prediction)
