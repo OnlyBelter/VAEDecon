@@ -32,7 +32,7 @@ def train_command(args):
         config.training.naming_postfix = args.naming_postfix
 
     # 执行训练
-    model_dir = train_vaedecon(config=config)
+    model_dir = train_vaedecon(config=config, overwrite_outputs=args.overwrite_outputs)
     print(f"\n✅ Training completed! Model saved to: {model_dir}")
 
 
@@ -90,6 +90,8 @@ Examples:
     train_parser.add_argument('--batch-size', type=int, help='Batch size')
     train_parser.add_argument('--learning-rate', type=float, help='Learning rate')
     train_parser.add_argument('--naming-postfix', type=str, help='Naming postfix for output directory')
+    train_parser.add_argument('--overwrite-outputs', action='store_true',
+                              help='Preserve existing outputs in a backup and start training')
     train_parser.set_defaults(func=train_command)
 
     # Predict command

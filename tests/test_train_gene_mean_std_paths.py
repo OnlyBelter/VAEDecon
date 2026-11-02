@@ -711,6 +711,7 @@ def test_trainer_builds_reproducible_debug_overfit_subset_and_manifest(tmp_path:
 
     trainer = VAEDeconTrainer(config=config)
     dataset = _DummyDebugDataset(n_samples=20)
+    trainer.model_dir.mkdir(parents=True)
 
     train_subset, eval_subset = trainer._build_debug_overfit_subsets(dataset)
 

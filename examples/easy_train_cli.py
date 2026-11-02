@@ -19,6 +19,7 @@ from typing import Dict, Any
 from vaedecon import train_vaedecon, predict_vaedecon
 from vaedecon.configs.default_config import VAEDeconConfig, TestSetConfig
 from vaedecon.workflow.inference import _validate_input_file_path
+from vaedecon.workflow.train import _preserve_existing_outputs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +46,10 @@ if __name__ == "__main__":
     )
     parser.add_argument('-c', '--config', type=str, default='vaedecon_config_debug.yaml',
         help='Path to the configuration YAML file.')
+    parser.add_argument(
+        '--overwrite-outputs', action='store_true',
+        help='Preserve existing training outputs in a backup and start training.',
+    )
     parser.add_argument(
         '--skip-training',
         action='store_true',
@@ -147,7 +152,7 @@ if __name__ == "__main__":
 
         config = base_config
     else:
-        config = train_vaedecon(config_file=config_file)
+        config = train_vaedecon(config_file=config_file, overwrite_outputs=args.overwrite_outputs)
 
     # After training (or loading a saved model), reload the config that the
     # predictor will actually see. This matters because train_vaedecon may
@@ -246,6 +251,27 @@ if __name__ == "__main__":
 
     # Prediction
     final_test_results_dir = model_dir_path / "test_results"
+    config_save_path = model_dir_path / 'used_config.yaml'
+    staged = effective_config.training.staged_training
+    protected = [Path(config_file)]
+    if staged and staged.enabled:
+        protected.extend(Path(path) for path in staged.stage_init_checkpoints.values())
+    for test_cfg in configured_sets.values():
+        for field in ("test_set_file_path", "test_set_sample2cell_id_file_path", "sct_gep_file_path"):
+            path = getattr(test_cfg, field, None)
+            if path and str(path).strip():
+                protected.append(Path(path))
+    if not configured_sets:
+        for field in ("test_set_file_path", "test_set_sample2cell_id_file_path", "sct_gep_file_path"):
+            path = getattr(effective_config.data, field, None)
+            if path and str(path).strip():
+                protected.append(Path(path))
+    _preserve_existing_outputs(
+        [final_test_results_dir, config_save_path],
+        overwrite=args.overwrite_outputs,
+        protected=protected,
+    )
+    final_test_results_dir.mkdir(parents=True, exist_ok=False)
     results = predict_vaedecon(
         model_dir=model_dir_path,
         # data_file_path=config.data.test_set_file_path,
@@ -255,8 +281,7 @@ if __name__ == "__main__":
     )
 
     # Save configuration file used for training and prediction
-    config_save_path = model_dir_path / 'used_config.yaml'
-    effective_config.to_yaml(config_save_path)
+    effective_config.to_yaml(config_save_path, exclusive=True)
     logger.info(f"Configuration file saved to: {config_save_path}")
 
     # Self-define some parameters

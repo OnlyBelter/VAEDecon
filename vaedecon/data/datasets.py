@@ -1589,6 +1589,11 @@ class GEPDataset(Dataset):
 
     def _preprocess_and_cache(self) -> None:
         """Run preprocessing pipeline and save outputs to cache."""
+        if self.config.protect_existing_cache and any(self.processed_data_dir.iterdir()):
+            raise FileExistsError(
+                f"Processed training cache contains existing files: {self.processed_data_dir}. "
+                "No cache files were overwritten; restart training to review the collision."
+            )
         processed = self._run_preprocessor(
             temp_dir=self.processed_data_dir / "_tmp_preprocess",
             common_gene_list_path=self.cache.common_gene_list_path,

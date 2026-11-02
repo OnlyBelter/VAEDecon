@@ -84,6 +84,11 @@ no cache yet, VAEDecon preprocesses the inputs even when
 The cache key uses paths, not file contents. If you replace a file in place
 without changing its path, `force_reprocess: false` can reuse data cached from
 the previous contents. Set `force_reprocess: true` to rebuild that cache.
+Training asks for confirmation before replacing a forced or incomplete cache
+and preserves the old cache in a `previous_outputs_*` directory. A
+noninteractive run requires `--overwrite-outputs` or
+`overwrite_outputs=True`. If cache files appear after the initial check,
+training stops without replacing them.
 
 This setting only controls preprocessing; it does not force model training.
 If the configured model directory already contains a checkpoint,
@@ -294,6 +299,44 @@ The config validators enforce several requirements for staged training:
 When staged training is enabled, the predictor branch is not optional in
 practice. The staged workflow is built around explicit cell-proportion
 pretraining.
+
+### Reusing a stage checkpoint
+
+Checkpoint keys name the **target stage**, not the source stage. To skip
+predictor pretraining and initialize reconstruction from its predictor
+checkpoint, use:
+
+```yaml
+training:
+  staged_training:
+    enabled: true
+    run_stages: [reconstruction_training, joint_finetune]
+    stage_init_checkpoints:
+      reconstruction_training: /path/to/cell_prop_predictor_state_dict.pt
+```
+
+Keep the complete `stages` definitions in the configuration. If
+`run_stages` is omitted, all stages run; an unused checkpoint entry is an
+error. Checkpoint files are checked before training, and weights are checked
+for compatibility when loaded.
+
+### Protecting existing training outputs
+
+Choose a new `training.naming_postfix` to keep separate runs. If a run would
+replace existing stage or final-model outputs, the trainer lists the paths
+and asks for confirmation. Approved outputs are moved to a uniquely named
+`previous_outputs_<id>` directory under the run directory. A checkpoint
+that overlaps an output scheduled for replacement is always protected.
+
+Noninteractive runs fail instead of prompting. To authorize backup and
+replacement for one invocation, pass `--overwrite-outputs` to
+`vaedecon train` or `examples/easy_train_cli.py`, or pass
+`overwrite_outputs=True` to `train_vaedecon()` or `VAEDeconTrainer()`.
+This option does not force retraining when a completed final model is
+already being reused; use a fresh run name for a new training run.
+When `examples/easy_train_cli.py` predicts with a reused model, it separately
+checks existing `test_results` and `used_config.yaml` before replacing them.
+The same flag authorizes their backup for that invocation.
 
 ## Model section
 

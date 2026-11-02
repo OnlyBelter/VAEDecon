@@ -522,6 +522,16 @@ class StagedTrainingConfig(BaseModel):
             )
 
         configured_index = {stage_name: idx for idx, stage_name in enumerate(configured_stage_names)}
+        for target in self.stage_init_checkpoints:
+            index = configured_index[target]
+            predecessor = configured_stage_names[index - 1] if index else None
+            if target not in run_stage_names or predecessor is None or predecessor in run_stage_names:
+                raise ValueError(
+                    f"Unused stage_init_checkpoints entry for target stage {target!r}: "
+                    f"its predecessor {predecessor!r} is selected or the target cannot use "
+                    "an external checkpoint. Keys name the target stage. Explicitly set "
+                    "run_stages to skip the predecessor, or remove this entry."
+                )
         for stage_name in run_stage_names:
             stage_idx = configured_index[stage_name]
             if stage_idx == 0:
@@ -802,6 +812,7 @@ class GEPDatasetConfig(DataConfig):
     processed_data_dir: Optional[Union[str, Path]]
     persist_processed_data: bool = True
     force_reprocess: bool = False
+    protect_existing_cache: bool = False
 
     scaling_by_constant: Union[bool, float] = True
     scaling_factor: float = 20.0
@@ -1415,16 +1426,12 @@ class ModelConfig(BaseModelConfig):
     @field_validator('model_dir')
     @classmethod
     def validate_model_dir(cls, v: Optional[Path]) -> Optional[Path]:
-        """Validate and create model directory if needed."""
+        """Normalize the model directory without changing the filesystem."""
         if v is not None:
             if isinstance(v, str):
                 if v == '':
                     return None
                 v = Path(v)
-
-            # Create directory if it doesn't exist
-            if not v.exists():
-                v.mkdir(parents=True, exist_ok=True)
 
         return v
 
@@ -2013,7 +2020,7 @@ class VAEDeconConfig:
                 )
         return cls.from_dict(config_dict)
 
-    def to_yaml(self, yaml_path: str | Path):
+    def to_yaml(self, yaml_path: str | Path, *, exclusive: bool = False):
         """Saves the configuration to a YAML file"""
         import yaml
         config_dict = _to_plain_yaml_data(
@@ -2024,5 +2031,5 @@ class VAEDeconConfig:
                 "evaluation": self.evaluation,
             }
         )
-        with open(yaml_path, 'w', encoding='utf-8') as f:
+        with open(yaml_path, 'x' if exclusive else 'w', encoding='utf-8') as f:
             yaml.safe_dump(config_dict, f, default_flow_style=False, sort_keys=False)

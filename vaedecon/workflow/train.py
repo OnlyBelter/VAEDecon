@@ -5,8 +5,11 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import shutil
+import sys
 import traceback
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
@@ -18,7 +21,7 @@ from torch.utils.data import Subset, random_split
 from ..data import GEPDataset
 # from ..models.vae import VAEConfig
 from ..trainers import BaseTrainerL
-from ..utility import set_output_dir, log_message, set_fig_style
+from ..utility import log_message, set_fig_style
 from ..utility import load_or_compute_gene_mean_std, load_lightning_metrics, compute_gene_mean_std_from_pooled_sc_h5ad
 from ..utility import compute_training_sct_cross_sample_gene_var
 from ..utility import create_h5ad_dataset
@@ -34,6 +37,155 @@ from ..configs.default_config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_stage_checkpoints(config: VAEDeconConfig) -> list[Path]:
+    staged = config.training.staged_training
+    if not staged or not staged.enabled:
+        return []
+    staged.validate_stage_plan()
+    paths = []
+    for target, value in staged.stage_init_checkpoints.items():
+        path = Path(value).expanduser().resolve()
+        try:
+            if not path.is_file():
+                raise FileNotFoundError("not a regular file")
+            with path.open("rb"):
+                pass
+        except OSError as exc:
+            raise ValueError(
+                f"Checkpoint for target stage {target!r} is missing or unreadable: {path}"
+            ) from exc
+        paths.append(path)
+    return paths
+
+
+def _snapshot(path: Path) -> dict:
+    """Record directory entries without following directory symlinks."""
+    if not path.exists() and not path.is_symlink():
+        return {}
+    paths = [path]
+    if path.is_dir() and not path.is_symlink():
+        def raise_walk_error(error):
+            raise error
+
+        for root, dirs, files in os.walk(path, followlinks=False, onerror=raise_walk_error):
+            paths.extend(Path(root) / name for name in dirs + files)
+    result = {}
+    for item in paths:
+        st = item.lstat()
+        result[str(item)] = (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns)
+    return result
+
+
+def _training_cache_to_replace(config: VAEDeconConfig) -> Optional[Path]:
+    cache_root = Path(config.data.data_dir) / "processed_training_sets"
+    if not cache_root.is_dir():
+        return None
+    probe = object.__new__(_TRAINER_TYPE)
+    probe.config = config
+    file_paths, targets = probe._resolve_training_dataset_inputs()
+    cache = probe._resolve_processed_training_set_dir(
+        training_file_paths=file_paths, training_target_sets=targets
+    )
+    if not cache.exists() and not cache.is_symlink():
+        return None
+    if cache.is_symlink() or not cache.is_dir():
+        return cache
+    if not any(cache.iterdir()):
+        return None
+    if config.data.force_reprocess:
+        return cache
+    required = [cache / "data.npy", cache / "gene_list.txt", cache / "sample_ids.txt"]
+    if not all(path.is_file() for path in required):
+        return cache
+    try:
+        metadata_path = cache / "metadata.json"
+        metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+        if not isinstance(metadata, dict):
+            return cache
+        for name in ("gene_list.txt", "sample_ids.txt", "cell_types.txt"):
+            path = cache / name
+            if path.exists():
+                path.read_text()
+        for key in ("n_samples", "n_genes", "n_cell_types"):
+            if key in metadata:
+                int(metadata[key])
+    except (OSError, ValueError, TypeError, AttributeError):
+        return cache
+    return None
+
+
+def _preflight_training_outputs(
+    config: VAEDeconConfig, model_dir: Path, *, overwrite: bool = False,
+    config_file: Optional[str] = None,
+) -> None:
+    """Move approved prior outputs aside, preserving them as a backup."""
+    inputs = _validate_stage_checkpoints(config)
+    if config_file is not None:
+        inputs.append(Path(config_file).expanduser().resolve())
+    root = model_dir.parent
+    staged = config.training.staged_training
+    paths = [model_dir, root / "staged_training_summary.csv",
+             root / "training_error.txt", root / "test_results",
+             root / "debug_overfit_test_sets"]
+    if staged and staged.enabled:
+        selected = staged.run_stages or [stage.name for stage in staged.stages]
+        paths.extend(root / f"stage_{name}" for name in selected)
+    cache = _training_cache_to_replace(config)
+    if cache is not None:
+        paths.append(cache)
+    _preserve_existing_outputs(paths, overwrite=overwrite, protected=inputs)
+
+
+def _preserve_existing_outputs(
+    paths: list[Path], *, overwrite: bool = False, protected: Optional[list[Path]] = None
+) -> None:
+    """Confirm and back up existing outputs without touching protected inputs."""
+    existing = [path for path in paths if path.exists() or path.is_symlink()]
+    for path in paths:
+        resolved = path.resolve()
+        for input_path in protected or []:
+            checkpoint = input_path.resolve()
+            if checkpoint == resolved or resolved in checkpoint.parents:
+                raise ValueError(
+                    f"Input {checkpoint} overlaps a training output {path}; "
+                    "use a fresh output directory or preserve the input elsewhere."
+                )
+    if not existing:
+        return
+    snapshots = {path: _snapshot(path) for path in existing}
+    listing = "\n".join(f"  {path}" for path in existing)
+    message = (
+        "Existing outputs will be moved to a backup:\n"
+        f"{listing}\n"
+        "Use a fresh output directory or explicitly authorize this run."
+    )
+    logger.warning("%s", message)
+    if not overwrite:
+        if not sys.stdin.isatty():
+            raise FileExistsError(message + "\nNoninteractive run: pass --overwrite-outputs.")
+        try:
+            answer = input(message + "\nContinue? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in {"y", "yes"}:
+            raise FileExistsError("Training cancelled; existing outputs were not modified.\n" + message)
+    for path in paths:
+        if _snapshot(path) != snapshots.get(path, {}):
+            raise FileExistsError(f"Training output changed after confirmation: {path}")
+    backup_name = f"previous_outputs_{uuid.uuid4().hex}"
+    backups = {}
+    for path in existing:
+        parent = path.parent
+        backup = backups.get(parent)
+        if backup is None:
+            backup = parent / backup_name
+            backup.mkdir(parents=True, exist_ok=False)
+            backups[parent] = backup
+        shutil.move(str(path), str(backup / path.name))
+    for backup in backups.values():
+        logger.warning("Preserved previous outputs in %s", backup)
 
 
 def _resolve_path_for_fingerprint(path_like: Optional[str | Path]) -> Optional[str]:
@@ -56,7 +208,7 @@ def _cuda_usable() -> bool:
 class VAEDeconTrainer:
     """VAEDecon Trainer"""
 
-    def __init__(self, config: Optional[VAEDeconConfig] = None):
+    def __init__(self, config: Optional[VAEDeconConfig] = None, *, overwrite_outputs: bool = False):
         """
         Initializes the trainer
 
@@ -67,10 +219,13 @@ class VAEDeconTrainer:
         self.model_dir: Path | str = ''
         # self._vae_config: Optional[ModelConfig] = None  # cached, built once in _prepare_data
         self._processed_training_set_dir: Optional[Path] = None  # exposed for cleanup after training
+        self._overwrite_outputs = overwrite_outputs
+        self._outputs_preflighted = False
+        self._final_output_snapshot = None
 
         self._setup_logging()
         self._setup_device()
-        self._setup_directories()  # Set model_dir and result_dir, and update config.model paths
+        self._setup_directories()
         set_fig_style(font_family='Arial', font_size=8)
 
     def _setup_logging(self):
@@ -101,23 +256,16 @@ class VAEDeconTrainer:
         logger.info(f"Using device: {self.device}")
 
     def _setup_directories(self):
-        """Create and register output directories"""
+        """Resolve output directories without creating or modifying them."""
         model_dir_cfg = self.config.model.model_dir
         model_dir_unset = not model_dir_cfg or str(model_dir_cfg).strip() == ''
         if model_dir_unset:
-            self.result_dir = Path(
-                set_output_dir(
-                    output_dir=self.config.training.output_dir,
-                    naming_postfix=self.config.training.naming_postfix
-                )
-            )
+            self.result_dir = Path(self.config.training.output_dir) / self.config.training.naming_postfix
             self.model_dir = self.result_dir / 'final_model'
             self.config.model.model_dir = self.model_dir
         else:
             self.model_dir = Path(model_dir_cfg)
             self.result_dir = self.model_dir.parent
-
-        self.model_dir.mkdir(parents=True, exist_ok=True)
 
         # Update file paths in model config
         self.config.model.input_gene_list_fp = self.model_dir / 'input_gene_list.txt'
@@ -838,6 +986,7 @@ class VAEDeconTrainer:
             scaling_by_constant=self.config.data.scaling_by_constant,
             remove_low_var_genes=self.config.data.remove_low_var_genes,
             force_reprocess=self.config.data.force_reprocess,
+            protect_existing_cache=True,
             max_parallel_source_file_loads=self.config.data.max_parallel_source_file_loads,
             use_memmap=self.config.data.use_memmap,
             chunk_size=self.config.data.chunk_size,
@@ -1159,20 +1308,16 @@ class VAEDeconTrainer:
         base_training_config: TrainingConfig,
         stage_summary_rows: list[dict],
     ) -> None:
+        if self._final_output_snapshot is not None:
+            if _snapshot(self.model_dir) != self._final_output_snapshot:
+                raise FileExistsError(
+                    f"Final model output changed during training: {self.model_dir}. "
+                    "No existing files were removed."
+                )
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        removable_patterns = ["*.ckpt", "metrics.csv", "adaptive_aux_loss_schedule_trace.csv", "debug_overfit_predictions.pt"]
-        for pattern in removable_patterns:
-            for path in self.model_dir.glob(pattern):
-                path.unlink()
-        for path in [
-            self.model_dir / "checkpoint_paths.json",
-            self.model_dir / "training_logs",
-            self.model_dir / "test_results",
-        ]:
-            if path.is_dir():
-                shutil.rmtree(path, ignore_errors=True)
-            elif path.exists():
-                path.unlink()
+        test_results = self.model_dir / "test_results"
+        if test_results.exists() or test_results.is_symlink():
+            raise FileExistsError(f"Unexpected existing prediction output: {test_results}")
 
         skip_names = {
             "model_config.json",
@@ -1186,13 +1331,20 @@ class VAEDeconTrainer:
                 continue
             destination = self.model_dir / item.name
             if item.is_dir():
-                shutil.copytree(item, destination, dirs_exist_ok=True)
+                shutil.copytree(item, destination)
             else:
-                shutil.copy2(item, destination)
+                with item.open("rb") as source, destination.open("xb") as target:
+                    shutil.copyfileobj(source, target)
+                shutil.copystat(item, destination)
 
+        summary_path = self.result_dir / "staged_training_summary.csv"
+        if summary_path.exists() or summary_path.is_symlink():
+            raise FileExistsError(f"Unexpected training summary appeared during training: {summary_path}")
         summary_df = pd.DataFrame(stage_summary_rows)
-        summary_df.to_csv(self.result_dir / "staged_training_summary.csv", index=False)
-        summary_df.to_csv(self.model_dir / "staged_training_summary.csv", index=False)
+        with summary_path.open("x", encoding="utf-8") as output:
+            summary_df.to_csv(output, index=False)
+        with (self.model_dir / "staged_training_summary.csv").open("x", encoding="utf-8") as output:
+            summary_df.to_csv(output, index=False)
 
         restored_model_config = self.config.model.model_copy(deep=True)
         base_model = _unwrap_stage_model(model)
@@ -1270,9 +1422,7 @@ class VAEDeconTrainer:
                 stage_cfg=stage_cfg,
             )
             stage_dir = self.result_dir / f"stage_{stage_cfg.name}"
-            if stage_dir.exists():
-                shutil.rmtree(stage_dir)
-            stage_dir.mkdir(parents=True, exist_ok=True)
+            stage_dir.mkdir(parents=True, exist_ok=False)
 
             logger.info(
                 "Starting stage %s/%s: %s (lr=%.3e, monitor=%s)",
@@ -1355,7 +1505,9 @@ class VAEDeconTrainer:
         )
         redundant_root_test_results_dir = self.result_dir / "test_results"
         if redundant_root_test_results_dir.exists():
-            shutil.rmtree(redundant_root_test_results_dir, ignore_errors=True)
+            raise FileExistsError(
+                f"Unexpected test results appeared during training: {redundant_root_test_results_dir}"
+            )
 
     def train(self) -> VAEDeconConfig:
         """
@@ -1364,6 +1516,10 @@ class VAEDeconTrainer:
         Return:
             VAEDecon configuration (maybe updated during training)
         """
+        if not self._outputs_preflighted:
+            _preflight_training_outputs(self.config, Path(self.model_dir), overwrite=self._overwrite_outputs)
+            self._outputs_preflighted = True
+            Path(self.model_dir).mkdir(parents=True, exist_ok=False)
         dataset, train_set, val_set = self._prepare_data()  # self.config.model is updated
         model = self._create_model(model_config=self.config.model)
         trainer_config = self._build_trainer_config()
@@ -1372,6 +1528,7 @@ class VAEDeconTrainer:
         logger.info("Starting training...")
         staged_training_cfg = trainer_config.staged_training
         if staged_training_cfg is not None and staged_training_cfg.enabled:
+            self._final_output_snapshot = _snapshot(Path(self.model_dir))
             self._train_with_staged_training(
                 model=model,
                 train_set=train_set,
@@ -1400,6 +1557,9 @@ class VAEDeconTrainer:
         return self.config
 
 
+_TRAINER_TYPE = VAEDeconTrainer
+
+
 def _save_config(
     config: VAEDeconConfig,
     model_dir: Path,
@@ -1421,15 +1581,19 @@ def _save_config(
                 model_dir / "config.yaml",
                 model_dir / f"config_{timestamp}.yaml",
             ]:
-                shutil.copy2(src, dst)
+                with src.open("rb") as source, dst.open("xb") as target:
+                    shutil.copyfileobj(source, target)
+                shutil.copystat(src, dst)
                 logger.info(f"Saved config to {dst}")
         else:
             for dst in [
                 model_dir / "config.yaml",
                 model_dir / f"config_{timestamp}.yaml",
             ]:
-                config.to_yaml(dst)
+                config.to_yaml(dst, exclusive=True)
                 logger.info(f"Saved config to {dst}")
+    except FileExistsError:
+        raise
     except Exception as exc:
         logger.warning(f"Could not save config: {exc}")
 
@@ -1455,7 +1619,8 @@ def _save_training_error_report(
     for path in candidate_paths:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(error_text, encoding="utf-8")
+            with path.open("x", encoding="utf-8") as report:
+                report.write(error_text)
             logger.error("Saved training error report to %s", path)
         except Exception as save_exc:
             logger.warning("Could not save training error report to %s: %s", path, save_exc)
@@ -1463,7 +1628,9 @@ def _save_training_error_report(
 
 def train_vaedecon(
         config: Optional[VAEDeconConfig] = None,
-        config_file: Optional[str] = None
+        config_file: Optional[str] = None,
+        *,
+        overwrite_outputs: bool = False,
 ) -> Optional[VAEDeconConfig]:
     """
     Wrapper function to train VAEDecon model.
@@ -1513,6 +1680,8 @@ def train_vaedecon(
         model_dir = Path(config.training.output_dir) / config.training.naming_postfix / 'final_model'
         config.model.model_dir = model_dir
 
+    _validate_stage_checkpoints(config)
+
     # Check for existing checkpoint BEFORE creating directories
     if model_dir.exists():
         ckpt_files = [f for f in model_dir.iterdir() if f.suffix == '.ckpt']
@@ -1555,14 +1724,19 @@ def train_vaedecon(
             config.model.cell_type_fp = model_dir / 'cell_type_list.txt'
             config.model.input_gene_list_fp = model_dir / 'input_gene_list.txt'
             return config
+    _preflight_training_outputs(
+        config, model_dir, overwrite=overwrite_outputs, config_file=config_file
+    )
+
     # Create model directory
-    model_dir.mkdir(parents=True, exist_ok=True)
+    model_dir.mkdir(parents=True, exist_ok=False)
 
     # ── Save config ───────────────────────────────────────────────────────
     _save_config(config, model_dir, config_file)
 
     # Train model
     trainer = VAEDeconTrainer(config)
+    trainer._outputs_preflighted = True
     try:
         trained_config = trainer.train()
     except Exception as exc:

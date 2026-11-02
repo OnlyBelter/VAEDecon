@@ -5,8 +5,13 @@ import pytest
 import torch
 
 from vaedecon.configs import VAEDeconConfig
+from vaedecon.configs.default_config import GEPDatasetConfig
+from vaedecon.data import GEPDataset
 import vaedecon.workflow.inference as inference_workflow
-from vaedecon.workflow.train import VAEDeconTrainer
+from vaedecon.workflow.train import (
+    VAEDeconTrainer, _preflight_training_outputs, _preserve_existing_outputs,
+    train_vaedecon,
+)
 
 
 def _base_staged_training_dict() -> dict:
@@ -119,6 +124,284 @@ def test_staged_training_config_accepts_selected_stage_with_init_checkpoint(tmp_
 
     assert loaded.training.staged_training is not None
     assert loaded.training.staged_training.run_stages == ["reconstruction_training"]
+
+
+@pytest.mark.parametrize("selection", [None, [], ["cell_prop_predictor_pretrain", "reconstruction_training"]])
+def test_staged_training_rejects_unused_checkpoint(tmp_path, selection):
+    config = _base_staged_config_dict(tmp_path)
+    stage = config["training"]["staged_training"]
+    if selection is not None:
+        stage["run_stages"] = selection
+    stage["stage_init_checkpoints"] = {"reconstruction_training": str(tmp_path / "predictor.pt")}
+    with pytest.raises(ValueError, match="Unused stage_init_checkpoints.*target stage"):
+        VAEDeconConfig.from_dict(config)
+
+
+def test_staged_training_rejects_checkpoint_for_unselected_target(tmp_path):
+    config = _base_staged_config_dict(tmp_path)
+    stage = config["training"]["staged_training"]
+    stage["run_stages"] = ["cell_prop_predictor_pretrain"]
+    stage["stage_init_checkpoints"] = {"reconstruction_training": str(tmp_path / "predictor.pt")}
+    with pytest.raises(ValueError, match="Unused stage_init_checkpoints"):
+        VAEDeconConfig.from_dict(config)
+
+
+def _selected_reconstruction_config(tmp_path, checkpoint):
+    config = _base_staged_config_dict(tmp_path)
+    stage = config["training"]["staged_training"]
+    stage["run_stages"] = ["reconstruction_training"]
+    stage["stage_init_checkpoints"] = {"reconstruction_training": str(checkpoint)}
+    return VAEDeconConfig.from_dict(config)
+
+
+def test_missing_checkpoint_fails_before_reuse_or_output_creation(tmp_path):
+    model_dir = tmp_path / "staged-training-test" / "final_model"
+    model_dir.mkdir(parents=True)
+    (model_dir / "best.ckpt").write_text("old")
+    config = _selected_reconstruction_config(tmp_path, tmp_path / "missing.pt")
+    with pytest.raises(ValueError, match="reconstruction_training.*missing or unreadable"):
+        train_vaedecon(config=config)
+    assert (model_dir / "best.ckpt").read_text() == "old"
+    assert list(model_dir.iterdir()) == [model_dir / "best.ckpt"]
+
+
+def test_noninteractive_preflight_preserves_existing_outputs(tmp_path, monkeypatch):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    root = tmp_path / "staged-training-test"
+    stage_dir = root / "stage_cell_prop_predictor_pretrain"
+    stage_dir.mkdir(parents=True)
+    (stage_dir / "model.pt").write_text("old")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(FileExistsError, match="Noninteractive"):
+        train_vaedecon(config=config)
+    assert (stage_dir / "model.pt").read_text() == "old"
+    assert not (root / "final_model").exists()
+
+
+def test_approved_outputs_are_preserved_in_backup(tmp_path):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    root = tmp_path / "staged-training-test"
+    stage = root / "stage_cell_prop_predictor_pretrain"
+    stage.mkdir(parents=True)
+    (stage / "model.pt").write_text("model")
+    (root / "training_error.txt").write_text("error")
+    _preflight_training_outputs(config, root / "final_model", overwrite=True)
+    backups = list(root.glob("previous_outputs_*"))
+    assert len(backups) == 1
+    assert (backups[0] / stage.name / "model.pt").read_text() == "model"
+    assert (backups[0] / "training_error.txt").read_text() == "error"
+    assert not stage.exists()
+
+
+def test_unselected_stage_checkpoint_is_preserved(tmp_path):
+    root = tmp_path / "staged-training-test"
+    checkpoint = root / "stage_cell_prop_predictor_pretrain" / "predictor.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text("checkpoint")
+    config = _selected_reconstruction_config(tmp_path, checkpoint)
+    _preflight_training_outputs(config, root / "final_model")
+    assert checkpoint.read_text() == "checkpoint"
+
+
+def test_checkpoint_in_selected_output_rejected_even_when_authorized(tmp_path):
+    root = tmp_path / "staged-training-test"
+    checkpoint = root / "stage_reconstruction_training" / "predictor.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text("checkpoint")
+    config = _selected_reconstruction_config(tmp_path, checkpoint)
+    with pytest.raises(ValueError, match="overlaps a training output"):
+        _preflight_training_outputs(config, root / "final_model", overwrite=True)
+    assert checkpoint.read_text() == "checkpoint"
+
+
+@pytest.mark.parametrize("answer", ["n", ""])
+def test_refused_output_confirmation_preserves_files(tmp_path, monkeypatch, answer):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    root = tmp_path / "staged-training-test"
+    final = root / "final_model"
+    final.mkdir(parents=True)
+    (final / "config.yaml").write_text("original")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: answer)
+    with pytest.raises(FileExistsError, match="cancelled"):
+        _preflight_training_outputs(config, final)
+    assert (final / "config.yaml").read_text() == "original"
+
+
+def test_confirmation_rechecks_files_before_backup(tmp_path, monkeypatch):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    root = tmp_path / "staged-training-test"
+    final = root / "final_model"
+    final.mkdir(parents=True)
+    (final / "old.txt").write_text("old")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    def approve_after_change(prompt):
+        (final / "new.txt").write_text("new")
+        return "yes"
+
+    monkeypatch.setattr("builtins.input", approve_after_change)
+    with pytest.raises(FileExistsError, match="changed after confirmation"):
+        _preflight_training_outputs(config, final)
+    assert (final / "old.txt").read_text() == "old"
+    assert (final / "new.txt").read_text() == "new"
+
+
+def test_interactive_approval_preserves_outputs(tmp_path, monkeypatch):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    root = tmp_path / "staged-training-test"
+    final = root / "final_model"
+    final.mkdir(parents=True)
+    (final / "model.pt").write_text("old")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "yes")
+    _preflight_training_outputs(config, final)
+    backup = next(root.glob("previous_outputs_*"))
+    assert (backup / "final_model" / "model.pt").read_text() == "old"
+
+
+def test_confirmation_eof_preserves_outputs(tmp_path, monkeypatch):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    root = tmp_path / "staged-training-test"
+    final = root / "final_model"
+    final.mkdir(parents=True)
+    (final / "model.pt").write_text("old")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    def close_input(prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", close_input)
+    with pytest.raises(FileExistsError, match="cancelled"):
+        _preflight_training_outputs(config, final)
+    assert (final / "model.pt").read_text() == "old"
+
+
+def test_symlinked_checkpoint_inside_selected_stage_is_protected(tmp_path):
+    root = tmp_path / "staged-training-test"
+    checkpoint = root / "stage_reconstruction_training" / "predictor.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text("checkpoint")
+    link = tmp_path / "checkpoint-link.pt"
+    link.symlink_to(checkpoint)
+    config = _selected_reconstruction_config(tmp_path, link)
+    with pytest.raises(ValueError, match="overlaps a training output"):
+        _preflight_training_outputs(config, root / "final_model", overwrite=True)
+    assert checkpoint.read_text() == "checkpoint"
+
+
+def test_direct_trainer_fails_before_preprocessing(tmp_path, monkeypatch):
+    config = _selected_reconstruction_config(tmp_path, tmp_path / "missing.pt")
+    trainer = VAEDeconTrainer(config)
+    monkeypatch.setattr(trainer, "_prepare_data", lambda: pytest.fail("preprocessing ran"))
+    with pytest.raises(ValueError, match="missing or unreadable"):
+        trainer.train()
+    assert not Path(trainer.model_dir).exists()
+
+
+def test_final_promotion_rejects_new_files(tmp_path):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    trainer = VAEDeconTrainer(config)
+    trainer.model_dir.mkdir(parents=True)
+    from vaedecon.workflow.train import _snapshot
+    trainer._final_output_snapshot = _snapshot(trainer.model_dir)
+    (trainer.model_dir / "unexpected.txt").write_text("keep")
+    with pytest.raises(FileExistsError, match="changed during training"):
+        trainer._promote_stage_outputs_to_final_model(
+            final_stage_dir=tmp_path,
+            model=DummySaveModel(config.model),
+            base_training_config=config.training,
+            stage_summary_rows=[],
+        )
+    assert (trainer.model_dir / "unexpected.txt").read_text() == "keep"
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_incomplete_or_forced_cache_is_backed_up(tmp_path, force, monkeypatch):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    config.data.data_dir = tmp_path
+    config.data.force_reprocess = force
+    trainer = VAEDeconTrainer(config)
+    file_paths, targets = trainer._resolve_training_dataset_inputs()
+    cache = trainer._resolve_processed_training_set_dir(
+        training_file_paths=file_paths, training_target_sets=targets
+    )
+    cache.mkdir(parents=True)
+    (cache / "sentinel.txt").write_text("preserve")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(FileExistsError, match="Noninteractive"):
+        _preflight_training_outputs(config, Path(trainer.model_dir))
+    assert (cache / "sentinel.txt").read_text() == "preserve"
+    _preflight_training_outputs(config, Path(trainer.model_dir), overwrite=True)
+    backup = next(cache.parent.glob("previous_outputs_*"))
+    assert (backup / cache.name / "sentinel.txt").read_text() == "preserve"
+
+
+def test_cache_rebuild_guard_preserves_late_files(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "late.txt").write_text("preserve")
+    config = GEPDatasetConfig(
+        file_paths=[], processed_data_dir=cache, force_reprocess=True,
+        protect_existing_cache=True,
+    )
+    with pytest.raises(FileExistsError, match="existing files"):
+        GEPDataset(config)
+    assert (cache / "late.txt").read_text() == "preserve"
+
+
+@pytest.mark.parametrize("metadata,should_replace", [("{}", False), ("[]", True)])
+def test_cache_preflight_distinguishes_reusable_metadata(tmp_path, metadata, should_replace):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    config.data.data_dir = tmp_path
+    trainer = VAEDeconTrainer(config)
+    file_paths, targets = trainer._resolve_training_dataset_inputs()
+    cache = trainer._resolve_processed_training_set_dir(
+        training_file_paths=file_paths, training_target_sets=targets
+    )
+    cache.mkdir(parents=True)
+    for name in ("data.npy", "gene_list.txt", "sample_ids.txt"):
+        (cache / name).write_text("data")
+    (cache / "metadata.json").write_text(metadata)
+    from vaedecon.workflow.train import _training_cache_to_replace
+    assert (_training_cache_to_replace(config) == cache) is should_replace
+
+
+def test_input_configuration_inside_output_is_protected(tmp_path):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    final = tmp_path / "staged-training-test" / "final_model"
+    final.mkdir(parents=True)
+    source = final / "input.yaml"
+    source.write_text("original")
+    with pytest.raises(ValueError, match="overlaps a training output"):
+        _preflight_training_outputs(config, final, overwrite=True, config_file=str(source))
+    assert source.read_text() == "original"
+
+
+def test_config_snapshot_does_not_overwrite_late_file(tmp_path):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    path = tmp_path / "config.yaml"
+    path.write_text("preserve")
+    from vaedecon.workflow.train import _save_config
+    with pytest.raises(FileExistsError):
+        _save_config(config, tmp_path, None)
+    assert path.read_text() == "preserve"
+
+
+def test_prediction_outputs_are_backed_up_or_preserved(tmp_path, monkeypatch):
+    result = tmp_path / "test_results"
+    result.mkdir()
+    (result / "prediction.csv").write_text("old")
+    used_config = tmp_path / "used_config.yaml"
+    used_config.write_text("old config")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(FileExistsError, match="Noninteractive"):
+        _preserve_existing_outputs([result, used_config])
+    assert (result / "prediction.csv").read_text() == "old"
+    _preserve_existing_outputs([result, used_config], overwrite=True)
+    backup = next(tmp_path.glob("previous_outputs_*"))
+    assert (backup / "test_results" / "prediction.csv").read_text() == "old"
+    assert (backup / "used_config.yaml").read_text() == "old config"
 
 
 def test_staged_training_rejects_missing_init_checkpoint_for_skipped_predecessor(tmp_path: Path):
@@ -493,9 +776,6 @@ def test_promote_stage_outputs_skips_test_results_in_final_model(tmp_path: Path)
     (stage_dir / "test_results" / "stage_result.txt").write_text("stage3", encoding="utf-8")
 
     trainer.model_dir.mkdir(parents=True, exist_ok=True)
-    (trainer.model_dir / "test_results").mkdir(exist_ok=True)
-    (trainer.model_dir / "test_results" / "stale.txt").write_text("old", encoding="utf-8")
-
     model = DummySaveModel(model_config=config.model.model_copy(deep=True))
     trainer._promote_stage_outputs_to_final_model(
         final_stage_dir=stage_dir,
@@ -513,3 +793,19 @@ def test_promote_stage_outputs_skips_test_results_in_final_model(tmp_path: Path)
     assert (trainer.model_dir / "losses.csv").exists()
     assert not (trainer.model_dir / "test_results").exists()
     assert (trainer.model_dir / "saved_marker.txt").exists()
+
+
+def test_promotion_preserves_existing_test_results(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    trainer = VAEDeconTrainer(config=config)
+    results = trainer.model_dir / "test_results"
+    results.mkdir(parents=True)
+    (results / "stale.txt").write_text("old")
+    with pytest.raises(FileExistsError, match="prediction output"):
+        trainer._promote_stage_outputs_to_final_model(
+            final_stage_dir=tmp_path,
+            model=DummySaveModel(config.model),
+            base_training_config=config.training,
+            stage_summary_rows=[],
+        )
+    assert (results / "stale.txt").read_text() == "old"

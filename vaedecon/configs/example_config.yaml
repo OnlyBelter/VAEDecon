@@ -75,7 +75,11 @@ training:
   #     - cell_prop_predictor_pretrain
   #     - reconstruction_training
   #     - joint_finetune
-  #   stage_init_checkpoints: {}
+  #   stage_init_checkpoints: {}  # Keys name the target stage, not the source stage.
+  #   # To reuse a predictor checkpoint, select reconstruction_training and
+  #   # joint_finetune above, and set:
+  #   # stage_init_checkpoints:
+  #   #   reconstruction_training: '/path/to/cell_prop_predictor_state_dict.pt'
   #   stages:
   #     - name: cell_prop_predictor_pretrain
   #       max_epochs: 300

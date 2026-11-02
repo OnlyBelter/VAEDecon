@@ -4,6 +4,18 @@ This changelog records notable user-facing changes in `VAEDecon`. It focuses
 on behavior, configuration, and workflow updates that affect training,
 inference, and evaluation.
 
+## November 2, 2026
+
+### Training output safety
+
+- Reject unused stage initialization checkpoints during configuration
+  validation and check supplied checkpoint files before training or reuse.
+- Ask before replacing existing training outputs; unattended runs require
+  explicit authorization. Approved outputs are preserved in a backup.
+- Protect supplied checkpoints from overlapping output replacement.
+- Preserve forced or incomplete training caches and protect existing
+  prediction outputs in `examples/easy_train_cli.py`.
+
 ## August 24, 2026
 
 This update adds a new anti-collapse auxiliary loss and the supporting
