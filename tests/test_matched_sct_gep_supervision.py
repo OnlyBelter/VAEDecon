@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pytest
 import torch
 
 import vaedecon.data.datasets as datasets_module
@@ -12,6 +13,7 @@ from vaedecon.data.datasets import GEPDataset
 from vaedecon.data.datasets import GEPPreprocessor
 from vaedecon.data.datasets import build_matched_sct_gep_training_targets
 from vaedecon.data.datasets import _write_true_sct_gep_targets_into
+from vaedecon.data.datasets import _write_true_sct_gep_targets_in_sample_blocks
 from vaedecon.models.vae.vae_model import VAE, to_log_space
 from vaedecon.utility import non_log2log_cpm
 from vaedecon.utility.read_file import ReadExp
@@ -101,6 +103,56 @@ def test_write_true_sct_gep_targets_into_uses_preindexed_rows_and_reports_count(
     np.testing.assert_allclose(true_sct_gep_dest[0, :, 0], np.array([1.0, 2.0], dtype=np.float32))
     np.testing.assert_allclose(true_sct_gep_dest[0, :, 1], np.array([3.0, 4.0], dtype=np.float32))
     np.testing.assert_allclose(true_sct_gep_dest[1, :, 0], np.array([5.0, 6.0], dtype=np.float32))
+
+
+def test_write_true_sct_gep_targets_in_sample_blocks_matches_row_writer(monkeypatch):
+    aligned_sct_geps_df = pd.DataFrame(
+        [[1.0, 2.0, 3.0], [3.0, 4.0, 5.0], [5.0, 6.0, 7.0]],
+        index=["cell_a", "cell_b", "cell_c"],
+        columns=["gene_a", "gene_b", "gene_c"],
+        dtype=np.float32,
+    )
+    filtered_mapping_df = pd.DataFrame(
+        {
+            "cell_type": ["CT1", "CT2", "CT1", "CT2", "unknown"],
+            "selected_cell_id": ["cell_a", "cell_b", "cell_c", "cell_a", "cell_b"],
+        },
+        index=["sample_1", "sample_1", "sample_3", "sample_4", "sample_4"],
+    )
+    raw_bulk_sample_ids = ["sample_1", "sample_2", "sample_3", "sample_4"]
+    row_positions = np.asarray([2, 0, 3, 1], dtype=np.int64)
+    expected_targets = np.zeros((4, 3, 2), dtype=np.float32)
+    expected_mask = np.zeros((4, 2), dtype=bool)
+    actual_targets = np.zeros_like(expected_targets)
+    actual_mask = np.zeros_like(expected_mask)
+    progress_updates: list[int] = []
+
+    _write_true_sct_gep_targets_into(
+        raw_bulk_sample_ids=raw_bulk_sample_ids,
+        row_positions=row_positions,
+        cell_types=["CT1", "CT2"],
+        filtered_mapping_df=filtered_mapping_df,
+        aligned_sct_geps_df=aligned_sct_geps_df,
+        true_sct_gep_dest=expected_targets,
+        true_sct_gep_present_mask_dest=expected_mask,
+    )
+    monkeypatch.setattr(datasets_module, "_SCT_TARGET_MAX_BLOCK_BYTES", 48)
+    written = _write_true_sct_gep_targets_in_sample_blocks(
+        raw_bulk_sample_ids=raw_bulk_sample_ids,
+        row_positions=row_positions,
+        cell_types=["CT1", "CT2"],
+        filtered_mapping_df=filtered_mapping_df,
+        aligned_sct_geps_df=aligned_sct_geps_df,
+        aligned_sct_values=aligned_sct_geps_df.to_numpy(dtype=np.float32, copy=False),
+        true_sct_gep_dest=actual_targets,
+        true_sct_gep_present_mask_dest=actual_mask,
+        progress_callback=progress_updates.append,
+    )
+
+    assert written == 4
+    assert sum(progress_updates) == len(filtered_mapping_df)
+    np.testing.assert_array_equal(actual_targets, expected_targets)
+    np.testing.assert_array_equal(actual_mask, expected_mask)
 
 
 def test_gep_preprocessor_uses_direct_path_for_small_source_counts(monkeypatch):
@@ -838,7 +890,22 @@ def test_gepdataset_builds_matched_targets_without_align_with_gene_list(tmp_path
     assert dataset.true_sct_gep_present_mask.tolist() == [[True, True], [True, False]]
 
 
-def test_gepdataset_scales_true_sct_gep_in_place_for_npy_cache(tmp_path: Path):
+@pytest.mark.parametrize("large_path_threshold", [500_000, 1])
+@pytest.mark.parametrize("cache_compress", [False, True])
+def test_gepdataset_scales_true_sct_gep_targets_for_cache(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    caplog,
+    large_path_threshold: int,
+    cache_compress: bool,
+):
+    monkeypatch.setattr(
+        datasets_module,
+        "_LARGE_SCT_TARGET_SAMPLE_THRESHOLD",
+        large_path_threshold,
+    )
+    use_large_path = large_path_threshold < 2
     genes = ["gene_a", "gene_b"]
     bulk_path = tmp_path / "bulk.h5ad"
     ref_sct_path = tmp_path / "ref_sct.h5ad"
@@ -880,7 +947,7 @@ def test_gepdataset_scales_true_sct_gep_in_place_for_npy_cache(tmp_path: Path):
             force_reprocess=True,
             scaling_by_constant=True,
             scaling_factor=2.0,
-            cache_compress=False,
+            cache_compress=cache_compress,
             training_target_sets={
                 "Train_set1": {
                     "training_set_file_path": bulk_path,
@@ -901,6 +968,19 @@ def test_gepdataset_scales_true_sct_gep_in_place_for_npy_cache(tmp_path: Path):
     )["true_sct_gep"]
 
     np.testing.assert_allclose(dataset.true_sct_gep, aligned / 2.0, rtol=1e-6, atol=1e-6)
+    if use_large_path:
+        query_cache = pd.read_pickle(Path(str(ref_sct_path) + ".query_cache.pkl"))
+        np.testing.assert_array_equal(
+            query_cache["df"].loc["cell_a"].to_numpy(dtype=np.float32),
+            np.array([1.0, 2.0], dtype=np.float32),
+        )
+        captured = capsys.readouterr()
+        assert "scale_sctGEP_reference" in captured.err
+        assert "matched_sct_gep 1/1" in captured.err
+        assert any(
+            "mapping rows (100.0%)" in record.getMessage()
+            for record in caplog.records
+        )
 
 
 def test_matched_sct_gep_loss_masks_low_prop_cell_types():

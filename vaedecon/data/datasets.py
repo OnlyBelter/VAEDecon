@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import gc
 import json
 import shutil
+import time
 import warnings
 from collections import OrderedDict
 from pathlib import Path
@@ -29,6 +30,9 @@ logger.setLevel(logging.INFO)
 
 _DEFAULT_MAX_PARALLEL_SOURCE_FILE_LOADS = 2
 _LARGE_DATASET_DIRECT_PREPROCESSING_THRESHOLD = 12
+_LARGE_SCT_TARGET_SAMPLE_THRESHOLD = 500_000
+_SCT_TARGET_MAX_BLOCK_BYTES = 32 * 1024 * 1024
+_SCT_TARGET_PROGRESS_LOG_INTERVAL_SECONDS = 60.0
 
 
 class DatasetOutput(OrderedDict):
@@ -403,6 +407,170 @@ def _write_true_sct_gep_targets_into(
         progress_bar.update(batched_progress)
 
     return len(write_records)
+
+
+def _scale_sct_gep_values_in_place(
+    sct_values: np.ndarray,
+    scaling_factor: float,
+    progress_desc: str,
+) -> np.ndarray:
+    """Scale aligned reference profiles in bounded, in-memory row chunks."""
+    if sct_values.size == 0 or scaling_factor == 1.0:
+        return sct_values
+
+    if not sct_values.flags.writeable:
+        sct_values = sct_values.copy()
+
+    n_cells, n_genes = sct_values.shape
+    row_bytes = max(1, n_genes * sct_values.dtype.itemsize)
+    chunk_rows = max(1, min(4096, _SCT_TARGET_MAX_BLOCK_BYTES // row_bytes))
+    started_at = time.monotonic()
+    last_log_at = started_at
+    scaled_cells = 0
+
+    with tqdm(
+        total=n_cells,
+        desc=progress_desc,
+        unit="cell",
+        leave=True,
+        mininterval=10.0,
+    ) as progress_bar:
+        for start in range(0, n_cells, chunk_rows):
+            end = min(start + chunk_rows, n_cells)
+            values_chunk = sct_values[start:end]
+            np.divide(values_chunk, scaling_factor, out=values_chunk)
+            scaled_cells += end - start
+            progress_bar.update(end - start)
+
+            now = time.monotonic()
+            if (
+                now - last_log_at >= _SCT_TARGET_PROGRESS_LOG_INTERVAL_SECONDS
+                or scaled_cells == n_cells
+            ):
+                elapsed = now - started_at
+                log_message(
+                    f"{progress_desc}: scaled {scaled_cells:,}/{n_cells:,} "
+                    f"reference cells in {elapsed:.1f}s"
+                )
+                last_log_at = now
+
+    return sct_values
+
+
+def _write_true_sct_gep_targets_in_sample_blocks(
+    raw_bulk_sample_ids: list[str],
+    row_positions: np.ndarray,
+    cell_types: list[str],
+    filtered_mapping_df: pd.DataFrame,
+    aligned_sct_geps_df: pd.DataFrame,
+    aligned_sct_values: np.ndarray,
+    true_sct_gep_dest: np.ndarray,
+    true_sct_gep_present_mask_dest: np.ndarray,
+    progress_callback: Optional[Any] = None,
+) -> int:
+    """Write matched targets in bounded sample blocks and contiguous array slices."""
+    if filtered_mapping_df.empty or aligned_sct_geps_df.empty:
+        return 0
+    if len(raw_bulk_sample_ids) != len(row_positions):
+        raise ValueError("raw_bulk_sample_ids and row_positions must have equal lengths.")
+
+    n_genes = aligned_sct_values.shape[1]
+    n_cell_types = len(cell_types)
+    bytes_per_sample = max(
+        1,
+        n_genes * n_cell_types * np.dtype(np.float32).itemsize,
+    )
+    sample_block_rows = max(
+        1,
+        _SCT_TARGET_MAX_BLOCK_BYTES // bytes_per_sample,
+    )
+
+    mapping_for_lookup = filtered_mapping_df
+    if filtered_mapping_df.index.inferred_type != "string":
+        mapping_for_lookup = filtered_mapping_df.copy(deep=False)
+        mapping_for_lookup.index = mapping_for_lookup.index.map(str)
+
+    cell_type_to_idx = {str(cell_type): idx for idx, cell_type in enumerate(cell_types)}
+    sct_row_by_id = {
+        str(cell_id): idx for idx, cell_id in enumerate(aligned_sct_geps_df.index.tolist())
+    }
+    mapping_index = mapping_for_lookup.index
+    mapping_sample_ids: Optional[set[str]] = None
+    written_assignments = 0
+
+    for start in range(0, len(raw_bulk_sample_ids), sample_block_rows):
+        end = min(start + sample_block_rows, len(raw_bulk_sample_ids))
+        sample_ids_block = [
+            str(sample_id) for sample_id in raw_bulk_sample_ids[start:end]
+        ]
+        sample_to_block_row = {
+            sample_id: row_idx for row_idx, sample_id in enumerate(sample_ids_block)
+        }
+        try:
+            block_mapping = mapping_for_lookup.loc[sample_ids_block]
+        except KeyError:
+            if mapping_sample_ids is None:
+                mapping_sample_ids = set(mapping_index)
+            available_sample_ids = [
+                sample_id
+                for sample_id in sample_ids_block
+                if sample_id in mapping_sample_ids
+            ]
+            if not available_sample_ids:
+                continue
+            block_mapping = mapping_for_lookup.loc[available_sample_ids]
+        block_row_indices = np.asarray(
+            block_mapping.index.map(sample_to_block_row),
+            dtype=np.intp,
+        )
+        cell_type_indices = (
+            block_mapping["cell_type"]
+            .astype(str)
+            .map(cell_type_to_idx)
+            .fillna(-1)
+            .to_numpy(dtype=np.intp)
+        )
+        sct_row_indices = (
+            block_mapping["selected_cell_id"]
+            .astype(str)
+            .map(sct_row_by_id)
+            .fillna(-1)
+            .to_numpy(dtype=np.intp)
+        )
+        valid = (cell_type_indices >= 0) & (sct_row_indices >= 0)
+
+        target_block = np.zeros(
+            (end - start, n_genes, n_cell_types),
+            dtype=np.float32,
+        )
+        present_block = np.zeros((end - start, n_cell_types), dtype=bool)
+        if np.any(valid):
+            target_block[
+                block_row_indices[valid],
+                :,
+                cell_type_indices[valid],
+            ] = aligned_sct_values[sct_row_indices[valid]]
+            present_block[
+                block_row_indices[valid],
+                cell_type_indices[valid],
+            ] = True
+            written_assignments += int(np.count_nonzero(valid))
+
+        block_positions = row_positions[start:end]
+        if len(block_positions) == 1 or np.all(np.diff(block_positions) == 1):
+            destination = slice(
+                int(block_positions[0]),
+                int(block_positions[-1]) + 1,
+            )
+        else:
+            destination = block_positions
+        true_sct_gep_dest[destination, :, :] = target_block
+        true_sct_gep_present_mask_dest[destination, :] = present_block
+
+        if progress_callback is not None:
+            progress_callback(len(block_mapping))
+
+    return written_assignments
 
 
 def build_matched_sct_gep_training_targets(
@@ -1603,6 +1771,9 @@ class GEPDataset(Dataset):
         gene_list = processed["gene_list"]
         sample_ids = processed["sample_ids"]
         cell_types = processed["cell_types"]
+        large_sct_target_build = (
+            len(sample_ids) > _LARGE_SCT_TARGET_SAMPLE_THRESHOLD
+        )
 
         # Arrays are already float32 at this point; only apply optional scaling.
         log_message("Applying final array scaling...")
@@ -1629,7 +1800,11 @@ class GEPDataset(Dataset):
                 gene_list=[str(gene) for gene in gene_list],
                 cell_types=[str(cell_type) for cell_type in cell_types],
             )
-            if self.apply_scaling and true_sct_gep_array is not None:
+            if (
+                self.apply_scaling
+                and true_sct_gep_array is not None
+                and not large_sct_target_build
+            ):
                 if sct_target_arrays_pre_saved:
                     true_sct_gep_array[:] = true_sct_gep_array[:] / float(self.scaling_value)
                     if hasattr(true_sct_gep_array, "flush"):
@@ -1638,6 +1813,9 @@ class GEPDataset(Dataset):
                     true_sct_gep_array = true_sct_gep_array / float(self.scaling_value)
 
         # Save arrays + metadata
+        cache_save_started_at = time.monotonic()
+        if large_sct_target_build:
+            log_message("Saving processed arrays and metadata to the large-dataset cache...")
         self.cache.save_arrays(data_array, labels_array)
         if not sct_target_arrays_pre_saved:
             self.cache.save_optional_array(
@@ -1657,6 +1835,11 @@ class GEPDataset(Dataset):
             scaling_value=float(self.scaling_value),
             apply_scaling=self.apply_scaling,
         )
+        if large_sct_target_build:
+            log_message(
+                "Saved processed arrays and metadata to the large-dataset cache "
+                f"in {time.monotonic() - cache_save_started_at:.1f}s"
+            )
 
         # Set in-memory metadata immediately
         self.gene_list = list(gene_list)
@@ -1738,6 +1921,9 @@ class GEPDataset(Dataset):
         n_samples = len(sample_ids)
         n_genes = len(gene_list)
         n_cell_types = len(cell_types)
+        use_batched_target_build = (
+            n_samples > _LARGE_SCT_TARGET_SAMPLE_THRESHOLD
+        )
         temp_paths: list[Path] = []
         arrays_pre_saved = not self.compress
         if self.compress:
@@ -1816,7 +2002,7 @@ class GEPDataset(Dataset):
                 {
                     "sct_gep_fp": sct_gep_fp,
                     "items": [],
-                    "selected_cell_ids": [],
+                    "selected_cell_ids": {},
                 },
             )
             group_entry["items"].append(
@@ -1827,10 +2013,13 @@ class GEPDataset(Dataset):
                 }
             )
             if not filtered_mapping_df.empty:
-                group_entry["selected_cell_ids"].extend(filtered_mapping_df["selected_cell_id"].tolist())
+                group_entry["selected_cell_ids"].update(
+                    (str(cell_id), None)
+                    for cell_id in filtered_mapping_df["selected_cell_id"].unique()
+                )
 
         for group_idx, group_entry in enumerate(grouped_target_sets.values(), start=1):
-            unique_sct_cell_ids = list(dict.fromkeys(group_entry["selected_cell_ids"]))
+            unique_sct_cell_ids = list(group_entry["selected_cell_ids"])
             log_message(
                 "Matched sctGEP group "
                 f"{group_idx}/{len(grouped_target_sets)}: loading {len(unique_sct_cell_ids)} "
@@ -1841,6 +2030,21 @@ class GEPDataset(Dataset):
                 selected_cell_ids=unique_sct_cell_ids,
                 target_gene_list=gene_list,
             )
+            aligned_sct_values: Optional[np.ndarray] = None
+            if use_batched_target_build:
+                aligned_sct_values = aligned_sct_geps_df.to_numpy(
+                    dtype=np.float32,
+                    copy=False,
+                )
+                if self.apply_scaling:
+                    log_message(
+                        "Scaling aligned sctGEP reference profiles before assignment..."
+                    )
+                    aligned_sct_values = _scale_sct_gep_values_in_place(
+                        aligned_sct_values,
+                        float(self.scaling_value),
+                        progress_desc="scale_sctGEP_reference",
+                    )
             total_assignments = int(
                 sum(len(item["filtered_mapping_df"]) for item in group_entry["items"])
             )
@@ -1852,30 +2056,83 @@ class GEPDataset(Dataset):
             progress_bar = tqdm(
                 total=total_assignments,
                 desc=f"matched_sct_gep {group_idx}/{len(grouped_target_sets)}",
-                unit="assign",
-                leave=False,
+                unit="mapping" if use_batched_target_build else "assign",
+                leave=use_batched_target_build,
+                mininterval=10.0 if use_batched_target_build else 0.1,
             )
+            progress_started_at = time.monotonic()
+            progress_completed = 0
+            progress_last_log_at = progress_started_at
+
+            def _report_batched_progress(increment: int) -> None:
+                nonlocal progress_completed, progress_last_log_at
+                progress_completed += increment
+                progress_bar.update(increment)
+                now = time.monotonic()
+                if (
+                    now - progress_last_log_at
+                    >= _SCT_TARGET_PROGRESS_LOG_INTERVAL_SECONDS
+                    or progress_completed >= total_assignments
+                ):
+                    elapsed = now - progress_started_at
+                    percentage = (
+                        100.0 * progress_completed / total_assignments
+                        if total_assignments
+                        else 100.0
+                    )
+                    log_message(
+                        f"Matched sctGEP group {group_idx}/{len(grouped_target_sets)} "
+                        f"progress: {progress_completed:,}/{total_assignments:,} "
+                        f"mapping rows ({percentage:.1f}%) in {elapsed:.1f}s"
+                    )
+                    progress_last_log_at = now
+
             try:
                 for item in group_entry["items"]:
-                    _write_true_sct_gep_targets_into(
-                        raw_bulk_sample_ids=item["raw_bulk_sample_ids"],
-                        row_positions=item["row_positions"],
-                        cell_types=cell_types,
-                        filtered_mapping_df=item["filtered_mapping_df"],
-                        aligned_sct_geps_df=aligned_sct_geps_df,
-                        true_sct_gep_dest=true_sct_gep,
-                        true_sct_gep_present_mask_dest=true_sct_gep_present_mask,
-                        progress_bar=progress_bar,
-                    )
+                    if use_batched_target_build:
+                        _write_true_sct_gep_targets_in_sample_blocks(
+                            raw_bulk_sample_ids=item["raw_bulk_sample_ids"],
+                            row_positions=item["row_positions"],
+                            cell_types=cell_types,
+                            filtered_mapping_df=item["filtered_mapping_df"],
+                            aligned_sct_geps_df=aligned_sct_geps_df,
+                            aligned_sct_values=aligned_sct_values,
+                            true_sct_gep_dest=true_sct_gep,
+                            true_sct_gep_present_mask_dest=true_sct_gep_present_mask,
+                            progress_callback=_report_batched_progress,
+                        )
+                    else:
+                        _write_true_sct_gep_targets_into(
+                            raw_bulk_sample_ids=item["raw_bulk_sample_ids"],
+                            row_positions=item["row_positions"],
+                            cell_types=cell_types,
+                            filtered_mapping_df=item["filtered_mapping_df"],
+                            aligned_sct_geps_df=aligned_sct_geps_df,
+                            true_sct_gep_dest=true_sct_gep,
+                            true_sct_gep_present_mask_dest=true_sct_gep_present_mask,
+                            progress_bar=progress_bar,
+                        )
             finally:
                 progress_bar.close()
+            if use_batched_target_build:
+                log_message(
+                    f"Flushing matched sctGEP arrays for group "
+                    f"{group_idx}/{len(grouped_target_sets)}..."
+                )
             if hasattr(true_sct_gep, "flush"):
                 true_sct_gep.flush()
             if hasattr(true_sct_gep_present_mask, "flush"):
                 true_sct_gep_present_mask.flush()
-            log_message(
-                f"Matched sctGEP group {group_idx}/{len(grouped_target_sets)} finished."
-            )
+            if use_batched_target_build:
+                log_message(
+                    f"Matched sctGEP group {group_idx}/{len(grouped_target_sets)} finished "
+                    f"after {time.monotonic() - progress_started_at:.1f}s "
+                    f"({progress_completed:,}/{total_assignments:,} mapping rows)."
+                )
+            else:
+                log_message(
+                    f"Matched sctGEP group {group_idx}/{len(grouped_target_sets)} finished."
+                )
             del aligned_sct_geps_df
             gc.collect()
 
