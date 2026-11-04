@@ -10,7 +10,7 @@ from vaedecon.data import GEPDataset
 import vaedecon.workflow.inference as inference_workflow
 from vaedecon.workflow.train import (
     VAEDeconTrainer, _preflight_training_outputs, _preserve_existing_outputs,
-    train_vaedecon,
+    _should_reuse_staged_test_results, train_vaedecon,
 )
 
 
@@ -93,6 +93,36 @@ def _base_staged_config_dict(tmp_path: Path) -> dict:
             },
         },
     }
+
+
+def test_staged_cli_reuses_existing_prediction_unless_training_is_skipped(tmp_path: Path):
+    config = VAEDeconConfig.from_dict(_base_staged_config_dict(tmp_path))
+    test_results_dir = tmp_path / "final_model" / "test_results"
+
+    assert not _should_reuse_staged_test_results(
+        config,
+        test_results_dir,
+        skip_training=False,
+    )
+
+    test_results_dir.mkdir(parents=True)
+    assert _should_reuse_staged_test_results(
+        config,
+        test_results_dir,
+        skip_training=False,
+    )
+    assert not _should_reuse_staged_test_results(
+        config,
+        test_results_dir,
+        skip_training=True,
+    )
+
+    config.training.staged_training.enabled = False
+    assert not _should_reuse_staged_test_results(
+        config,
+        test_results_dir,
+        skip_training=False,
+    )
 
 
 class DummyStageModel(torch.nn.Module):

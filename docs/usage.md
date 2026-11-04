@@ -13,9 +13,10 @@ Install VAEDecon in editable mode from the repository root:
 python -m pip install -e ./VAEDecon
 ```
 
-The CLI example is `VAEDecon/examples/easy_train_cli.py`. The commands below
-run from `VAEDecon_example` so the relative paths in its example configs
-resolve from the expected working directory:
+The combined train-and-predict command is `vaedecon-easy-train`. The commands
+below run from `VAEDecon_example` so relative paths in its example configs
+resolve from the expected working directory. The example script remains a
+compatibility wrapper.
 
 ```bash
 cd VAEDecon_example
@@ -42,13 +43,43 @@ Real bulk datasets can omit `sct_gep_file_path` and
 `test_set_sample2cell_id_file_path`. Keep data paths relative to the working
 directory used to launch the command, or provide absolute paths.
 
-## Train and evaluate from a config
+## Configure email notifications
 
-The example CLI trains from the selected YAML and then runs its configured
-test sets. Run it from `VAEDecon_example`:
+Email notifications are optional. You can provide a local YAML file with
+`--email-config`, or set environment variables. If you omit the option and the
+required environment variables are unset, VAEDecon skips the notification and
+continues normally.
+
+Create a private email config from the
+[email config example](../vaedecon/cli/email.local.example.yaml) while working
+from `VAEDecon_example`:
 
 ```bash
-python ../VAEDecon/examples/easy_train_cli.py \
+cp -n ../VAEDecon/vaedecon/cli/email.local.example.yaml email.local.yaml
+```
+
+Replace the example values in `email.local.yaml`, then pass it to the command:
+
+```bash
+vaedecon-easy-train \
+  -c config_20ds_n-neighbor_auto_subtypes.yaml \
+  --email-config email.local.yaml
+```
+
+The `--email-config` option is optional and overrides the environment settings.
+Without a config file, set `VAEDECON_EMAIL_SENDER`,
+`VAEDECON_EMAIL_PASSWORD`, `VAEDECON_EMAIL_RECEIVER`, and
+`VAEDECON_SMTP_SERVER`. You can also set `VAEDECON_SMTP_PORT`; it defaults to
+`465`. Keep real credentials private and do not commit your completed local
+config file.
+
+## Train and evaluate from a config
+
+The CLI trains from the selected YAML and then runs its configured test sets.
+Run it from `VAEDecon_example`:
+
+```bash
+vaedecon-easy-train \
   -c config_20ds_n-neighbor_auto_subtypes.yaml
 ```
 
@@ -77,7 +108,7 @@ model's `final_model/` directory.
 MODEL_DIR=output/vae/20ds_n-neighbor/nbase30/\
 20ds_auto_subtypes_base58_beta0p5_new_gamma2_ld48_bs128/final_model
 
-python ../VAEDecon/examples/easy_train_cli.py \
+vaedecon-easy-train \
   -c config_20ds_n-neighbor_auto_subtypes.yaml \
   --skip-training \
   --model-dir "$MODEL_DIR"

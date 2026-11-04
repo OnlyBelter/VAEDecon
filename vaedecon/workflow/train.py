@@ -188,6 +188,23 @@ def _preserve_existing_outputs(
         logger.warning("Preserved previous outputs in %s", backup)
 
 
+def _should_reuse_staged_test_results(
+    config: VAEDeconConfig,
+    test_results_dir: Path,
+    *,
+    skip_training: bool,
+) -> bool:
+    """Return whether staged training already produced the CLI prediction output."""
+    staged = config.training.staged_training
+    return (
+        not skip_training
+        and staged is not None
+        and staged.enabled
+        and test_results_dir.is_dir()
+        and not test_results_dir.is_symlink()
+    )
+
+
 def _resolve_path_for_fingerprint(path_like: Optional[str | Path]) -> Optional[str]:
     """Normalize paths for stable preprocessing-cache fingerprints."""
     if path_like is None or str(path_like).strip() == "":

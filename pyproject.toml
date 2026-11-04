@@ -89,6 +89,7 @@ Tracker = "https://github.com/OnlyBelter/VAEDecon/issues"
 
 [project.scripts]
 vaedecon = "vaedecon.cli.main:main"
+vaedecon-easy-train = "vaedecon.cli.easy_train:main"
 
 # Setuptools configuration
 [tool.setuptools.packages.find]
@@ -98,6 +99,7 @@ exclude = ["tests*", "docs*", "examples*", "configs*"]  # Exclude configs and ex
 
 [tool.setuptools.package-data]
 "vaedecon.configs" = ["*.yaml"]
+"vaedecon.cli" = ["email.local.example.yaml"]
 
 # https://realpython.com/pypi-publish-python-package/#version-your-package
 [tool.bumpver]

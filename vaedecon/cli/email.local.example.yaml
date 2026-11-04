@@ -1,0 +1,7 @@
+# Copy to email.local.yaml and replace every placeholder before use.
+# Keep real email credentials private; do not commit your completed local file.
+sender: your-email@example.com
+receiver: recipient@example.com
+password: your-app-specific-password
+smtp_server: smtp.example.com
+smtp_port: 465
