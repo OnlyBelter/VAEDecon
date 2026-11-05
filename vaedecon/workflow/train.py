@@ -1462,6 +1462,7 @@ class VAEDeconTrainer:
                 early_stopping_min_delta=stage_cfg.early_stopping.min_delta,
                 max_epochs_override=stage_cfg.max_epochs,
                 module_mode_overrides=module_mode_overrides,
+                stage_name=stage_cfg.name,
             )
             stage_trainer.train()
             self._plot_stage_training_history(

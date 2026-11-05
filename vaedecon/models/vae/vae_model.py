@@ -783,6 +783,11 @@ class VAE(BaseAE):
             true_sct_gep_present_mask = true_sct_gep_present_mask.to(device=device, dtype=torch.bool)
         else:
             true_sct_gep_present_mask = None
+        residual_var_targets = inputs.get("per_sample_residual_var_targets")
+        if torch.is_tensor(residual_var_targets) and residual_var_targets.numel() > 0:
+            residual_var_targets = residual_var_targets.to(device=device)
+        else:
+            residual_var_targets = None
         sample_ids = inputs.get("sample_id")
         if sample_ids is None:
             batch_sample_ids = None
@@ -1040,6 +1045,7 @@ class VAE(BaseAE):
             true_sct_gep=true_sct_gep,
             true_sct_gep_present_mask=true_sct_gep_present_mask,
             sample_ids=batch_sample_ids,
+            residual_var_targets=residual_var_targets,
         )
 
         return ModelOutput(
@@ -1097,6 +1103,7 @@ class VAE(BaseAE):
         true_sct_gep: Optional[torch.Tensor] = None,
         true_sct_gep_present_mask: Optional[torch.Tensor] = None,
         sample_ids: Optional[Sequence[str]] = None,
+        residual_var_targets: Optional[torch.Tensor] = None,
     ) -> LossTerms:
         """
         Compute all objective terms and aggregate total loss.
@@ -1237,8 +1244,10 @@ class VAE(BaseAE):
             supervision_ready = (
                 true_sct_gep_present_mask is not None
                 and labels_available
-                and sample_ids is not None
-                and len(sample_ids) == batch_size
+                and (
+                    residual_var_targets is not None
+                    or (sample_ids is not None and len(sample_ids) == batch_size)
+                )
             )
             if supervision_ready:
                 per_sample_residual_var_loss = self._per_sample_residual_variance_loss(
@@ -1246,6 +1255,7 @@ class VAE(BaseAE):
                     sample_ids=sample_ids,
                     true_sct_gep_present_mask=true_sct_gep_present_mask,
                     true_cell_prop=y,
+                    target_var=residual_var_targets,
                     cell_prop_threshold=float(
                         getattr(self.data_config, "training_sct_gep_cell_prop_threshold", 0.0) or 0.0
                     ),
@@ -1577,18 +1587,30 @@ class VAE(BaseAE):
     def _per_sample_residual_variance_loss(
         self,
         pred_residual_log: torch.Tensor,
-        sample_ids: Sequence[str],
+        sample_ids: Optional[Sequence[str]],
         true_sct_gep_present_mask: torch.Tensor,
         true_cell_prop: torch.Tensor,
         cell_prop_threshold: float,
+        target_var: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Masked log-L1 loss on per-sample, per-cell-type residual variance across genes."""
         pred_var = pred_residual_log.var(dim=1, unbiased=False)
-        target_var = self._lookup_per_sample_residual_var_targets(
-            sample_ids,
-            device=pred_var.device,
-            dtype=pred_var.dtype,
-        )
+        if target_var is None:
+            if sample_ids is None:
+                raise ValueError("Per-sample residual variance targets require sample IDs.")
+            target_var = self._lookup_per_sample_residual_var_targets(
+                sample_ids,
+                device=pred_var.device,
+                dtype=pred_var.dtype,
+            )
+        else:
+            if target_var.shape != pred_var.shape:
+                raise ValueError(
+                    "Per-sample residual variance target shape must match "
+                    f"predicted variance shape {tuple(pred_var.shape)}, "
+                    f"got {tuple(target_var.shape)}."
+                )
+            target_var = target_var.to(device=pred_var.device, dtype=pred_var.dtype)
         active_mask = true_sct_gep_present_mask & (true_cell_prop >= cell_prop_threshold)
         valid_mask = active_mask & torch.isfinite(target_var)
         safe_target_var = torch.where(valid_mask, target_var, torch.ones_like(target_var))

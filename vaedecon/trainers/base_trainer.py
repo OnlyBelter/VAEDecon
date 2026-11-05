@@ -8,19 +8,21 @@ import numpy as np
 import logging
 import platform
 import shutil
+import time
 
 from typing import Any, Dict, Optional, Union, Type
 
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 import lightning as L
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch.callbacks import Callback, EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import CSVLogger
 
-from vaedecon.data.datasets import BaseDataset, collate_dataset_output
+from vaedecon.data.datasets import BaseDataset, GEPDataset, collate_dataset_output
 from vaedecon.models import BaseAE
+from vaedecon.models.vae.vae_model import VAE
 from vaedecon.configs import TrainingConfig, DataConfig
 from vaedecon.models.base import set_seed
 from vaedecon.customexception import DatasetError
@@ -40,6 +42,159 @@ logger = logging.getLogger(__name__)
 def _unwrap_stage_model(model: BaseAE) -> BaseAE:
     """Return the underlying BaseAE when torch.compile wraps it."""
     return getattr(model, "_orig_mod", model)
+
+
+def _stage_sct_target_requirements(model: BaseAE, training_config: TrainingConfig) -> tuple[bool, bool]:
+    """Conservatively determine which matched targets a stage can require."""
+    base_model = _unwrap_stage_model(model)
+    if not isinstance(base_model, VAE):
+        return True, True
+    loss = getattr(getattr(base_model, "model_config", None), "loss_coefficient", None)
+    if loss is None:
+        return True, True
+
+    schedules = getattr(training_config, "aux_loss_schedules", None) or {}
+    adaptive = getattr(training_config, "adaptive_aux_loss_schedule", None)
+    adaptive_targets = (
+        getattr(adaptive, "targets", {}) or {}
+        if adaptive is not None and getattr(adaptive, "enabled", False)
+        else {}
+    )
+
+    def may_be_positive(name: str) -> bool:
+        value = getattr(loss, name, None)
+        if value is None:
+            return True
+        return float(value) > 0 or name in schedules or name in adaptive_targets
+
+    include_gep = (
+        may_be_positive("cell_type_sct_gep_weight")
+        or may_be_positive("inter_sample_similarity_weight")
+    )
+    include_mask = include_gep or may_be_positive("per_sample_residual_var_weight")
+    return include_gep, include_mask
+
+
+class _StageGEPDatasetView(Dataset):
+    """Read a GEPDataset subset without touching unused target arrays."""
+
+    def __init__(self, dataset: Dataset, include_gep: bool, include_mask: bool):
+        self.dataset = dataset
+        self.include_gep = include_gep
+        self.include_mask = include_mask
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int):
+        dataset = self.dataset
+        while isinstance(dataset, Subset):
+            index = dataset.indices[index]
+            dataset = dataset.dataset
+        return dataset.get_item(
+            int(index),
+            include_sct_gep=self.include_gep,
+            include_sct_mask=self.include_mask,
+        )
+
+
+def _stage_dataset_view(dataset: Dataset, include_gep: bool, include_mask: bool) -> Dataset:
+    """Leave unknown datasets unchanged and preserve existing subset indices."""
+    if include_gep and include_mask:
+        return dataset
+    base_dataset = dataset
+    while isinstance(base_dataset, Subset):
+        if type(base_dataset) is not Subset:
+            return dataset
+        base_dataset = base_dataset.dataset
+    if not isinstance(base_dataset, GEPDataset):
+        return dataset
+    if (
+        type(base_dataset).__getitem__ is not GEPDataset.__getitem__
+        or type(base_dataset).get_item is not GEPDataset.get_item
+    ):
+        return dataset
+    return _StageGEPDatasetView(dataset, include_gep, include_mask)
+
+
+class _TrainingProgressLogger(Callback):
+    """Periodically log progress even when the progress bar is redirected."""
+
+    def __init__(self, stage_name: str, interval_seconds: float = 60.0):
+        super().__init__()
+        self.stage_name = stage_name
+        self.interval_seconds = interval_seconds
+        self._phases: Dict[str, dict[str, Any]] = {}
+
+    def _start(self, trainer: Any, phase: str, total: Any) -> None:
+        if not trainer.is_global_zero:
+            return
+        now = time.monotonic()
+        self._phases[phase] = {
+            "start": now, "last": now, "completed": 0, "total": total,
+            "paused_seconds": 0.0, "paused_at": None,
+        }
+
+    def _report(self, trainer: Any, phase: str, *, final: bool = False) -> None:
+        if not trainer.is_global_zero or phase not in self._phases:
+            return
+        state = self._phases[phase]
+        now = time.monotonic()
+        if not final and now - state["last"] < self.interval_seconds:
+            return
+        elapsed = max(now - state["start"] - state["paused_seconds"], 1e-9)
+        total = state["total"]
+        total_label = str(int(total)) if np.isfinite(total) else "unknown"
+        logger.info(
+            "Stage %s epoch %s %s: %s/%s batches, %.1fs, %.2f batches/s%s",
+            self.stage_name, trainer.current_epoch, phase, state["completed"],
+            total_label, elapsed, state["completed"] / elapsed,
+            " (finished)" if final else "",
+        )
+        state["last"] = now
+
+    def on_train_epoch_start(self, trainer: Any, pl_module: Any) -> None:
+        self._start(trainer, "train", trainer.num_training_batches)
+
+    def on_train_batch_end(
+        self, trainer: Any, pl_module: Any, outputs: Any, batch: Any, batch_idx: int,
+    ) -> None:
+        if "train" in self._phases:
+            self._phases["train"]["completed"] = batch_idx + 1
+        self._report(trainer, "train")
+
+    def on_train_epoch_end(self, trainer: Any, pl_module: Any) -> None:
+        self._report(trainer, "train", final=True)
+
+    def on_validation_epoch_start(self, trainer: Any, pl_module: Any) -> None:
+        if trainer.sanity_checking:
+            return
+        if trainer.is_global_zero and "train" in self._phases:
+            self._phases["train"]["paused_at"] = time.monotonic()
+        totals = trainer.num_val_batches
+        total = sum(totals) if isinstance(totals, (list, tuple)) else totals
+        self._start(trainer, "validation", total)
+
+    def on_validation_batch_end(
+        self, trainer: Any, pl_module: Any, outputs: Any, batch: Any,
+        batch_idx: int, dataloader_idx: int = 0,
+    ) -> None:
+        if trainer.sanity_checking:
+            return
+        if "validation" in self._phases:
+            self._phases["validation"]["completed"] += 1
+        self._report(trainer, "validation")
+
+    def on_validation_epoch_end(self, trainer: Any, pl_module: Any) -> None:
+        if not trainer.sanity_checking:
+            self._report(trainer, "validation", final=True)
+            if trainer.is_global_zero and "train" in self._phases:
+                train_state = self._phases["train"]
+                if train_state["paused_at"] is not None:
+                    train_state["paused_seconds"] += (
+                        time.monotonic() - train_state["paused_at"]
+                    )
+                    train_state["paused_at"] = None
 
 
 def _resolve_stage_named_modules(model: BaseAE) -> Dict[str, Any]:
@@ -577,6 +732,7 @@ class PLTrainer(L.LightningModule):
         debug_model: Optional[bool] = False,
         monitor_metric: str = "val_loss",
         module_mode_overrides: Optional[Dict[str, str]] = None,
+        optimize_stage_inputs: bool = False,
     ):
         """Initializes the PLTrainer.
 
@@ -593,6 +749,7 @@ class PLTrainer(L.LightningModule):
         self.debug_model = debug_model
         self.monitor_metric = monitor_metric
         self.module_mode_overrides = dict(module_mode_overrides or {})
+        self.optimize_stage_inputs = optimize_stage_inputs
 
         cfg_metrics = getattr(training_config, "prog_bar_metrics", None)
         if cfg_metrics:
@@ -621,7 +778,35 @@ class PLTrainer(L.LightningModule):
 
     def forward(self, inputs: Dict[str, Any], **kwargs) -> Any:
         """Forward pass of the model."""
-        return self.model(inputs, **kwargs)
+        base_model = _unwrap_stage_model(self.model)
+        if not self.optimize_stage_inputs or not isinstance(base_model, VAE):
+            return self.model(inputs, **kwargs)
+
+        model_inputs = dict(inputs)
+        sample_ids = model_inputs.pop("sample_id", None)
+        if isinstance(sample_ids, str):
+            sample_ids = [sample_ids]
+        loss = base_model.model_config.loss_coefficient
+        mask = model_inputs.get("true_sct_gep_present_mask")
+        labels = model_inputs.get("labels")
+        x = model_inputs.get("data")
+        if (
+            float(getattr(loss, "per_sample_residual_var_weight", 0.0) or 0.0) > 0
+            and torch.is_tensor(x)
+            and torch.is_tensor(mask)
+            and mask.numel() > 0
+            and torch.is_tensor(labels)
+            and labels.numel() > 0
+            and sample_ids is not None
+            and len(sample_ids) == x.shape[0]
+            and model_inputs.get("per_sample_residual_var_targets") is None
+        ):
+            model_inputs["per_sample_residual_var_targets"] = (
+                base_model._lookup_per_sample_residual_var_targets(
+                    sample_ids, device=x.device, dtype=torch.float32
+                )
+            )
+        return self.model(model_inputs, **kwargs)
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Performs a single training step."""
@@ -985,6 +1170,7 @@ class BaseTrainerL:
         early_stopping_min_delta: float = 0.001,
         max_epochs_override: Optional[int] = None,
         module_mode_overrides: Optional[Dict[str, str]] = None,
+        stage_name: Optional[str] = None,
     ):
         if training_config is None:
             training_config = TrainingConfig()
@@ -1003,10 +1189,22 @@ class BaseTrainerL:
         self.early_stopping_min_delta = float(early_stopping_min_delta)
         self.max_epochs_override = max_epochs_override
         self.module_mode_overrides = dict(module_mode_overrides or {})
+        self.stage_name = stage_name
         self.debug_overfit_config = getattr(self.training_config, "debug_overfit", None)
         self.train_dataset_obj = train_dataset
         self.eval_dataset_obj = eval_dataset
 
+        if self.stage_name is not None:
+            include_gep, include_mask = _stage_sct_target_requirements(
+                model, self.training_config
+            )
+            train_dataset = _stage_dataset_view(train_dataset, include_gep, include_mask)
+            if eval_dataset is not None:
+                eval_dataset = _stage_dataset_view(eval_dataset, include_gep, include_mask)
+            logger.info(
+                "Stage %s matched-target loading: expression=%s, mask=%s",
+                self.stage_name, include_gep, include_mask,
+            )
         self.train_loader = self._build_loader(train_dataset, is_train=True)
         self.eval_loader = self._build_loader(eval_dataset, is_train=False) if eval_dataset is not None else None
 
@@ -1026,6 +1224,7 @@ class BaseTrainerL:
             debug_model=debug_model,
             monitor_metric=self.monitor_metric,
             module_mode_overrides=self.module_mode_overrides,
+            optimize_stage_inputs=self.stage_name is not None,
         )
 
     def _build_loader(self, ds_or_loader, is_train: bool) -> DataLoader:
@@ -1119,7 +1318,9 @@ class BaseTrainerL:
         )
         lr_monitor = LearningRateMonitor(logging_interval="epoch")
         csv_logger = CSVLogger(save_dir=self.model_dir, name="training_logs")
-        callbacks = [ckpt, lr_monitor]
+        callbacks = [
+            ckpt, lr_monitor, _TrainingProgressLogger(self.stage_name or "training"),
+        ]
         if disable_early_stopping:
             logger.info("Debug overfit mode: EarlyStopping callback disabled.")
         else:
@@ -1131,6 +1332,7 @@ class BaseTrainerL:
             devices=self.training_config.devices,
             callbacks=callbacks,
             logger=csv_logger,
+            enable_progress_bar=True,
             precision="16-mixed" if self.training_config.amp else 32,
             gradient_clip_val=getattr(self.training_config, 'gradient_clip_val', 1.0),
         )

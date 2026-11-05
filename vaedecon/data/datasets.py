@@ -2153,21 +2153,34 @@ class GEPDataset(Dataset):
 
         Using torch.as_tensor avoids an unnecessary extra copy in most cases.
         """
+        return self.get_item(index, include_sct_gep=True, include_sct_mask=True)
+
+    def get_item(
+        self,
+        index: int,
+        *,
+        include_sct_gep: bool,
+        include_sct_mask: bool,
+    ) -> DatasetOutput:
+        """Read only the matched target fields required by a training stage."""
         x = torch.as_tensor(self.data[index], dtype=torch.float32)
 
         if self.labels.size > 0:
             y = torch.as_tensor(self.labels[index], dtype=torch.float32)
         else:
             y = torch.empty(0, dtype=torch.float32)
-        if self.true_sct_gep.size > 0:
-            true_sct_gep = torch.as_tensor(self.true_sct_gep[index], dtype=torch.float32)
-            true_sct_gep_present_mask = torch.as_tensor(
-                self.true_sct_gep_present_mask[index],
-                dtype=torch.bool,
-            )
-        else:
-            true_sct_gep = torch.empty(0, dtype=torch.float32)
-            true_sct_gep_present_mask = torch.empty(0, dtype=torch.bool)
+        true_sct_gep = torch.empty(0, dtype=torch.float32)
+        true_sct_gep_present_mask = torch.empty(0, dtype=torch.bool)
+        if include_sct_gep or include_sct_mask:
+            if self.true_sct_gep.size > 0:
+                if include_sct_gep:
+                    true_sct_gep = torch.as_tensor(
+                        self.true_sct_gep[index], dtype=torch.float32
+                    )
+                if include_sct_mask:
+                    true_sct_gep_present_mask = torch.as_tensor(
+                        self.true_sct_gep_present_mask[index], dtype=torch.bool
+                    )
 
         return DatasetOutput(
             data=x,
