@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, asdict, is_dataclass
 from .base_config import BaseTrainerConfig, BaseModelConfig, BaseConfig
 from typing import List, Dict, Optional, Tuple, Any, Union, Literal
 from pathlib import Path
-from pydantic import AliasChoices, Field, field_validator, model_validator, BaseModel
+from pydantic import AliasChoices, Field, field_validator, model_validator, BaseModel, ValidationInfo, PrivateAttr
 
 
 class LossCoefficient(BaseModel):
@@ -108,12 +108,14 @@ class TrainingSetSCTTargetConfig(BaseModel):
     training_sct_gep_file_path: str | Path = ""
 
     @model_validator(mode="after")
-    def validate_required_training_target_files(self):
+    def validate_required_training_target_files(self, info: ValidationInfo):
         required_fields = {
             "training_set_file_path": self.training_set_file_path,
             "training_set_sample2cell_id_file_path": self.training_set_sample2cell_id_file_path,
             "training_sct_gep_file_path": self.training_sct_gep_file_path,
         }
+        if (info.context or {}).get("defer_sct_requirements"):
+            required_fields = {"training_set_file_path": self.training_set_file_path}
         missing = [
             field_name for field_name, field_value in required_fields.items()
             if not field_value or str(field_value).strip() == ""
@@ -550,6 +552,7 @@ class StagedTrainingConfig(BaseModel):
 # @dataclass
 class DataConfig(BaseConfig):
     """dataset configuration"""
+    _defer_sct_requirements: bool = PrivateAttr(default=False)
     data_dir: str | Path = './datasets/'
 
     # Training data
@@ -627,7 +630,11 @@ class DataConfig(BaseConfig):
         return v
 
     @model_validator(mode="after")
-    def validate_gene_mean_std_source(self):
+    def validate_gene_mean_std_source(self, info: ValidationInfo):
+        if (info.context or {}).get("defer_sct_requirements"):
+            self._defer_sct_requirements = True
+        if self._defer_sct_requirements:
+            return self
         configured_fields = set(getattr(self, "model_fields_set", set()))
         if self.gene_mean_std_source == "pooled_sc":
             if not self.pooled_sc_h5ad_path or str(self.pooled_sc_h5ad_path).strip() == "":
@@ -734,6 +741,8 @@ class DataConfig(BaseConfig):
             clean_name = str(name).strip()
             if not clean_name:
                 raise ValueError("Configured training target set names must be non-empty")
+            if clean_name in normalized_training_target_sets:
+                raise ValueError(f"Duplicate training target set name: {clean_name!r}")
             normalized_training_target_sets[clean_name] = cfg
         object.__setattr__(self, "training_target_sets", normalized_training_target_sets)
         return self
@@ -813,6 +822,7 @@ class GEPDatasetConfig(DataConfig):
     persist_processed_data: bool = True
     force_reprocess: bool = False
     protect_existing_cache: bool = False
+    sample_id_namespace_by_path: Dict[str, str] = Field(default_factory=dict)
 
     scaling_by_constant: Union[bool, float] = True
     scaling_factor: float = 20.0
@@ -1080,6 +1090,12 @@ class ModelConfig(BaseModelConfig):
         default=True,
         description="Enable the pathway branch inside the dedicated DeSide-style cell-proportion predictor.",
     )
+    deside_one_minus_alpha: bool = False
+    deside_prediction_threshold: float = Field(default=0.0001, ge=0.0, le=1.0)
+    deside_renormalize_non_cancer: bool = True
+    deside_fill_cancer_residual: bool = True
+    deside_group_cell_types: Dict[str, List[str]] = Field(default_factory=dict)
+    deside_cell_types: Optional[List[str]] = None
     deside_hidden_dims: List[int] = Field(
         default_factory=lambda: [200, 2000, 2000, 2000, 50],
         description="Hidden dimensions for the DeSide-style bulk GEP branch.",
@@ -1316,7 +1332,7 @@ class ModelConfig(BaseModelConfig):
         le=1.0,
         description="Dropout rate used in the shared cell-proportion head and feature projectors.",
     )
-    cell_prop_loss_type: Literal["mse", "l1_kl", "l1_rmse"] = Field(
+    cell_prop_loss_type: Literal["mse", "l1_kl", "l1_rmse", "deside_mae_rmse"] = Field(
         default="mse",
         description="Supervised cell-proportion loss family.",
     )
@@ -1327,7 +1343,8 @@ class ModelConfig(BaseModelConfig):
         serialization_alias="cell_prop_loss_alpha_weight",
         description=(
             "Alpha weight used by cell_prop_loss_type. For 'l1_kl' it is the KL multiplier; "
-            "for 'l1_rmse' the loss is alpha * MAE + (1 - alpha) * RMSE."
+            "for 'l1_rmse' and 'deside_mae_rmse' it mixes absolute and squared errors. "
+            "'deside_mae_rmse' computes both terms across the whole batch."
         ),
     )
     cell_prop_loss_weighting: Literal["none", "low_prop_inverse"] = Field(
@@ -1917,8 +1934,12 @@ class VAEDeconConfig:
     @classmethod
     def from_dict(cls, config_dict: Dict):
         """Creates configuration from a dictionary"""
-        data = DataConfig(**config_dict.get('data', {}))
         training = TrainingConfig(**config_dict.get('training', {}))
+        staged = training.staged_training
+        data = DataConfig.model_validate(
+            config_dict.get('data', {}),
+            context={"defer_sct_requirements": bool(staged and staged.enabled)},
+        )
         model = ModelConfig(**config_dict.get('model', {}))
         evaluation = EvaluationConfig(**config_dict.get('evaluation', {}))
         cls._validate_cross_section_config(

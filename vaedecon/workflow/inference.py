@@ -11,6 +11,8 @@ import pandas as pd
 import torch
 
 from ..data import GEPDataset, find_sct_gep_of_bulk_sample
+from ..models.cell_prop_only import CellPropOnlyModel
+from .bulk_prediction import predict_bulk_csv, predict_bulk_h5ad
 from ..utility import check_dir
 from .workflow import (
     load_trained_model,
@@ -461,6 +463,14 @@ class VAEDeconPredictor:
         result_set_name = _infer_result_set_name(data_file_path)
         logger.info(f"Inference result subfolder: {result_set_name}")
 
+        self._ensure_model_loaded()
+        if isinstance(self.model, CellPropOnlyModel):
+            predict_bulk = predict_bulk_csv if Path(data_file_path).suffix.lower() == ".csv" else predict_bulk_h5ad
+            return predict_bulk(
+                self.model, data_file_path, Path(output_dir) / result_set_name,
+                self.device, self.config.evaluation.val_batch_size,
+            )
+
         gep_dataset_config = self._build_gepdataset_config(
             data_file_path=data_file_path,
             dataset_type=dataset_type,
@@ -583,6 +593,12 @@ class VAEDeconPredictor:
             pred_cell_prop_file_path=pred_cell_prop_file_path,
             dataset_type='test'
         )
+
+        if isinstance(self.model, CellPropOnlyModel):
+            self._generate_visualizations(
+                results=results, sample2cell_id_file_path=None, sct_gep_file_path=None
+            )
+            return results
 
         # Visualizations
         if sample2cell_id_file_path is None or sample2cell_id_file_path == '':
@@ -729,6 +745,9 @@ class VAEDeconPredictor:
                 plt.close(cell_prop_figure)
         elif self.config.evaluation.plot_cell_proportions and pred_cell_prop_fp:
             logger.info("Skipping cell proportion comparison plot because no true cell fractions are available.")
+
+        if isinstance(getattr(self, "model", None), CellPropOnlyModel):
+            return
 
         # 2. Plot single-cell gene expression profiles, comparing purified cell-type-specific GEPs with original sctGEPs
         if (self.config.evaluation.plot_single_cell_gep and

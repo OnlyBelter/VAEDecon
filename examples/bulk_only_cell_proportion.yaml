@@ -1,0 +1,48 @@
+# Replace the bulk paths with your log2(CPM + 1) H5AD files.
+# Stage one does not read SCT references or sample-to-cell mappings.
+data:
+  data_dir: ./datasets
+  remove_low_var_genes: false
+  scaling_by_constant: true
+  scaling_factor: 20.0
+  training_target_sets:
+    bulk_a:
+      training_set_file_path: ./datasets/bulk_a.h5ad
+    bulk_b:
+      training_set_file_path: ./datasets/bulk_b.h5ad
+
+training:
+  output_dir: ./output/vae
+  naming_postfix: bulk_only_cell_proportion
+  seed: 42
+  batch_size: 256
+  learning_rate: 0.0001
+  train_split: 0.8
+  val_split: 0.2
+  staged_training:
+    enabled: true
+    run_stages: [cell_prop_predictor_pretrain]
+    stages:
+      - name: cell_prop_predictor_pretrain
+        max_epochs: 1000
+        train_modules: [cell_prop_predictor]
+        loss_overrides:
+          cell_prop: 1.0
+        early_stopping:
+          monitor: val_cell_prop_loss
+          patience: 15
+          min_delta: 0.0
+
+model:
+  predict_cell_prop: true
+  cell_prop_predictor_cls: DeSideCellPropPredictor
+  cell_prop_predictor_alias: cell_prop_predictor
+  cell_prop_activation_function: sigmoid
+  cancer_cell_type_name: Cancer Cells
+  encoder_output_routing:
+    cell_prop_source: cell_prop_predictor
+  # Enable this only when matching pathway files are configured in data.
+  deside_pathway_network: false
+  cell_prop_loss_type: deside_mae_rmse
+  cell_prop_loss_alpha_weight: 0.5
+  cell_prop_loss_weighting: none

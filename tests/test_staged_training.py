@@ -10,8 +10,22 @@ from vaedecon.data import GEPDataset
 import vaedecon.workflow.inference as inference_workflow
 from vaedecon.workflow.train import (
     VAEDeconTrainer, _preflight_training_outputs, _preserve_existing_outputs,
-    _should_reuse_staged_test_results, train_vaedecon,
+    _should_reuse_staged_test_results, _split_staged_dataset, train_vaedecon,
 )
+
+
+def test_staged_split_is_reproducible_independently_of_global_rng():
+    dataset = list(range(100))
+    train, validation = _split_staged_dataset(dataset, 0.8, 0.2, 42)
+    torch.rand(1000)
+    train_again, validation_again = _split_staged_dataset(dataset, 0.8, 0.2, 42)
+    other_train, _ = _split_staged_dataset(dataset, 0.8, 0.2, 43)
+
+    assert train.indices == train_again.indices
+    assert validation.indices == validation_again.indices
+    assert train.indices != other_train.indices
+    assert len(train) == 80
+    assert len(validation) == 20
 
 
 def _base_staged_training_dict() -> dict:

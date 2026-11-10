@@ -97,6 +97,28 @@ print(trained_config.model.model_dir)
 The API example assumes that you run it from the `VAEDecon` package directory
 so the example config path resolves.
 
+## Train a bulk-only predictor
+
+Start with [the bulk-only configuration](../examples/bulk_only_cell_proportion.yaml).
+Replace its two input paths with your H5AD files, then run:
+
+```bash
+vaedecon-easy-train -c examples/bulk_only_cell_proportion.yaml
+```
+
+Run this command from the `VAEDecon` package directory so the example paths
+resolve. Test sets are optional. Stage one writes its best checkpoint,
+predictor weights, split manifest, and held-out predictions under
+`stage_cell_prop_predictor_pretrain/` and promotes the final artifacts to
+`final_model/`. Supply SCT references and, when needed, matched target files
+before starting reconstruction.
+
+Predictor-only inference saves `predicted_cell_prop.csv`. When H5AD inputs
+contain matching cell-fraction labels, it also saves `true_cell_prop.csv` and
+per-cell-type RMSE, Pearson, and CCC in `metrics.csv`, even without plots.
+CSV output uses pandas' default floating-point serialization without an
+explicit decimal-place rounding step.
+
 ## Reuse a trained model with new test sets
 
 Use prediction-only mode when you already have a checkpoint and want the

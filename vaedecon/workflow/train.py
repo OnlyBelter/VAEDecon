@@ -19,6 +19,10 @@ import pandas as pd
 import torch
 from torch.utils.data import Subset, random_split
 from ..data import GEPDataset
+from ..data.bulk_dataset import BulkAlignedDataset, BulkOnlyDataset
+from ..data.bulk_sources import resolve_bulk_source_paths
+from ..models.cell_prop_only import CellPropOnlyModel
+from ..models.base import set_seed
 # from ..models.vae import VAEConfig
 from ..trainers import BaseTrainerL
 from ..utility import log_message, set_fig_style
@@ -26,12 +30,14 @@ from ..utility import load_or_compute_gene_mean_std, load_lightning_metrics, com
 from ..utility import compute_training_sct_cross_sample_gene_var
 from ..utility import create_h5ad_dataset
 from ..utility.read_file import ReadH5AD
+from .bulk_prediction import save_validation_predictions
 from .workflow import create_model, train_model, save_metadata
 from ..trainers.base_trainer import _unwrap_stage_model
 from ..configs.default_config import (
     VAEDeconConfig,
     TrainingConfig,
     ModelConfig,
+    DataConfig,
     GEPDatasetConfig,
     TestSetConfig,
 )
@@ -79,6 +85,13 @@ def _snapshot(path: Path) -> dict:
 
 
 def _training_cache_to_replace(config: VAEDeconConfig) -> Optional[Path]:
+    staged = config.training.staged_training
+    if staged and staged.enabled:
+        selected = staged.run_stages or [stage.name for stage in staged.stages]
+        if "cell_prop_predictor_pretrain" in selected and (
+            config.data.training_target_sets or config.data.simu_bulk_file_path
+        ):
+            return None
     cache_root = Path(config.data.data_dir) / "processed_training_sets"
     if not cache_root.is_dir():
         return None
@@ -211,6 +224,58 @@ def _resolve_path_for_fingerprint(path_like: Optional[str | Path]) -> Optional[s
         return None
     return str(Path(path_like).expanduser().resolve())
 
+
+def _split_staged_dataset(dataset, train_split: float, val_split: float, seed: int):
+    """Split staged training data independently of the global PyTorch RNG."""
+    generator = torch.Generator().manual_seed(seed)
+    return random_split(dataset, [train_split, val_split], generator=generator)
+
+
+def _stages_require_matched_targets(model_config, trainer_config, stage_names):
+    staged = trainer_config.staged_training
+    target_names = (
+        "cell_type_sct_gep_weight", "inter_sample_similarity_weight",
+        "per_sample_residual_var_weight",
+    )
+    stages = [stage for stage in staged.stages if stage.name in stage_names]
+    required = any(
+        float(stage.loss_overrides.get(
+            name, getattr(model_config.loss_coefficient, name, 0.0)
+        ) or 0.0) > 0
+        for stage in stages for name in target_names
+    )
+    required = required or any(name in trainer_config.aux_loss_schedules for name in target_names)
+    adaptive = trainer_config.adaptive_aux_loss_schedule
+    return required or bool(
+        adaptive and adaptive.enabled and any(name in adaptive.targets for name in target_names)
+    )
+
+
+def _restore_bulk_split(dataset, stage_dir: Path, trainer_config: TrainingConfig):
+    """Reuse saved bulk assignments while independently splitting added SCT rows."""
+    manifest = pd.read_csv(stage_dir / "split_manifest.csv", dtype=str)
+    sample_ids = (manifest["source"] + "::" + manifest["sample_id"]).tolist()
+    if len(sample_ids) != len(set(sample_ids)) or set(manifest["split"]) - {"train", "validation"}:
+        raise ValueError("Stage-one split manifest has duplicate or invalid assignments")
+    lookup = {sample_id: index for index, sample_id in enumerate(dataset.sample_ids)}
+    missing = set(sample_ids) - set(lookup)
+    if missing:
+        raise ValueError(f"Reconstruction inputs are missing {len(missing)} stage-one bulk samples")
+    train = [lookup[sample_id] for sample_id, split in zip(sample_ids, manifest["split"]) if split == "train"]
+    val = [lookup[sample_id] for sample_id, split in zip(sample_ids, manifest["split"]) if split == "validation"]
+    excluded_path = stage_dir / "excluded_samples.csv"
+    excluded = set(pd.read_csv(excluded_path, dtype=str)["sample_id"].dropna()) if excluded_path.is_file() else set()
+    bulk_ids = set(sample_ids) | excluded
+    extra = [i for i, sample_id in enumerate(dataset.sample_ids) if sample_id not in bulk_ids]
+    if extra:
+        extra_train, extra_val = _split_staged_dataset(
+            extra, trainer_config.train_split, trainer_config.val_split, trainer_config.seed
+        )
+        train.extend(extra[i] for i in extra_train.indices)
+        val.extend(extra[i] for i in extra_val.indices)
+    return Subset(dataset, train), Subset(dataset, val)
+
+
 def _cuda_usable() -> bool:
     if not torch.cuda.is_available():
         return False
@@ -290,7 +355,7 @@ class VAEDeconTrainer:
 
         logger.info(f"Results will be saved to: {self.result_dir}")
 
-    def _prepare_data(self) -> Tuple[GEPDataset, any, any]:
+    def _prepare_data(self, *, bulk_stage_transition=False, require_matched_targets=None) -> Tuple[GEPDataset, any, any]:
         """Load, preprocess, and split the training data"""
         logger.info("Loading and preparing data...")
 
@@ -304,7 +369,12 @@ class VAEDeconTrainer:
                 )
 
         # Load GEP dataset, PPI and Pathway data will be handled in each specified encoder class.
-        gep_dataset_config = self._build_gepdataset_config()  # training file paths and preprocessing params
+        if bulk_stage_transition:
+            gep_dataset_config = self._build_gepdataset_config(
+                bulk_stage_transition=True, require_matched_targets=require_matched_targets
+            )
+        else:
+            gep_dataset_config = self._build_gepdataset_config()
         dataset = GEPDataset(config=gep_dataset_config)
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
@@ -317,10 +387,19 @@ class VAEDeconTrainer:
                 len(val_set) if val_set is not None else 0,
             )
         else:
-            train_set, val_set = random_split(
-                dataset,
-                [self.config.training.train_split, self.config.training.val_split]
-            )
+            staged = self.config.training.staged_training
+            if staged is not None and staged.enabled:
+                train_set, val_set = _split_staged_dataset(
+                    dataset,
+                    self.config.training.train_split,
+                    self.config.training.val_split,
+                    self.config.training.seed,
+                )
+            else:
+                train_set, val_set = random_split(
+                    dataset,
+                    [self.config.training.train_split, self.config.training.val_split]
+                )
 
             logger.info(f"Train set: {len(train_set)}, Val set: {len(val_set)}")
 
@@ -809,6 +888,12 @@ class VAEDeconTrainer:
             cell_prop_predictor_cls=self.config.model.cell_prop_predictor_cls,
             cell_prop_predictor_alias=self.config.model.cell_prop_predictor_alias,
             deside_pathway_network=self.config.model.deside_pathway_network,
+            deside_one_minus_alpha=self.config.model.deside_one_minus_alpha,
+            deside_prediction_threshold=self.config.model.deside_prediction_threshold,
+            deside_renormalize_non_cancer=self.config.model.deside_renormalize_non_cancer,
+            deside_fill_cancer_residual=self.config.model.deside_fill_cancer_residual,
+            deside_group_cell_types=self.config.model.deside_group_cell_types,
+            deside_cell_types=self.config.model.deside_cell_types,
             deside_hidden_dims=self.config.model.deside_hidden_dims,
             deside_dropout_rate=self.config.model.deside_dropout_rate,
             deside_pathway_hidden_dims=self.config.model.deside_pathway_hidden_dims,
@@ -858,7 +943,7 @@ class VAEDeconTrainer:
         trainer_config.per_device_eval_batch_size = self.config.training.batch_size
         return trainer_config
 
-    def _resolve_training_dataset_inputs(self) -> tuple[list[str | Path], dict]:
+    def _resolve_training_dataset_inputs(self, require_matched_targets=None) -> tuple[list[str | Path], dict]:
         """Resolve training file paths and matched-target settings for the dataset."""
         simu_paths = [
             path for path in (self.config.data.simu_bulk_file_path or [])
@@ -870,7 +955,8 @@ class VAEDeconTrainer:
             getattr(self.config.model.loss_coefficient, "cell_type_sct_gep_weight", 0.0) or 0.0
         )
         training_target_sets = {}
-        if matched_sct_gep_weight > 0:
+        need_targets = matched_sct_gep_weight > 0 if require_matched_targets is None else require_matched_targets
+        if need_targets:
             training_target_sets = dict(self.config.data.training_target_sets or {})
             if not training_target_sets:
                 raise ValueError(
@@ -953,7 +1039,7 @@ class VAEDeconTrainer:
             for set_name, cfg in sorted(training_target_sets.items())
         }
         payload = {
-            "version": 2,
+            "version": 3,
             "file_paths": [
                 _resolve_path_for_fingerprint(path)
                 for path in training_file_paths
@@ -988,17 +1074,38 @@ class VAEDeconTrainer:
         )
         return Path(self.config.data.data_dir) / "processed_training_sets" / fingerprint
 
-    def _build_gepdataset_config(self) -> GEPDatasetConfig:
+    def _build_gepdataset_config(self, *, bulk_stage_transition=False, require_matched_targets=None) -> GEPDatasetConfig:
         """
         Build a config dict for GEPDataset from self.config.data
         """
-        training_file_paths, training_target_sets = self._resolve_training_dataset_inputs()
+        training_file_paths, training_target_sets = self._resolve_training_dataset_inputs(
+            require_matched_targets
+        )
+        namespaces = {}
+        if bulk_stage_transition:
+            sources = resolve_bulk_source_paths(self.config.data)
+            namespaces = {str(path): name for name, path in sources}
+            if not training_target_sets:
+                training_file_paths = [path for _, path in sources] + list(self.config.data.sct_file_path or [])
+            else:
+                for name, target in training_target_sets.items():
+                    for field in ("training_set_sample2cell_id_file_path", "training_sct_gep_file_path"):
+                        value = getattr(target, field)
+                        if not value or not Path(value).is_file():
+                            raise ValueError(
+                                f"reconstruction_training requires data.training_target_sets[{name!r}].{field}: {value}"
+                            )
         self._processed_training_set_dir = self._resolve_processed_training_set_dir(
             training_file_paths=training_file_paths,
             training_target_sets=training_target_sets,
         )
 
-        return GEPDatasetConfig(
+        if namespaces:
+            suffix = hashlib.sha256(json.dumps(namespaces, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+            self._processed_training_set_dir = self._processed_training_set_dir.with_name(
+                self._processed_training_set_dir.name + "_" + suffix
+            )
+        dataset_config = dict(
             file_paths=training_file_paths,
             scaling_by_constant=self.config.data.scaling_by_constant,
             remove_low_var_genes=self.config.data.remove_low_var_genes,
@@ -1020,9 +1127,13 @@ class VAEDeconTrainer:
             pooled_sc_sample_size=self.config.data.pooled_sc_sample_size,
             pooled_sc_seed=self.config.data.pooled_sc_seed,
             training_target_sets=training_target_sets,
+            sample_id_namespace_by_path=namespaces,
             training_sct_gep_cell_prop_threshold=self.config.data.training_sct_gep_cell_prop_threshold,
             processed_data_dir=self._processed_training_set_dir,
         )
+        if bulk_stage_transition:
+            return GEPDatasetConfig.model_validate(dataset_config, context={"defer_sct_requirements": True})
+        return GEPDatasetConfig(**dataset_config)
 
     @staticmethod
     def _resolve_stage_named_modules(model) -> Dict[str, torch.nn.Module]:
@@ -1124,6 +1235,35 @@ class VAEDeconTrainer:
         return predictor_state_dict
 
     def _load_cell_prop_predictor_checkpoint(self, model, checkpoint_path: Path) -> None:
+        artifact_dir = checkpoint_path.parent
+        marker = artifact_dir / "model_kind.json"
+        if marker.is_file() and json.loads(marker.read_text(encoding="utf-8")).get("model_kind") == "cell_prop_only":
+            base_model = _unwrap_stage_model(model)
+            saved_model = ModelConfig.from_json_file(artifact_dir / "model_config.json")
+            current_model = base_model.model_config
+            for label, filename, current_path in (
+                ("gene order", "input_gene_list.txt", current_model.input_gene_list_fp),
+                ("cell-type order", "cell_type_list.txt", current_model.cell_type_fp),
+            ):
+                expected = (artifact_dir / filename).read_text(encoding="utf-8").splitlines()
+                actual = Path(current_path).read_text(encoding="utf-8").splitlines()
+                if expected != actual:
+                    raise ValueError(f"Predictor checkpoint {label} does not match reconstruction inputs")
+            for name in (
+                "cell_prop_predictor_cls", "cell_prop_activation_function", "cancer_cell_type_name",
+                "deside_pathway_network", "deside_one_minus_alpha", "deside_hidden_dims", "deside_dropout_rate",
+                "deside_pathway_hidden_dims", "deside_pathway_dropout_rate", "deside_input_gene_list",
+                "deside_normalization", "deside_normalization_layer",
+            ):
+                if getattr(saved_model, name) != getattr(current_model, name):
+                    raise ValueError(f"Predictor checkpoint setting {name!r} does not match reconstruction")
+            saved_data = DataConfig.model_validate(
+                DataConfig._dict_from_json(artifact_dir / "data_config.json"),
+                context={"defer_sct_requirements": True},
+            )
+            for name in ("scaling_by_constant", "scaling_factor", "pathway_file_path"):
+                if getattr(saved_data, name) != getattr(base_model.data_config, name):
+                    raise ValueError(f"Predictor checkpoint preprocessing {name!r} does not match reconstruction")
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         predictor_state_dict = self._extract_cell_prop_predictor_state_dict_from_checkpoint(checkpoint)
         if not predictor_state_dict:
@@ -1373,6 +1513,120 @@ class VAEDeconTrainer:
             data_config=self.config.data,
         )
 
+    def _train_bulk_stage(self, trainer_config: TrainingConfig):
+        """Prepare and train the first stage without constructing a full VAE."""
+        staged = trainer_config.staged_training
+        stage_cfg = next(stage for stage in staged.stages if stage.name == "cell_prop_predictor_pretrain")
+        if set(stage_cfg.train_modules) != {"cell_prop_predictor"}:
+            raise ValueError("cell_prop_predictor_pretrain can train only cell_prop_predictor")
+        if self.config.model.encoder_output_routing.cell_prop_source != self.config.model.cell_prop_predictor_alias:
+            raise ValueError(
+                "cell_prop_predictor_pretrain requires encoder_output_routing.cell_prop_source "
+                "to select the cell_prop_predictor alias"
+            )
+        weight = stage_cfg.loss_overrides.get("cell_prop", self.config.model.loss_coefficient.cell_prop)
+        if weight <= 0:
+            raise ValueError("cell_prop_predictor_pretrain requires a positive cell_prop loss weight")
+        if abs(trainer_config.train_split + trainer_config.val_split - 1.0) >= 1e-6:
+            raise ValueError("training.train_split and training.val_split must sum to one")
+        logger.info("Preparing bulk-only stage; SCT inputs are deferred until reconstruction.")
+        dataset = BulkOnlyDataset(
+            self.config.data,
+            self.config.model,
+            preserve_existing=lambda path: _preserve_existing_outputs(
+                [path], overwrite=self._overwrite_outputs
+            ),
+        )
+        self._processed_training_set_dir = dataset.processed_data_dir
+        if trainer_config.debug_overfit.enabled:
+            train_set, val_set = self._build_debug_overfit_subsets(dataset)
+        else:
+            train_set, val_set = _split_staged_dataset(
+                dataset, trainer_config.train_split, trainer_config.val_split, trainer_config.seed
+            )
+        if val_set is None or len(val_set) == 0:
+            raise ValueError("cell_prop_predictor_pretrain requires a nonempty validation split")
+
+        stage_dir = self.result_dir / "stage_cell_prop_predictor_pretrain"
+        stage_dir.mkdir(parents=True, exist_ok=False)
+        stage_model_config = self.config.model.model_copy(deep=True, update={
+            "input_dim": (1, len(dataset.gene_list)),
+            "n_cell_types": len(dataset.cell_types),
+            "input_gene_list_fp": stage_dir / "input_gene_list.txt",
+            "cell_type_fp": stage_dir / "cell_type_list.txt",
+            "gene_mean_std_fp": None,
+        })
+        dataset.save_gene_list(stage_model_config.input_gene_list_fp)
+        dataset.save_cell_types(stage_model_config.cell_type_fp)
+        manifest_rows = []
+        for split_name, subset in (("train", train_set), ("validation", val_set)):
+            for index in subset.indices:
+                source, sample_id = dataset.sample_ids[index].split("::", 1)
+                manifest_rows.append((source, sample_id, split_name))
+        pd.DataFrame(manifest_rows, columns=["source", "sample_id", "split"]).to_csv(
+            stage_dir / "split_manifest.csv", index=False
+        )
+        pd.DataFrame({"sample_id": dataset.excluded_sample_ids}).to_csv(
+            stage_dir / "excluded_samples.csv", index=False
+        )
+        (stage_dir / "model_kind.json").write_text(
+            json.dumps({
+                "model_kind": "cell_prop_only",
+                "expression_space": "log2cpm1p",
+                "normalize_training_intersection": dataset._normalize_intersection,
+                "source_names": [source.name for source in dataset.sources],
+            }, indent=2), encoding="utf-8"
+        )
+        set_seed(trainer_config.seed)
+        model = CellPropOnlyModel(stage_model_config, self.config.data)
+        self._apply_stage_loss_overrides(model, {"cell_prop": float(weight)})
+        stage_training_config = self._build_stage_training_config(trainer_config, stage_cfg=stage_cfg)
+        stage_training_config.aux_loss_schedules = {}
+        adaptive = stage_training_config.adaptive_aux_loss_schedule
+        if adaptive and adaptive.enabled:
+            target = adaptive.targets.get("cell_prop")
+            stage_training_config.adaptive_aux_loss_schedule = (
+                adaptive.model_copy(update={"targets": {"cell_prop": target}, "pair_targets": False})
+                if target is not None else None
+            )
+        stage_trainer = BaseTrainerL(
+            model=model,
+            result_dir=str(stage_dir),
+            train_dataset=train_set,
+            eval_dataset=val_set,
+            training_config=stage_training_config,
+            data_config=self.config.data,
+            n_early_stopping_patience=stage_cfg.early_stopping.patience,
+            monitor_metric=stage_cfg.early_stopping.monitor,
+            early_stopping_min_delta=stage_cfg.early_stopping.min_delta,
+            max_epochs_override=stage_cfg.max_epochs,
+            stage_name=stage_cfg.name,
+        )
+        stage_trainer.train()
+        best_path, last_path = self._resolve_stage_checkpoint_paths(stage_dir)
+        best = torch.load(best_path, map_location="cpu", weights_only=False)
+        stage_trainer.pl_model.load_state_dict(best["state_dict"])
+        self._export_cell_prop_predictor_checkpoint(model, stage_dir / "cell_prop_predictor_state_dict.pt")
+        save_validation_predictions(model, val_set, stage_dir / "validation_results", trainer_config.batch_size)
+        self._plot_stage_training_history(stage_name=stage_cfg.name, stage_dir=stage_dir)
+        row = {
+            "stage_name": stage_cfg.name,
+            "stage_dir": str(stage_dir),
+            "init_source": "fresh_model",
+            "init_checkpoint": "",
+            "best_checkpoint": str(best_path),
+            "last_checkpoint": str(last_path),
+            "learning_rate": stage_training_config.learning_rate,
+            "learning_rate_scale": stage_cfg.learning_rate_scale,
+            "monitor": stage_cfg.early_stopping.monitor,
+            "patience": stage_cfg.early_stopping.patience,
+            "min_delta": stage_cfg.early_stopping.min_delta,
+            "train_modules": "cell_prop_predictor",
+            "freeze_modules": ",".join(stage_cfg.freeze_modules),
+            "test_results_dir": "",
+        }
+        return dataset, train_set, val_set, model, row
+
     def _train_with_staged_training(
         self,
         *,
@@ -1380,6 +1634,7 @@ class VAEDeconTrainer:
         train_set,
         val_set,
         trainer_config: TrainingConfig,
+        completed_stage_rows: Optional[list[dict]] = None,
     ) -> None:
         staged_training_cfg = trainer_config.staged_training
         if staged_training_cfg is None or not staged_training_cfg.enabled:
@@ -1393,11 +1648,15 @@ class VAEDeconTrainer:
 
         base_training_config = trainer_config.model_copy(deep=True)
         base_model_config = self.config.model.model_copy(deep=True)
-        executed_stage_best_checkpoints: Dict[str, Path] = {}
-        stage_summary_rows: list[dict] = []
+        stage_summary_rows: list[dict] = list(completed_stage_rows or [])
+        executed_stage_best_checkpoints: Dict[str, Path] = {
+            row["stage_name"]: Path(row["best_checkpoint"]) for row in stage_summary_rows
+        }
 
         logger.info("Starting staged training with stages: %s", ", ".join(run_stage_names))
         for stage_index, stage_cfg in enumerate(execution_stages, start=1):
+            if stage_cfg.name in executed_stage_best_checkpoints:
+                continue
             configured_index = configured_stage_names.index(stage_cfg.name)
             direct_predecessor = configured_stage_names[configured_index - 1] if configured_index > 0 else None
             init_checkpoint_path: Optional[Path] = None
@@ -1422,7 +1681,7 @@ class VAEDeconTrainer:
                     stage_cfg.name,
                     init_checkpoint_path,
                 )
-                if stage_cfg.name == "reconstruction_training" and direct_predecessor not in executed_stage_best_checkpoints:
+                if stage_cfg.name == "reconstruction_training" and direct_predecessor == "cell_prop_predictor_pretrain":
                     self._load_cell_prop_predictor_checkpoint(model, init_checkpoint_path)
                 else:
                     self._load_stage_checkpoint(model, init_checkpoint_path)
@@ -1538,13 +1797,99 @@ class VAEDeconTrainer:
             _preflight_training_outputs(self.config, Path(self.model_dir), overwrite=self._overwrite_outputs)
             self._outputs_preflighted = True
             Path(self.model_dir).mkdir(parents=True, exist_ok=False)
-        dataset, train_set, val_set = self._prepare_data()  # self.config.model is updated
-        model = self._create_model(model_config=self.config.model)
         trainer_config = self._build_trainer_config()
 
         # Train the model
         logger.info("Starting training...")
         staged_training_cfg = trainer_config.staged_training
+        selected_stages = (
+            staged_training_cfg.run_stages or [stage.name for stage in staged_training_cfg.stages]
+            if staged_training_cfg and staged_training_cfg.enabled else []
+        )
+        if "cell_prop_predictor_pretrain" in selected_stages:
+            self._final_output_snapshot = _snapshot(Path(self.model_dir))
+            bulk, bulk_train, bulk_val, bulk_model, stage_row = self._train_bulk_stage(trainer_config)
+            if len(selected_stages) == 1:
+                self.config.model = self.config.model.model_copy(deep=True, update={
+                    "input_dim": (1, len(bulk.gene_list)),
+                    "n_cell_types": len(bulk.cell_types),
+                    "gene_mean_std_fp": None,
+                })
+                self._promote_stage_outputs_to_final_model(
+                    final_stage_dir=Path(stage_row["stage_dir"]),
+                    model=bulk_model,
+                    base_training_config=trainer_config,
+                    stage_summary_rows=[stage_row],
+                )
+                self._run_final_model_test_set_prediction(
+                    final_stage_name=stage_row["stage_name"],
+                    final_stage_dir=Path(stage_row["stage_dir"]),
+                )
+                return self.config
+            try:
+                require_targets = _stages_require_matched_targets(
+                    self.config.model, trainer_config,
+                    [name for name in selected_stages if name != "cell_prop_predictor_pretrain"],
+                )
+                self.config.model = self.config.model.model_copy(
+                    deep=True, update={"n_cell_types": len(bulk.cell_types)}
+                )
+                dataset, _, _ = self._prepare_data(
+                    bulk_stage_transition=True, require_matched_targets=require_targets
+                )
+                if dataset.gene_list != bulk.gene_list or dataset.cell_types != bulk.cell_types:
+                    raise ValueError("Reconstruction inputs do not match the stage-one gene or cell-type order")
+                train_set, val_set = _restore_bulk_split(
+                    dataset, Path(stage_row["stage_dir"]), trainer_config
+                )
+                aligned = BulkAlignedDataset(dataset, bulk)
+                train_set, val_set = Subset(aligned, train_set.indices), Subset(aligned, val_set.indices)
+                model = self._create_model(model_config=self.config.model)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Stage-one predictor is saved at "
+                    f"{stage_row['best_checkpoint']}. Prepare the reconstruction inputs and "
+                    "resume with training.staged_training.stage_init_checkpoints."
+                ) from exc
+            self._final_output_snapshot = _snapshot(Path(self.model_dir))
+            self._train_with_staged_training(
+                model=model, train_set=train_set, val_set=val_set,
+                trainer_config=trainer_config, completed_stage_rows=[stage_row],
+            )
+            return self.config
+
+        if staged_training_cfg and staged_training_cfg.enabled and (
+            self.config.data.training_target_sets or self.config.data.simu_bulk_file_path
+        ):
+            init = staged_training_cfg.stage_init_checkpoints.get(selected_stages[0])
+            stage_dir = Path(init).parent if init else None
+            marker = stage_dir / "model_kind.json" if stage_dir else None
+            predictor_only = bool(
+                marker and marker.is_file()
+                and json.loads(marker.read_text(encoding="utf-8")).get("model_kind") == "cell_prop_only"
+            )
+            if predictor_only:
+                saved_types = (stage_dir / "cell_type_list.txt").read_text(encoding="utf-8").splitlines()
+                self.config.model = self.config.model.model_copy(
+                    deep=True, update={"n_cell_types": len(saved_types)}
+                )
+            require_targets = _stages_require_matched_targets(
+                self.config.model, trainer_config, selected_stages
+            )
+            dataset, train_set, val_set = self._prepare_data(
+                bulk_stage_transition=True, require_matched_targets=require_targets
+            )
+            if predictor_only:
+                train_set, val_set = _restore_bulk_split(dataset, stage_dir, trainer_config)
+                bulk_config = self.config.data.model_copy(deep=True, update={"force_reprocess": False})
+                bulk = BulkOnlyDataset(bulk_config, self.config.model)
+                if dataset.gene_list != bulk.gene_list or dataset.cell_types != bulk.cell_types:
+                    raise ValueError("Reconstruction inputs do not match the predictor's bulk input order")
+                aligned = BulkAlignedDataset(dataset, bulk)
+                train_set, val_set = Subset(aligned, train_set.indices), Subset(aligned, val_set.indices)
+        else:
+            dataset, train_set, val_set = self._prepare_data()
+        model = self._create_model(model_config=self.config.model)
         if staged_training_cfg is not None and staged_training_cfg.enabled:
             self._final_output_snapshot = _snapshot(Path(self.model_dir))
             self._train_with_staged_training(
@@ -1754,6 +2099,7 @@ def train_vaedecon(
 
     # Train model
     trainer = VAEDeconTrainer(config)
+    trainer._overwrite_outputs = overwrite_outputs
     trainer._outputs_preflighted = True
     try:
         trained_config = trainer.train()

@@ -4,6 +4,22 @@ This changelog records notable user-facing changes in `VAEDecon`. It focuses
 on behavior, configuration, and workflow updates that affect training,
 inference, and evaluation.
 
+## November 10, 2026
+
+### Training precision and reproducibility
+
+- Train stage one using only named bulk H5AD inputs and proportion labels,
+  without constructing the VAE or opening SCT inputs. Save a predictor-only
+  checkpoint and held-out validation predictions.
+- Load predictor-only checkpoints for H5AD and CSV cell-proportion inference.
+- Transfer compatible predictor checkpoints to reconstruction after SCT
+  preparation; preserve bulk train/validation assignments.
+- Preserve stored H5AD cell-fraction precision when loading labels. The
+  training cache fingerprint changes so older rounded caches aren't reused.
+- Add `deside_mae_rmse`, a batch-wide cell-proportion loss. Existing loss
+  choices retain their behavior.
+- Seed staged-training splits explicitly using `training.seed`.
+
 ## November 2, 2026
 
 ### Training output safety

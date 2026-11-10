@@ -119,9 +119,8 @@ Use the pooled single-cell fields only when
 
 ### Matched supervision bundles
 
-`data.training_target_sets` defines optional matched supervision bundles for
-training workflows that need aligned bulk, sampled-cell mapping, and SCT
-reference inputs.
+`data.training_target_sets` defines named bulk inputs and optional matched
+supervision bundles.
 
 Each named entry can include:
 
@@ -131,6 +130,11 @@ Each named entry can include:
 
 This section is especially relevant when you enable matched sctGEP
 supervision losses.
+
+For `cell_prop_predictor_pretrain`, only `training_set_file_path` is required.
+The stage ignores mapping and SCT paths until reconstruction begins. When
+`simu_bulk_file_path` is also set, it must specify the same bulk files.
+Sample IDs are recorded as `<training-set-name>::<sample-id>`.
 
 When `model.loss_coefficient.cell_type_sct_gep_weight` is greater than zero,
 VAEDecon uses `training_set_file_path` values from these bundles as bulk
@@ -233,13 +237,34 @@ The expected stage order is:
 
 At a high level:
 
-1. Stage 1 trains the cell-proportion predictor first.
+1. Stage 1 trains only the cell-proportion predictor from bulk inputs and
+   cell-fraction labels. It does not instantiate an encoder or decoder.
 2. Stage 2 trains the encoder and decoder for GEP reconstruction while the
    predictor stays frozen.
 3. Stage 3 fine-tunes the full system jointly with a smaller learning rate.
 
 This staged workflow reduces the difficulty of optimizing cell-proportion
 prediction and cell-type-specific GEP reconstruction jointly from the start.
+The historical stage-one objective also included reconstruction through a
+frozen decoder; its loss curves are not directly comparable with this
+proportion-only objective.
+
+Stage one retains stored label precision, excludes zero-total-label rows,
+and saves `split_manifest.csv`, `excluded_samples.csv`, and held-out
+`validation_results`. PyTorch assigns the split using `training.seed`.
+The predictor-only checkpoint can be used for H5AD or CSV inference without
+SCT reference files.
+
+The optional `model.deside_group_cell_types` mapping combines named subtypes;
+`model.deside_cell_types` selects and orders the resulting cell types.
+Sigmoid models require the cancer cell type in that selection. Prediction
+options include `deside_one_minus_alpha`, `deside_prediction_threshold`,
+`deside_renormalize_non_cancer`, and `deside_fill_cancer_residual`. The
+threshold is applied before normalization. Predictor-only CSV output uses
+`%g` formatting.
+
+Grouped predictors can transfer only when the reconstruction inputs have the
+same gene and cell-type order and the full VAE supports those cell types.
 
 ### Minimal staged training block
 
@@ -414,6 +439,11 @@ These fields tune the dedicated Stage 1 predictor:
 You typically edit these only when you are actively tuning the predictor
 architecture.
 
+With `model.deside_input_gene_list: intersection_with_pathway_genes`,
+stage one restricts its ordered input genes to pathway genes before
+normalization. A later reconstruction stage must use the same ordered gene
+list, for example through `data.gene_list_file`.
+
 ### Residual GEP learning
 
 Residual learning is controlled by:
@@ -437,6 +467,13 @@ Some auxiliary losses are mode-specific. For example,
 ### Loss coefficients
 
 `model.loss_coefficient` is the main place to tune training objectives.
+
+Set `model.cell_prop_loss_type` to `deside_mae_rmse` to combine the mean
+absolute error and root mean squared error over all values in a batch. Set
+`cell_prop_loss_alpha_weight` to the absolute-error coefficient; the
+root-mean-squared-error coefficient is `1 - alpha`. Set
+`cell_prop_loss_weighting` to `none` to match DeSide's unweighted objective.
+The existing `l1_rmse` option uses per-sample sums and remains unchanged.
 
 Common fields include:
 

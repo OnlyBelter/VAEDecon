@@ -1900,6 +1900,12 @@ class VAE(BaseAE):
             ) or 0.0
         )
 
+        if loss_type == "deside_mae_rmse":
+            error = supervised_pred - target
+            mae = (weight * error.abs()).mean()
+            rmse = torch.sqrt((weight * error.square()).mean())
+            return (alpha_weight * mae + (1.0 - alpha_weight) * rmse).expand(target.shape[0])
+
         if loss_type == "l1_rmse":
             mae = (weight * torch.abs(supervised_pred - target)).sum(dim=-1)
             rmse = torch.sqrt(
@@ -1959,6 +1965,12 @@ class VAE(BaseAE):
                 if supervised_pred is None:
                     supervised_pred = remove_cancer_cell_type(pred_cell_prop, self.cancer_cell_type_index)
                 target = remove_cancer_cell_type(y, self.cancer_cell_type_index)
+                if (
+                    getattr(self.model_config, "deside_one_minus_alpha", False)
+                    and getattr(self, "cell_prop_source", None) == getattr(self, "cell_prop_predictor_alias", None)
+                    and raw_non_cancer_cell_prop is not None
+                ):
+                    target = 1 - target
             elif (
                 self.cell_prop_activation_function in {"softmax", "sigmoid_all_norm"}
                 and pred_cell_prop is not None

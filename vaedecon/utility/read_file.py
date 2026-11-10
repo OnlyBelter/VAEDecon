@@ -214,10 +214,11 @@ class ReadH5AD(object):
     def get_cell_fraction(self) -> Optional[pd.DataFrame]:
         """
         Get cell fraction from .obs, (samples by cell types).
+        Preserve stored precision; callers may round values for display or export.
         Returns None if .obs is empty or has no columns.
         """
         if self.dataset.n_obs > 0 and self.dataset.obs.shape[1] > 0:
-            return self.dataset.obs.copy().round(3)  # Return a copy
+            return self.dataset.obs.copy()
         else:
             logger.warning('No observation metadata (cell fractions) found in .obs or dataset is empty.')
             return None

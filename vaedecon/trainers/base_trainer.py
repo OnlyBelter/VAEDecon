@@ -47,6 +47,8 @@ def _unwrap_stage_model(model: BaseAE) -> BaseAE:
 def _stage_sct_target_requirements(model: BaseAE, training_config: TrainingConfig) -> tuple[bool, bool]:
     """Conservatively determine which matched targets a stage can require."""
     base_model = _unwrap_stage_model(model)
+    if getattr(base_model, "model_name", None) == "CellPropOnly":
+        return False, False
     if not isinstance(base_model, VAE):
         return True, True
     loss = getattr(getattr(base_model, "model_config", None), "loss_coefficient", None)
@@ -107,6 +109,8 @@ def _stage_dataset_view(dataset: Dataset, include_gep: bool, include_mask: bool)
         if type(base_dataset) is not Subset:
             return dataset
         base_dataset = base_dataset.dataset
+    if getattr(base_dataset, "stage_aware_target_loading", False):
+        return _StageGEPDatasetView(dataset, include_gep, include_mask)
     if not isinstance(base_dataset, GEPDataset):
         return dataset
     if (
@@ -834,6 +838,8 @@ class PLTrainer(L.LightningModule):
         return output.loss
 
     def on_train_batch_start(self, batch: Dict[str, Any], batch_idx: int) -> None:
+        if getattr(_unwrap_stage_model(self.model), "model_name", None) == "CellPropOnly":
+            return
         cfg = self.training_config
         schedule = getattr(cfg, "gene_stat_weight_schedule", None)
         if schedule != "linear":
@@ -1328,7 +1334,9 @@ class BaseTrainerL:
 
         trainer = L.Trainer(
             max_epochs=effective_max_epochs,
-            accelerator="auto",
+            accelerator={"cuda": "gpu", "cpu": "cpu", "mps": "mps"}.get(
+                self.training_config.device, "auto"
+            ),
             devices=self.training_config.devices,
             callbacks=callbacks,
             logger=csv_logger,

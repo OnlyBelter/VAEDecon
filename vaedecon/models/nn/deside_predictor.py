@@ -226,8 +226,14 @@ class DeSideCellPropPredictor(BaseEncoder):
             head_output = self.output_layer(features)
             if self.cell_prop_activation_function == "sigmoid":
                 output["raw_non_cancer_cell_prop"] = torch.sigmoid(head_output)
+            fraction_head_output = head_output
+            if (
+                self.cell_prop_activation_function == "sigmoid"
+                and getattr(self.args, "deside_one_minus_alpha", False)
+            ):
+                fraction_head_output = -head_output
             cell_prop, dd_alpha = build_cell_prop_from_head_output(
-                head_output=head_output,
+                head_output=fraction_head_output,
                 activation_function=self.cell_prop_activation_function,
                 n_cell_types=self.n_cell_types,
                 eps=eps,

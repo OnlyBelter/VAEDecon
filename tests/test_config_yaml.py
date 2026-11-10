@@ -672,6 +672,14 @@ def test_training_saved_model_selection_defaults_to_best():
     assert loaded.training.saved_model_selection == "best"
 
 
+def test_bulk_only_example_config_loads():
+    config_path = Path(__file__).resolve().parents[1] / "examples" / "bulk_only_cell_proportion.yaml"
+    loaded = VAEDeconConfig.from_yaml(config_path)
+    assert loaded.training.staged_training.run_stages == ["cell_prop_predictor_pretrain"]
+    assert loaded.model.cell_prop_loss_type == "deside_mae_rmse"
+    assert loaded.model.deside_pathway_network is False
+
+
 def test_cell_prop_loss_weight_clamp_requires_positive_ordered_bounds():
     with pytest.raises(ValueError, match="cell_prop_loss_weight_clamp must satisfy 0 < min <= max"):
         VAEDeconConfig.from_dict(

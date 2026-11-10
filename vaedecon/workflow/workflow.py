@@ -17,6 +17,7 @@ from ..models.gnn import EncoderSGNN
 from ..models.nn import (EncoderMLP, DecoderMLP, DecoderConditionalMLP, EncoderHybrid, EncoderResMLP, DecoderResMLP,
                          PositionalEncoding, GeneTransformerEncoder, EncoderPathNet, DeSideCellPropPredictor)
 from ..models.vae import VAE
+from ..models.cell_prop_only import CellPropOnlyModel
 from ..configs import ModelConfig, TrainingConfig, DataConfig
 from ..trainers import BaseTrainerL, PLTrainer, TrainingPipeline
 
@@ -307,7 +308,18 @@ def load_trained_model(
         saved_training_config=training_config,
         training_config_override=training_config_override,
     )
-    data_config = DataConfig.from_json_file(data_config_path)
+    marker_path = Path(model_dir) / "model_kind.json"
+    model_kind = (
+        json.loads(marker_path.read_text(encoding="utf-8")).get("model_kind")
+        if marker_path.is_file() else None
+    )
+    if model_kind == "cell_prop_only":
+        data_config = DataConfig.model_validate(
+            DataConfig._dict_from_json(data_config_path),
+            context={"defer_sct_requirements": True},
+        )
+    else:
+        data_config = DataConfig.from_json_file(data_config_path)
     model_file_path = _resolve_trained_checkpoint_path(
         model_dir=model_dir,
         training_config=training_config,
@@ -340,6 +352,19 @@ def load_trained_model(
             candidate = base_dir / pth.name
             fixed_paths.append(candidate if candidate.exists() else pth)
         data_config.pathway_file_path = fixed_paths
+
+    if model_kind == "cell_prop_only":
+        model_config.input_gene_list_fp = base_dir / "input_gene_list.txt"
+        model_config.cell_type_fp = base_dir / "cell_type_list.txt"
+        model_config.gene_mean_std_fp = None
+        model = CellPropOnlyModel(model_config, data_config)
+        checkpoint = torch.load(model_file_path, map_location="cpu", weights_only=False)
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        model.load_state_dict({
+            key.removeprefix("model."): value for key, value in state_dict.items()
+        }, strict=True)
+        model.eval()
+        return model
 
     model = create_model(model_config=model_config,
                          data_config=data_config,

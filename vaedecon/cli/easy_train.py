@@ -357,6 +357,18 @@ def _run_prediction(
             if path and str(path).strip():
                 protected.append(Path(path))
 
+    has_legacy_test = bool(
+        getattr(config.data, "test_set_file_path", None)
+        and str(config.data.test_set_file_path).strip()
+    )
+    if not configured_sets and not has_legacy_test:
+        if skip_training:
+            raise ValueError("Prediction-only mode requires a configured test set.")
+        logger.info("No test sets configured; training completed without prediction.")
+        if not config_save_path.exists() and not config_save_path.is_symlink():
+            config.to_yaml(config_save_path, exclusive=True)
+        return
+
     if _should_reuse_staged_test_results(
         config,
         final_test_results_dir,

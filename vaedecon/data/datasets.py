@@ -1696,10 +1696,11 @@ class GEPDataset(Dataset):
     def _build_sample_id_namespace_by_path(self) -> Dict[str, str]:
         """Build stable per-file sample-ID namespaces for training-time merged datasets."""
         training_target_sets = dict(self.config.training_target_sets or {})
-        if not training_target_sets:
+        explicit_namespaces = dict(self.config.sample_id_namespace_by_path or {})
+        if not training_target_sets and not explicit_namespaces:
             return {}
 
-        namespace_by_path: Dict[str, str] = {}
+        namespace_by_path: Dict[str, str] = explicit_namespaces
         for target_set_name, target_cfg in training_target_sets.items():
             resolved_path = str(Path(target_cfg.training_set_file_path).expanduser().resolve())
             namespace_by_path[resolved_path] = str(target_set_name)

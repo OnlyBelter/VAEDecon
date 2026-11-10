@@ -11,13 +11,13 @@ from ..workflow.inference import predict_vaedecon
 
 
 def train_command(args):
-    """训练命令"""
+    """Train VAEDecon model"""
     if args.config:
         config = VAEDeconConfig.from_yaml(args.config)
     else:
         config = VAEDeconConfig()
 
-    # 覆盖配置参数
+    # override config parameters
     if args.data_dir:
         config.data.data_dir = args.data_dir
     if args.output_dir:
@@ -31,19 +31,20 @@ def train_command(args):
     if args.naming_postfix:
         config.training.naming_postfix = args.naming_postfix
 
-    # 执行训练
+    # run training
     model_dir = train_vaedecon(config=config, overwrite_outputs=args.overwrite_outputs)
     print(f"\n✅ Training completed! Model saved to: {model_dir}")
 
 
 def predict_command(args):
-    """预测命令"""
+    """Run inference with trained VAEDecon model"""
     if args.config:
         config = VAEDeconConfig.from_yaml(args.config)
     else:
-        config = None
+        config = VAEDeconConfig()
+    config.evaluation.val_batch_size = args.batch_size
 
-    # 执行预测
+    # run inference
     results = predict_vaedecon(
         model_dir=args.model_dir,
         data_file_path=args.data_file,
@@ -52,14 +53,12 @@ def predict_command(args):
         device=args.device,
         visualize=args.visualize,
         pred_cell_prop_file_path=args.pred_cell_prop,
-        batch_size=args.batch_size,
     )
 
     print(f"\n✅ Prediction completed! Results saved to: {args.output_dir or 'default location'}")
 
 
 def main():
-    """主函数"""
     parser = argparse.ArgumentParser(
         description='VAEDecon: Variational Autoencoder for Deconvolution',
         formatter_class=argparse.RawDescriptionHelpFormatter,

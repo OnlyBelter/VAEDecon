@@ -5,6 +5,22 @@ from pathlib import Path
 import pytest
 
 import vaedecon.cli.easy_train as easy_train_cli
+from vaedecon.configs import VAEDeconConfig
+
+
+def test_training_without_test_sets_skips_prediction(tmp_path, monkeypatch):
+    config = VAEDeconConfig()
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    config_file = tmp_path / "input.yaml"
+    config_file.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(easy_train_cli, "predict_vaedecon", lambda **kwargs: pytest.fail("unexpected prediction"))
+    easy_train_cli._run_prediction(
+        config, config_file=str(config_file), model_dir_path=model_dir,
+        configured_sets={}, skip_training=False, overwrite_outputs=False,
+    )
+    assert (model_dir / "used_config.yaml").is_file()
+    assert not (model_dir / "test_results").exists()
 
 
 def test_email_settings_load_and_normalize_port(tmp_path):

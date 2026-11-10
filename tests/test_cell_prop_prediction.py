@@ -613,6 +613,22 @@ def test_sigmoid_cell_prop_loss_uses_raw_non_cancer_predictions_when_provided():
     assert torch.allclose(cell_prop_loss, expected_loss)
 
 
+def test_sigmoid_vae_supervision_can_use_complement_targets():
+    dummy = _build_dummy_vae(
+        cell_prop_weight=1.0, activation_function="sigmoid", cancer_cell_type_index=1
+    )
+    dummy.model_config.deside_one_minus_alpha = True
+    dummy.cell_prop_source = dummy.cell_prop_predictor_alias = "predictor"
+    raw = torch.tensor([[0.8, 0.7], [0.5, 0.6]])
+    target = torch.tensor([[0.2, 0.5, 0.3], [0.4, 0.1, 0.5]])
+    _, loss = VAE._cell_prop_dirichlet_loss(
+        dummy, y=target, dd_alpha=None, pred_cell_prop=target,
+        raw_non_cancer_cell_prop=raw, batch_size=2, device=torch.device("cpu"),
+    )
+    expected = (raw - (1 - target[:, [0, 2]])).square().sum(dim=-1)
+    torch.testing.assert_close(loss, expected)
+
+
 def test_softmax_cell_prop_loss_supports_l1_kl():
     dummy = _build_dummy_vae(
         cell_prop_weight=1.0,
@@ -684,6 +700,32 @@ def test_softmax_cell_prop_loss_supports_l1_rmse():
     expected_loss = expected_loss + 0.5 * torch.sqrt(torch.square(diff).sum(dim=-1))
 
     assert torch.allclose(cell_prop_loss, expected_loss)
+
+
+def test_deside_batch_loss_matches_value_and_gradient():
+    dummy = _build_dummy_vae(
+        activation_function="softmax",
+        cell_prop_loss_type="deside_mae_rmse",
+        cell_prop_loss_alpha_weight=0.4,
+    )
+    pred = torch.tensor(
+        [[0.25, 0.35, 0.40], [0.10, 0.60, 0.30]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    target = torch.tensor(
+        [[0.20, 0.50, 0.30], [0.30, 0.40, 0.30]],
+        dtype=torch.float32,
+    )
+    actual = VAE._cell_prop_supervision_loss(dummy, pred, target).mean()
+    actual_gradient = torch.autograd.grad(actual, pred)[0]
+
+    reference_pred = pred.detach().clone().requires_grad_()
+    difference = reference_pred - target
+    expected = 0.4 * difference.abs().mean() + 0.6 * difference.square().mean().sqrt()
+    expected_gradient = torch.autograd.grad(expected, reference_pred)[0]
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual_gradient, expected_gradient)
 
 
 def test_cell_prop_supervision_loss_low_prop_inverse_weights_mse():
