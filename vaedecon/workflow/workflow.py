@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import numpy as np
 import pandas as pd
@@ -23,6 +24,7 @@ from ..trainers import BaseTrainerL, PLTrainer, TrainingPipeline
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
+logger = logging.getLogger(__name__)
 
 
 def _cuda_usable() -> bool:
@@ -34,6 +36,31 @@ def _cuda_usable() -> bool:
         return True
     except Exception:
         return False
+
+
+def _maybe_compile_model(model, model_config, device):
+    """Apply the configured CUDA compilation policy to either model kind."""
+    if not model_config.torch_compile:
+        return model
+    effective_device = (device or "auto").lower()
+    if effective_device == "auto":
+        effective_device = "cuda" if _cuda_usable() else "cpu"
+    if effective_device != "cuda":
+        logger.warning("torch.compile requested but skipped on device %s", effective_device)
+        warnings.warn(
+            f"torch.compile() requested but skipped on device '{effective_device}'. "
+            "Compilation is only enabled for CUDA to avoid backend issues (e.g., MPS/Inductor)."
+        )
+    elif hasattr(torch, "compile"):
+        try:
+            logger.info("Enabling torch.compile for %s on CUDA", getattr(model, "model_name", type(model).__name__))
+            return torch.compile(model)
+        except RuntimeError as exc:
+            logger.warning("torch.compile failed: %s; continuing without compilation", exc)
+            warnings.warn(f"torch.compile() requested but failed: {exc}. Skipping compilation.")
+    else:
+        warnings.warn("torch.compile() requested but torch version < 2.0. Skipping compilation.")
+    return model
 
 
 def _cell_prop_batch_to_numpy(cell_prop: Union[torch.Tensor, np.ndarray, list]) -> np.ndarray:
@@ -153,32 +180,7 @@ def create_model(
         decoder=decoder,
     )
 
-    if model_config.torch_compile:
-        requested_device = (device or "auto").lower()
-        effective_device = requested_device
-        if effective_device == "auto":
-            effective_device = "cuda" if _cuda_usable() else "cpu"
-
-        if effective_device != "cuda":
-            warnings.warn(
-                f"torch.compile() requested but skipped on device '{effective_device}'. "
-                "Compilation is only enabled for CUDA to avoid backend issues (e.g., MPS/Inductor)."
-            )
-        elif hasattr(torch, "compile"):
-            try:
-                model = torch.compile(model)
-            except RuntimeError as e:
-                warnings.warn(
-                    f"torch.compile() requested but failed: {e}. "
-                    "Skipping compilation."
-                )
-        else:
-            warnings.warn(
-                "torch.compile() requested but torch version < 2.0. "
-                "Skipping compilation. Upgrade PyTorch for faster training."
-            )
-
-    return model
+    return _maybe_compile_model(model, model_config, device)
 
 
 def train_model(
@@ -326,6 +328,16 @@ def load_trained_model(
     )
 
     base_dir = Path(model_dir)
+    contract_path = base_dir / "input_contract.json"
+    if (
+        contract_path.is_file()
+        and json.loads(contract_path.read_text(encoding="utf-8")).get("input_contract") == "staged_tpm_v1"
+    ):
+        for name in ("input_gene_list.txt", "cell_type_list.txt"):
+            if not (base_dir / name).is_file():
+                raise FileNotFoundError(f"Staged model is missing its saved artifact: {base_dir / name}")
+        model_config.input_gene_list_fp = base_dir / "input_gene_list.txt"
+        model_config.cell_type_fp = base_dir / "cell_type_list.txt"
     if getattr(model_config, "input_gene_list_fp", None) is None or not Path(model_config.input_gene_list_fp).exists():
         candidate = base_dir / "input_gene_list.txt"
         if candidate.exists():
@@ -361,7 +373,8 @@ def load_trained_model(
         checkpoint = torch.load(model_file_path, map_location="cpu", weights_only=False)
         state_dict = checkpoint.get("state_dict", checkpoint)
         model.load_state_dict({
-            key.removeprefix("model."): value for key, value in state_dict.items()
+            key.removeprefix("model.").removeprefix("_orig_mod."): value
+            for key, value in state_dict.items()
         }, strict=True)
         model.eval()
         return model
@@ -428,6 +441,8 @@ def evaluate_model(
     test_set_loader = DataLoader(test_set, batch_size=val_batch_size, shuffle=False)
     if pred_cell_prop_file_path is not None and os.path.exists(pred_cell_prop_file_path):
         pred_cell_prop_all = pd.read_csv(pred_cell_prop_file_path, index_col=0)
+        if getattr(test_set, "uses_staged_tpm_contract", False):
+            pred_cell_prop_all = pred_cell_prop_all.loc[test_set.get_sample_ids()]
         pred_cell_prop_all = pred_cell_prop_all.loc[:, cell_types].values
     else:
         pred_cell_prop_all = None

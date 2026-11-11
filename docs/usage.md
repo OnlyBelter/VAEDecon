@@ -113,6 +113,14 @@ predictor weights, split manifest, and held-out predictions under
 `final_model/`. Supply SCT references and, when needed, matched target files
 before starting reconstruction.
 
+When stage one precedes reconstruction, its selected gene list and bulk
+train/validation split and processed bulk features are reused by later stages.
+Samples with zero expression in the selected genes are excluded and recorded
+in `excluded_samples.csv`. Test-set prediction uses the saved gene order and
+does not filter genes by test-set variance. Start a fresh run with a new
+`training.naming_postfix` after changing the preprocessing contract; older
+stage-one predictor checkpoints cannot be resumed under the new contract.
+
 Predictor-only inference saves `predicted_cell_prop.csv`. When H5AD inputs
 contain matching cell-fraction labels, it also saves `true_cell_prop.csv` and
 per-cell-type RMSE, Pearson, and CCC in `metrics.csv`, even without plots.

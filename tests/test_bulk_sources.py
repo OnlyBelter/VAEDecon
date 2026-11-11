@@ -1,4 +1,6 @@
 import anndata
+import hashlib
+import json
 import numpy as np
 import pandas as pd
 import pytest
@@ -168,8 +170,59 @@ def test_single_source_pathway_training_normalizes_gene_expression(tmp_path):
     pathway_data = BulkOnlyDataset(config, model_config)
     plain_data = BulkOnlyDataset(config)
     np.testing.assert_allclose(pathway_data.data[0], np.log2([400001, 600001]), rtol=1e-6)
-    np.testing.assert_allclose(plain_data.data[0], np.log2([3, 4]), rtol=1e-6)
-    assert pathway_data.processed_data_dir != plain_data.processed_data_dir
+    np.testing.assert_allclose(plain_data.data[0], np.log2([400001, 600001]), rtol=1e-6)
+    assert pathway_data.processed_data_dir == plain_data.processed_data_dir
+
+
+def test_bulk_excludes_zero_expression_before_and_after_filtering(tmp_path):
+    path = tmp_path / "bulk.h5ad"
+    values = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [1, 3, 0]], dtype=np.float32)
+    anndata.AnnData(
+        X=np.log2(values + 1),
+        obs=pd.DataFrame({"cell": [1.0] * 4}, index=["common_zero", "selected_zero", "a", "b"]),
+        var=pd.DataFrame(index=["g1", "g2", "unused"]),
+    ).write_h5ad(path)
+    reference = tmp_path / "reference.csv"
+    pd.DataFrame({"cell": [1.0]}, index=["g2"]).to_csv(reference)
+    config = _config({"bulk": path})
+    config.data_dir = tmp_path
+    config.chunk_size = 2
+    config.remove_low_var_genes = True
+    config.min_var = 0.0
+    config.cell_cell2ave_exp_file_path = reference
+    config.scaling_by_constant = False
+    dataset = BulkOnlyDataset(config)
+    assert dataset.sample_ids == ["bulk::a", "bulk::b"]
+    assert dataset.gene_list == ["g2"]
+    assert {row["sample_id"]: row["reason"] for row in dataset.exclusions} == {
+        "bulk::common_zero": "zero_common_expression",
+        "bulk::selected_zero": "zero_selected_expression",
+    }
+    np.testing.assert_allclose(dataset.data[:, 0], np.log2(1_000_001), rtol=1e-6)
+    cached = BulkOnlyDataset(config)
+    assert cached.sample_ids == dataset.sample_ids
+    assert cached.exclusions == dataset.exclusions
+    np.testing.assert_array_equal(cached.data, dataset.data)
+
+
+@pytest.mark.parametrize("filter_genes", [False, True])
+def test_all_zero_bulk_records_exclusions_and_fails(tmp_path, filter_genes):
+    path = tmp_path / "bulk.h5ad"
+    anndata.AnnData(
+        X=np.zeros((2, 2), dtype=np.float32),
+        obs=pd.DataFrame({"cell": [1.0, 1.0]}, index=["a", "b"]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    ).write_h5ad(path)
+    config = _config({"bulk": path})
+    config.data_dir = tmp_path
+    config.remove_low_var_genes = filter_genes
+    with pytest.raises(ValueError, match="No bulk samples have nonzero expression"):
+        BulkOnlyDataset(config)
+    manifests = list((tmp_path / "processed_training_sets").glob("bulk_only_*/excluded_samples.csv"))
+    assert len(manifests) == 1
+    excluded = pd.read_csv(manifests[0])
+    assert excluded["sample_id"].tolist() == ["bulk::a", "bulk::b"]
+    assert excluded["reason"].tolist() == ["zero_common_expression"] * 2
 
 
 def test_pathway_intersection_filters_before_normalization(tmp_path):
@@ -193,3 +246,110 @@ def test_pathway_intersection_filters_before_normalization(tmp_path):
     dataset = BulkOnlyDataset(config, model_config)
     assert dataset.gene_list == ["g1", "g3"]
     np.testing.assert_allclose(dataset.data[0], np.log2([250001, 750001]), rtol=1e-6)
+
+
+def test_linear_tpm_variance_uses_all_valid_bulk_rows_and_common_genes(tmp_path, caplog):
+    caplog.set_level("INFO", logger="vaedecon.data.bulk_dataset")
+    a, b = tmp_path / "a.h5ad", tmp_path / "b.h5ad"
+    a_values = np.array([[0, 4, 6, 50], [2, 2, 6, 50], [9, 1, 0, 50]], dtype=np.float32)
+    b_values = np.array([[6, 0, 4, 30], [6, 2, 2, 30]], dtype=np.float32)
+    labels_a = pd.DataFrame({"rare": [0.0004, 0.0004, 0], "other": [0.9996, 0.9996, 0]},
+                            index=["s1", "s2", "excluded"])
+    labels_b = pd.DataFrame({"other": [0.9996, 0.9996], "rare": [0.0004, 0.0004]},
+                            index=["s1", "s2"])
+    for path, values, labels, genes in (
+        (a, a_values, labels_a, ["g1", "g2", "g3", "only_a"]),
+        (b, b_values, labels_b, ["g3", "g2", "g1", "only_b"]),
+    ):
+        anndata.AnnData(
+            X=np.log2(values + 1).astype(np.float32),
+            obs=labels, var=pd.DataFrame(index=genes),
+        ).write_h5ad(path)
+    config = _config({"first": a, "second": b})
+    config.data_dir = tmp_path
+    config.chunk_size = 1
+    config.remove_low_var_genes = True
+    config.min_var = 1.0
+    config.scaling_by_constant = False
+    dataset = BulkOnlyDataset(config)
+    common = np.array([[0, 4, 6], [2, 2, 6], [4, 0, 6], [2, 2, 6]], dtype=float)
+    reference = common / common.sum(axis=1, keepdims=True) * 1e6
+    expected_genes = [g for g, v in zip(["g1", "g2", "g3"], reference.var(axis=0, ddof=1)) if v > 1]
+    assert dataset.gene_list == expected_genes == ["g1", "g2"]
+    assert dataset.sample_ids == ["first::s1", "first::s2", "second::s1", "second::s2"]
+    np.testing.assert_allclose(dataset[0].labels.numpy(), [0.0004, 0.9996])
+    np.testing.assert_allclose(dataset.data[0], np.log2([1, 1_000_001]), rtol=1e-6)
+    assert "linear TPM variance" in caplog.text
+
+
+def test_bulk_checkpoint_fingerprint_rejects_changed_source(tmp_path):
+    path = tmp_path / "bulk.h5ad"
+    labels = pd.DataFrame({"cell": [1.0, 1.0]}, index=["s1", "s2"])
+    _write_bulk(path, labels, ["g1", "g2"])
+    config = _config({"bulk": path})
+    config.data_dir = tmp_path
+    config.remove_low_var_genes = False
+    dataset = BulkOnlyDataset(config)
+    _write_bulk(path, labels, ["g1", "g2", "g3"])
+    with pytest.raises(ValueError, match="source files changed"):
+        dataset.validate_source_identity()
+    with pytest.raises(ValueError, match="preprocessing or source files have changed"):
+        BulkOnlyDataset(config, expected_fingerprint=dataset.fingerprint)
+
+
+def test_linear_tpm_variance_threshold_uses_sample_variance(tmp_path):
+    path = tmp_path / "bulk.h5ad"
+    tpm = np.array([[1, 3, 999996], [3, 2, 999995],
+                    [1, 3, 999996], [3, 2, 999995]], dtype=float)
+    log_values = np.log2(tpm + 1).astype(np.float32)
+    anndata.AnnData(
+        X=log_values, obs=pd.DataFrame({"cell": [1.0] * 4}, index=["s1", "s2", "s3", "s4"]),
+        var=pd.DataFrame(index=["above", "below", "background"]),
+    ).write_h5ad(path)
+    config = _config({"bulk": path})
+    config.data_dir = tmp_path
+    config.remove_low_var_genes = True
+    config.scaling_by_constant = False
+    config.min_var = 1.0
+    dataset = BulkOnlyDataset(config)
+    linear = np.exp2(log_values.astype(np.float64)) - 1
+    normalized = linear / linear.sum(axis=1, keepdims=True) * 1e6
+    variances = normalized.var(axis=0, ddof=1)
+    assert variances[0] > 1
+    assert variances[1] < 1
+    assert "above" in dataset.gene_list
+    assert "below" not in dataset.gene_list
+
+
+def test_linear_filter_does_not_reuse_log_space_cache(tmp_path):
+    a, b = tmp_path / "a.h5ad", tmp_path / "b.h5ad"
+    labels = pd.DataFrame({"cell": [1.0, 1.0]}, index=["s1", "s2"])
+    for path in (a, b):
+        anndata.AnnData(
+            np.array([[1.0, 2.0], [2.0, 1.0]], dtype=np.float32),
+            obs=labels, var=pd.DataFrame(index=["g1", "g2"]),
+        ).write_h5ad(path)
+    config = _config({"first": a, "second": b})
+    config.data_dir = tmp_path
+    config.remove_low_var_genes = True
+    config.scaling_by_constant = False
+    config.min_var = 1.0
+    old_payload = {
+        "version": 2,
+        "sources": [(name, str(path.resolve()), path.stat().st_size, path.stat().st_mtime_ns)
+                    for name, path in (("first", a), ("second", b))],
+        "genes": ["g1", "g2"], "group_cell_types": {}, "cell_types": None,
+        "scale": None, "normalize_intersection": True, "remove_low_var_genes": True,
+        "min_var": 1.0, "reference": None,
+    }
+    old_fingerprint = hashlib.sha256(
+        json.dumps(old_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    old_dir = tmp_path / "processed_training_sets" / f"bulk_only_{old_fingerprint}"
+    old_dir.mkdir(parents=True)
+    (old_dir / "metadata.json").write_text('{"gene_list": ["g1"]}', encoding="utf-8")
+    np.save(old_dir / "data.npy", np.zeros((4, 1), dtype=np.float32))
+    dataset = BulkOnlyDataset(config)
+    assert dataset.processed_data_dir != old_dir
+    assert dataset.gene_list == ["g1", "g2"]
+    assert (old_dir / "metadata.json").read_text(encoding="utf-8") == '{"gene_list": ["g1"]}'

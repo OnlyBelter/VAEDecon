@@ -316,9 +316,9 @@ def _filter_sample2cell_mapping(
     filtered_mapping_df["selected_cell_id"] = filtered_mapping_df["selected_cell_id"].astype(str)
     filtered_mapping_df = (
         filtered_mapping_df
+        .rename_axis("sample_id")
         .reset_index()
-        .drop_duplicates(subset=["index", "cell_type"], keep="first")
-        .rename(columns={"index": "sample_id"})
+        .drop_duplicates(subset=["sample_id", "cell_type"], keep="first")
         .set_index("sample_id")
     )
     return filtered_mapping_df
@@ -1513,6 +1513,32 @@ class GEPPreprocessor:
 # 3) Dataset
 # =============================================================================
 
+class _ConcatenatedFeatures:
+    """Index several disk-backed feature arrays without copying them."""
+
+    def __init__(self, arrays):
+        self.arrays = arrays
+        self.ends = np.cumsum([len(array) for array in arrays])
+        self.shape = (int(self.ends[-1]), arrays[0].shape[1])
+        self.dtype = np.dtype(np.float32)
+
+    def __getitem__(self, index):
+        if isinstance(index, (int, np.integer)):
+            if index < 0:
+                index += self.shape[0]
+            if index < 0 or index >= self.shape[0]:
+                raise IndexError(index)
+            part = int(np.searchsorted(self.ends, index, side="right"))
+            start = int(self.ends[part - 1]) if part else 0
+            return np.array(self.arrays[part][index - start], copy=True)
+        if isinstance(index, slice):
+            indices = range(*index.indices(self.shape[0]))
+        else:
+            indices = np.asarray(index).reshape(-1)
+        rows = [self[int(i)] for i in indices]
+        return np.stack(rows) if rows else np.empty((0, self.shape[1]), dtype=self.dtype)
+
+
 class GEPDataset(Dataset):
     """
     Memory-efficient Dataset class for GEP data with lazy loading and cache support.
@@ -1525,7 +1551,7 @@ class GEPDataset(Dataset):
     - Centralized cache strategy through GEPCacheManager
     """
 
-    def __init__(self, config: GEPDatasetConfig):
+    def __init__(self, config: GEPDatasetConfig, staged_bulk=None, staged_extra=None):
         """
         Args:
             config:
@@ -1585,7 +1611,9 @@ class GEPDataset(Dataset):
         self._n_genes = 0
         self._n_cell_types = 0
 
-        if not self.persist_processed_data:
+        if staged_bulk is not None:
+            self._initialize_staged_bulk(staged_bulk, staged_extra)
+        elif not self.persist_processed_data:
             log_message("Preprocessing dataset in memory without writing persistent cache.")
             self._preprocess_in_memory()
         else:
@@ -1607,6 +1635,62 @@ class GEPDataset(Dataset):
                 log_message("Preprocessing data from scratch...")
                 self._preprocess_and_cache()
                 self._load_from_cache_metadata()
+
+    def _initialize_staged_bulk(self, bulk, extra):
+        """Attach immutable stage-one features and build only reconstruction targets."""
+        datasets = [bulk] + ([extra] if extra is not None else [])
+        for dataset in datasets:
+            if dataset.gene_list != bulk.gene_list or dataset.cell_types != bulk.cell_types:
+                raise ValueError("Additional staged inputs must match the bulk genes and cell types")
+        self.gene_list = list(bulk.gene_list)
+        self.cell_types = list(bulk.cell_types)
+        self.sample_ids = [sample_id for dataset in datasets for sample_id in dataset.sample_ids]
+        if len(self.sample_ids) != len(set(self.sample_ids)):
+            raise ValueError("Staged reconstruction inputs contain duplicate sample IDs")
+        self._data = _ConcatenatedFeatures([dataset.data for dataset in datasets])
+        self._labels = np.concatenate([dataset.labels for dataset in datasets], axis=0)
+        self._n_samples = len(self.sample_ids)
+        self._n_genes = len(self.gene_list)
+        self._n_cell_types = len(self.cell_types)
+        self._staged_bulk_ids = set(bulk.sample_ids)
+        self._staged_excluded_ids = set(bulk.excluded_sample_ids)
+        marker = self.processed_data_dir / "staged_bulk_metadata.json"
+        expected = {
+            "bulk_fingerprint": bulk.fingerprint,
+            "extra_fingerprint": extra.fingerprint if extra is not None else None,
+            "sample_ids": self.sample_ids,
+            "gene_list": self.gene_list,
+            "cell_types": self.cell_types,
+        }
+        if marker.is_file() and not self.config.force_reprocess:
+            if json.loads(marker.read_text(encoding="utf-8")) != expected:
+                raise ValueError("Staged reconstruction cache metadata does not match bulk inputs")
+            if self.config.training_target_sets and (
+                not self.cache.true_sct_gep_path.is_file()
+                or not self.cache.true_sct_gep_present_mask_path.is_file()
+            ):
+                raise ValueError("Staged reconstruction cache is missing matched targets")
+            return
+        if self.config.protect_existing_cache and any(self.processed_data_dir.iterdir()):
+            raise FileExistsError(f"Processed training cache contains existing files: {self.processed_data_dir}")
+        if self.config.training_target_sets:
+            targets, masks, pre_saved, temp_paths = self._build_true_sct_gep_targets(
+                self.sample_ids, self.gene_list, self.cell_types
+            )
+            if self.apply_scaling and len(self.sample_ids) <= _LARGE_SCT_TARGET_SAMPLE_THRESHOLD:
+                for start in range(0, len(self.sample_ids), self.chunk_size):
+                    targets[start:start + self.chunk_size] /= float(self.scaling_value)
+                if hasattr(targets, "flush"):
+                    targets.flush()
+            if not pre_saved:
+                self.cache.save_optional_array(self.cache.true_sct_gep_path, targets, "true_sct_gep")
+                self.cache.save_optional_array(
+                    self.cache.true_sct_gep_present_mask_path, masks, "true_sct_gep_present_mask"
+                )
+            del targets, masks
+            for path in temp_paths:
+                path.unlink(missing_ok=True)
+        marker.write_text(json.dumps(expected, indent=2), encoding="utf-8")
 
     # -------------------------------------------------------------------------
     # Lazy-loading properties
@@ -1961,6 +2045,11 @@ class GEPDataset(Dataset):
         grouped_target_sets: dict[str, dict[str, Any]] = {}
         for target_set_name, target_cfg in self.config.training_target_sets.items():
             raw_bulk_sample_ids = _load_bulk_sample_ids_from_file(target_cfg.training_set_file_path)
+            exclusions = getattr(self, "_staged_excluded_ids", set())
+            raw_bulk_sample_ids = [
+                sample_id for sample_id in raw_bulk_sample_ids
+                if f"{target_set_name}::{sample_id}" not in exclusions
+            ]
             bulk_sample_ids = _namespace_sample_ids(
                 raw_bulk_sample_ids,
                 namespace=str(target_set_name),

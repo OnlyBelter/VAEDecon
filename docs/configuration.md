@@ -66,6 +66,20 @@ Use `remove_low_var_genes` carefully in staged runs. The staged workflow
 depends on a shared gene space across stages, so data consistency matters more
 than aggressive per-stage filtering.
 
+For bulk-only stage one, VAEDecon intersects the input genes. If variance
+filtering is enabled, it renormalizes the common genes to one million and
+filters by sample variance in linear TPM space before the train/validation
+split. It then renormalizes the selected genes to one million, applies
+`log2(TPM + 1)`, and optionally scales by a constant. No further gene-length
+correction is applied. Reconstruction and joint fine-tuning reuse the selected
+gene list and cached bulk inputs without filtering or preprocessing them again.
+
+For newly trained staged models, inference uses the saved ordered gene list
+without filtering by test-set variance. Extra input genes are ignored, and
+missing model genes are zero-padded after normalization of the genes present.
+Pathway values are calculated separately from the normalized gene profile;
+the combined gene and pathway profile is not normalized to one million.
+
 #### Processed-data cache behavior
 
 `data.force_reprocess` controls whether VAEDecon rebuilds the processed-data
@@ -81,9 +95,11 @@ no cache yet, VAEDecon preprocesses the inputs even when
 `force_reprocess: false`. The cache is stored under
 `data.data_dir/processed_training_sets/`.
 
-The cache key uses paths, not file contents. If you replace a file in place
-without changing its path, `force_reprocess: false` can reuse data cached from
-the previous contents. Set `force_reprocess: true` to rebuild that cache.
+The general training cache key uses paths, not file contents. Bulk-only
+stage-one caches also include source file sizes and modification times.
+Neither is a full content hash. If you replace a file in place without
+changing its identity metadata, `force_reprocess: false` can reuse old data.
+Set `force_reprocess: true` to rebuild that cache.
 Training asks for confirmation before replacing a forced or incomplete cache
 and preserves the old cache in a `previous_outputs_*` directory. A
 noninteractive run requires `--overwrite-outputs` or
@@ -249,11 +265,14 @@ The historical stage-one objective also included reconstruction through a
 frozen decoder; its loss curves are not directly comparable with this
 proportion-only objective.
 
-Stage one retains stored label precision, excludes zero-total-label rows,
-and saves `split_manifest.csv`, `excluded_samples.csv`, and held-out
+Stage one retains stored label precision, excludes zero-total-label and
+zero-expression rows, and saves `split_manifest.csv`, `excluded_samples.csv`, and held-out
 `validation_results`. PyTorch assigns the split using `training.seed`.
 The predictor-only checkpoint can be used for H5AD or CSV inference without
-SCT reference files.
+SCT reference files. When test sets are configured, a multi-stage run
+evaluates the best stage-one checkpoint before reconstruction starts. Set
+`model.torch_compile: true` to enable compilation on CUDA for stage one as
+well as later stages.
 
 The optional `model.deside_group_cell_types` mapping combines named subtypes;
 `model.deside_cell_types` selects and orders the resulting cell types.
@@ -261,7 +280,7 @@ Sigmoid models require the cancer cell type in that selection. Prediction
 options include `deside_one_minus_alpha`, `deside_prediction_threshold`,
 `deside_renormalize_non_cancer`, and `deside_fill_cancer_residual`. The
 threshold is applied before normalization. Predictor-only CSV output uses
-`%g` formatting.
+pandas' default floating-point serialization.
 
 Grouped predictors can transfer only when the reconstruction inputs have the
 same gene and cell-type order and the full VAE supports those cell types.
@@ -441,8 +460,7 @@ architecture.
 
 With `model.deside_input_gene_list: intersection_with_pathway_genes`,
 stage one restricts its ordered input genes to pathway genes before
-normalization. A later reconstruction stage must use the same ordered gene
-list, for example through `data.gene_list_file`.
+normalization. A later reconstruction stage reuses the stage-one gene list.
 
 ### Residual GEP learning
 

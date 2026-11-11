@@ -19,6 +19,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Subset, random_split
 from ..data import GEPDataset
+from ..data.datasets import _read_source_gene_names
 from ..data.bulk_dataset import BulkAlignedDataset, BulkOnlyDataset
 from ..data.bulk_sources import resolve_bulk_source_paths
 from ..models.cell_prop_only import CellPropOnlyModel
@@ -31,7 +32,7 @@ from ..utility import compute_training_sct_cross_sample_gene_var
 from ..utility import create_h5ad_dataset
 from ..utility.read_file import ReadH5AD
 from .bulk_prediction import save_validation_predictions
-from .workflow import create_model, train_model, save_metadata
+from .workflow import _maybe_compile_model, create_model, train_model, save_metadata
 from ..trainers.base_trainer import _unwrap_stage_model
 from ..configs.default_config import (
     VAEDeconConfig,
@@ -257,6 +258,8 @@ def _restore_bulk_split(dataset, stage_dir: Path, trainer_config: TrainingConfig
     sample_ids = (manifest["source"] + "::" + manifest["sample_id"]).tolist()
     if len(sample_ids) != len(set(sample_ids)) or set(manifest["split"]) - {"train", "validation"}:
         raise ValueError("Stage-one split manifest has duplicate or invalid assignments")
+    if hasattr(dataset, "_staged_bulk_ids") and set(sample_ids) != dataset._staged_bulk_ids:
+        raise ValueError("Stage-one split manifest does not match the cached bulk sample identities")
     lookup = {sample_id: index for index, sample_id in enumerate(dataset.sample_ids)}
     missing = set(sample_ids) - set(lookup)
     if missing:
@@ -265,6 +268,8 @@ def _restore_bulk_split(dataset, stage_dir: Path, trainer_config: TrainingConfig
     val = [lookup[sample_id] for sample_id, split in zip(sample_ids, manifest["split"]) if split == "validation"]
     excluded_path = stage_dir / "excluded_samples.csv"
     excluded = set(pd.read_csv(excluded_path, dtype=str)["sample_id"].dropna()) if excluded_path.is_file() else set()
+    if hasattr(dataset, "_staged_excluded_ids") and excluded != dataset._staged_excluded_ids:
+        raise ValueError("Stage-one exclusion manifest does not match the cached bulk inputs")
     bulk_ids = set(sample_ids) | excluded
     extra = [i for i, sample_id in enumerate(dataset.sample_ids) if sample_id not in bulk_ids]
     if extra:
@@ -355,7 +360,11 @@ class VAEDeconTrainer:
 
         logger.info(f"Results will be saved to: {self.result_dir}")
 
-    def _prepare_data(self, *, bulk_stage_transition=False, require_matched_targets=None) -> Tuple[GEPDataset, any, any]:
+    def _prepare_data(
+        self, *, bulk_stage_transition=False, require_matched_targets=None,
+        stage_gene_list_fp=None, stage_cell_type_fp=None, bulk_fingerprint=None,
+        staged_bulk=None,
+    ) -> Tuple[GEPDataset, any, any]:
         """Load, preprocess, and split the training data"""
         logger.info("Loading and preparing data...")
 
@@ -371,11 +380,35 @@ class VAEDeconTrainer:
         # Load GEP dataset, PPI and Pathway data will be handled in each specified encoder class.
         if bulk_stage_transition:
             gep_dataset_config = self._build_gepdataset_config(
-                bulk_stage_transition=True, require_matched_targets=require_matched_targets
+                bulk_stage_transition=True, require_matched_targets=require_matched_targets,
+                stage_gene_list_fp=stage_gene_list_fp, stage_cell_type_fp=stage_cell_type_fp,
+                bulk_fingerprint=bulk_fingerprint,
             )
         else:
             gep_dataset_config = self._build_gepdataset_config()
-        dataset = GEPDataset(config=gep_dataset_config)
+        extra = None
+        if staged_bulk is not None:
+            extra_paths = list(self.config.data.sct_file_path or [])
+            if extra_paths:
+                extra_config = self.config.data.model_copy(deep=True, update={
+                    "training_target_sets": {},
+                    "simu_bulk_file_path": extra_paths,
+                    "gene_list_file": stage_gene_list_fp,
+                    "remove_low_var_genes": False,
+                })
+                extra = BulkOnlyDataset(
+                    extra_config, preserve_existing=lambda path: _preserve_existing_outputs(
+                        [path], overwrite=self._overwrite_outputs
+                    )
+                )
+                if set(staged_bulk.cell_types).issubset(extra.cell_types):
+                    indices = [extra.cell_types.index(name) for name in staged_bulk.cell_types]
+                    extra.labels = extra.labels[:, indices]
+                    extra.cell_types = list(staged_bulk.cell_types)
+            self._staged_exclusions = staged_bulk.exclusions + (extra.exclusions if extra else [])
+            dataset = GEPDataset(config=gep_dataset_config, staged_bulk=staged_bulk, staged_extra=extra)
+        else:
+            dataset = GEPDataset(config=gep_dataset_config)
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
 
@@ -1074,7 +1107,10 @@ class VAEDeconTrainer:
         )
         return Path(self.config.data.data_dir) / "processed_training_sets" / fingerprint
 
-    def _build_gepdataset_config(self, *, bulk_stage_transition=False, require_matched_targets=None) -> GEPDatasetConfig:
+    def _build_gepdataset_config(
+        self, *, bulk_stage_transition=False, require_matched_targets=None,
+        stage_gene_list_fp=None, stage_cell_type_fp=None, bulk_fingerprint=None
+    ) -> GEPDatasetConfig:
         """
         Build a config dict for GEPDataset from self.config.data
         """
@@ -1105,10 +1141,69 @@ class VAEDeconTrainer:
             self._processed_training_set_dir = self._processed_training_set_dir.with_name(
                 self._processed_training_set_dir.name + "_" + suffix
             )
+        if stage_gene_list_fp is not None:
+            gene_path = Path(stage_gene_list_fp)
+            genes = gene_path.read_text(encoding="utf-8").splitlines()
+            if not genes or len(genes) != len(set(genes)):
+                raise ValueError(f"Invalid stage-one gene list: {gene_path}")
+            gene_set = set(genes)
+            cell_types = (
+                Path(stage_cell_type_fp).read_text(encoding="utf-8").splitlines()
+                if stage_cell_type_fp is not None else []
+            )
+            if stage_cell_type_fp is not None and (
+                not cell_types or len(cell_types) != len(set(cell_types))
+            ):
+                raise ValueError(f"Invalid stage-one cell-type list: {stage_cell_type_fp}")
+            for path in training_file_paths:
+                path = Path(path)
+                if cell_types and path.suffix.lower() != ".h5ad":
+                    raise ValueError(f"Reconstruction input {path} must contain H5AD cell-type labels")
+                if cell_types:
+                    reader = ReadH5AD(path, backed="r")
+                    try:
+                        missing_types = set(cell_types) - set(reader.dataset.obs.columns)
+                    finally:
+                        reader.close()
+                    if missing_types:
+                        raise ValueError(
+                            f"Reconstruction input {path} is missing stage-one cell types: "
+                            f"{', '.join(sorted(missing_types))}"
+                        )
+            required_paths = list(training_file_paths)
+            required_paths.extend(target.training_sct_gep_file_path for target in training_target_sets.values())
+            if self.config.data.gene_mean_std_source == "pooled_sc":
+                required_paths.append(self.config.data.pooled_sc_h5ad_path)
+            else:
+                required_paths.extend(self._resolve_gene_mean_std_sct_gep_paths())
+            seen = set()
+            for path in required_paths:
+                if not path or str(path).strip() == "":
+                    continue
+                resolved = str(Path(path).expanduser().resolve())
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                missing = gene_set - set(_read_source_gene_names(resolved))
+                if missing:
+                    preview = ", ".join(sorted(missing)[:5])
+                    raise ValueError(
+                        f"Reconstruction input {resolved} is missing {len(missing)} stage-one genes: {preview}"
+                    )
+            digest = hashlib.sha256(
+                gene_path.read_bytes() + "\n".join(cell_types).encode("utf-8")
+                + str(bulk_fingerprint or "").encode("utf-8")
+            ).hexdigest()[:16]
+            self._processed_training_set_dir = self._processed_training_set_dir.with_name(
+                self._processed_training_set_dir.name + "_stage_genes_" + digest
+            )
+            logger.info("Reconstruction uses %s stage-one genes without re-filtering.", len(genes))
         dataset_config = dict(
             file_paths=training_file_paths,
             scaling_by_constant=self.config.data.scaling_by_constant,
-            remove_low_var_genes=self.config.data.remove_low_var_genes,
+            remove_low_var_genes=(
+                False if stage_gene_list_fp is not None else self.config.data.remove_low_var_genes
+            ),
             force_reprocess=self.config.data.force_reprocess,
             protect_existing_cache=True,
             max_parallel_source_file_loads=self.config.data.max_parallel_source_file_loads,
@@ -1116,7 +1211,7 @@ class VAEDeconTrainer:
             chunk_size=self.config.data.chunk_size,
             min_var=self.config.data.min_var,
             scaling_factor=self.config.data.scaling_factor,
-            gene_list_file=self.config.data.gene_list_file,
+            gene_list_file=stage_gene_list_fp or self.config.data.gene_list_file,
             cell_cell2ave_exp_file_path=self.config.data.cell_cell2ave_exp_file_path,
             gene_mean_std_source=self.config.data.gene_mean_std_source,
             gene_mean_std_sct_gep_file_path=self.config.data.gene_mean_std_sct_gep_file_path,
@@ -1234,6 +1329,20 @@ class VAEDeconTrainer:
                 predictor_state_dict[normalized_key] = value
         return predictor_state_dict
 
+    @staticmethod
+    def _validate_predictor_configuration(saved_model, saved_data, current_model, current_data):
+        for name in (
+            "cell_prop_predictor_cls", "cell_prop_activation_function", "cancer_cell_type_name",
+            "deside_pathway_network", "deside_one_minus_alpha", "deside_hidden_dims", "deside_dropout_rate",
+            "deside_pathway_hidden_dims", "deside_pathway_dropout_rate", "deside_input_gene_list",
+            "deside_normalization", "deside_normalization_layer",
+        ):
+            if getattr(saved_model, name) != getattr(current_model, name):
+                raise ValueError(f"Predictor checkpoint setting {name!r} does not match reconstruction")
+        for name in ("scaling_by_constant", "scaling_factor", "pathway_file_path"):
+            if getattr(saved_data, name) != getattr(current_data, name):
+                raise ValueError(f"Predictor checkpoint preprocessing {name!r} does not match reconstruction")
+
     def _load_cell_prop_predictor_checkpoint(self, model, checkpoint_path: Path) -> None:
         artifact_dir = checkpoint_path.parent
         marker = artifact_dir / "model_kind.json"
@@ -1249,21 +1358,13 @@ class VAEDeconTrainer:
                 actual = Path(current_path).read_text(encoding="utf-8").splitlines()
                 if expected != actual:
                     raise ValueError(f"Predictor checkpoint {label} does not match reconstruction inputs")
-            for name in (
-                "cell_prop_predictor_cls", "cell_prop_activation_function", "cancer_cell_type_name",
-                "deside_pathway_network", "deside_one_minus_alpha", "deside_hidden_dims", "deside_dropout_rate",
-                "deside_pathway_hidden_dims", "deside_pathway_dropout_rate", "deside_input_gene_list",
-                "deside_normalization", "deside_normalization_layer",
-            ):
-                if getattr(saved_model, name) != getattr(current_model, name):
-                    raise ValueError(f"Predictor checkpoint setting {name!r} does not match reconstruction")
             saved_data = DataConfig.model_validate(
                 DataConfig._dict_from_json(artifact_dir / "data_config.json"),
                 context={"defer_sct_requirements": True},
             )
-            for name in ("scaling_by_constant", "scaling_factor", "pathway_file_path"):
-                if getattr(saved_data, name) != getattr(base_model.data_config, name):
-                    raise ValueError(f"Predictor checkpoint preprocessing {name!r} does not match reconstruction")
+            self._validate_predictor_configuration(
+                saved_model, saved_data, current_model, base_model.data_config
+            )
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         predictor_state_dict = self._extract_cell_prop_predictor_state_dict_from_checkpoint(checkpoint)
         if not predictor_state_dict:
@@ -1347,6 +1448,7 @@ class VAEDeconTrainer:
         effective_model_dir = predictor_model_dir or stage_dir
         inference_config.model.model_dir = effective_model_dir
         if stage_name == "cell_prop_predictor_pretrain":
+            inference_config.training.saved_model_selection = "best"
             inference_config.evaluation.save_reconstructed_gep = False
             inference_config.evaluation.plot_single_cell_gep = False
             inference_config.evaluation.plot_bulk_gep = False
@@ -1487,6 +1589,10 @@ class VAEDeconTrainer:
             if item.name in skip_names:
                 continue
             destination = self.model_dir / item.name
+            if item.name in {"input_gene_list.txt", "cell_type_list.txt"} and destination.is_file():
+                if destination.read_bytes() != item.read_bytes():
+                    raise ValueError(f"Final model metadata differs from stage artifact: {destination}")
+                continue
             if item.is_dir():
                 shutil.copytree(item, destination)
             else:
@@ -1566,7 +1672,7 @@ class VAEDeconTrainer:
         pd.DataFrame(manifest_rows, columns=["source", "sample_id", "split"]).to_csv(
             stage_dir / "split_manifest.csv", index=False
         )
-        pd.DataFrame({"sample_id": dataset.excluded_sample_ids}).to_csv(
+        pd.DataFrame(dataset.exclusions, columns=["source", "sample_id", "reason"]).to_csv(
             stage_dir / "excluded_samples.csv", index=False
         )
         (stage_dir / "model_kind.json").write_text(
@@ -1575,11 +1681,18 @@ class VAEDeconTrainer:
                 "expression_space": "log2cpm1p",
                 "normalize_training_intersection": dataset._normalize_intersection,
                 "source_names": [source.name for source in dataset.sources],
+                "bulk_cache_fingerprint": dataset.fingerprint,
+                "variance_space": "linear_tpm",
+                "input_contract": "staged_tpm_v1",
             }, indent=2), encoding="utf-8"
+        )
+        (stage_dir / "input_contract.json").write_text(
+            json.dumps({"input_contract": "staged_tpm_v1"}), encoding="utf-8"
         )
         set_seed(trainer_config.seed)
         model = CellPropOnlyModel(stage_model_config, self.config.data)
         self._apply_stage_loss_overrides(model, {"cell_prop": float(weight)})
+        model = _maybe_compile_model(model, stage_model_config, self.device)
         stage_training_config = self._build_stage_training_config(trainer_config, stage_cfg=stage_cfg)
         stage_training_config.aux_loss_schedules = {}
         adaptive = stage_training_config.adaptive_aux_loss_schedule
@@ -1699,6 +1812,19 @@ class VAEDeconTrainer:
             )
             stage_dir = self.result_dir / f"stage_{stage_cfg.name}"
             stage_dir.mkdir(parents=True, exist_ok=False)
+            if getattr(self, "_staged_tpm_contract", False):
+                (stage_dir / "input_contract.json").write_text(
+                    json.dumps({"input_contract": "staged_tpm_v1"}), encoding="utf-8"
+                )
+                for name, source in (
+                    ("input_gene_list.txt", self.config.model.input_gene_list_fp),
+                    ("cell_type_list.txt", self.config.model.cell_type_fp),
+                ):
+                    shutil.copyfile(source, stage_dir / name)
+                pd.DataFrame(
+                    getattr(self, "_staged_exclusions", []),
+                    columns=["source", "sample_id", "reason"],
+                ).to_csv(stage_dir / "excluded_samples.csv", index=False)
 
             logger.info(
                 "Starting stage %s/%s: %s (lr=%.3e, monitor=%s)",
@@ -1809,6 +1935,7 @@ class VAEDeconTrainer:
         if "cell_prop_predictor_pretrain" in selected_stages:
             self._final_output_snapshot = _snapshot(Path(self.model_dir))
             bulk, bulk_train, bulk_val, bulk_model, stage_row = self._train_bulk_stage(trainer_config)
+            self._staged_tpm_contract = True
             if len(selected_stages) == 1:
                 self.config.model = self.config.model.model_copy(deep=True, update={
                     "input_dim": (1, len(bulk.gene_list)),
@@ -1826,6 +1953,18 @@ class VAEDeconTrainer:
                     final_stage_dir=Path(stage_row["stage_dir"]),
                 )
                 return self.config
+            stage_dir = Path(stage_row["stage_dir"])
+            try:
+                post_stage_results = self._run_post_stage_test_set_prediction(
+                    stage_name=stage_row["stage_name"], stage_dir=stage_dir
+                )
+                if post_stage_results is not None:
+                    stage_row["test_results_dir"] = str(post_stage_results)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Stage-one predictor is saved at {stage_row['best_checkpoint']}, "
+                    "but stage-one test-set prediction failed."
+                ) from exc
             try:
                 require_targets = _stages_require_matched_targets(
                     self.config.model, trainer_config,
@@ -1834,8 +1973,18 @@ class VAEDeconTrainer:
                 self.config.model = self.config.model.model_copy(
                     deep=True, update={"n_cell_types": len(bulk.cell_types)}
                 )
+                if bulk.cell_types != bulk.source_cell_types:
+                    raise ValueError(
+                        "Reconstruction currently requires ungrouped stage-one cell types "
+                        "in the same order as the bulk input."
+                    )
+                bulk.validate_source_identity()
                 dataset, _, _ = self._prepare_data(
-                    bulk_stage_transition=True, require_matched_targets=require_targets
+                    bulk_stage_transition=True, require_matched_targets=require_targets,
+                    stage_gene_list_fp=stage_dir / "input_gene_list.txt",
+                    stage_cell_type_fp=stage_dir / "cell_type_list.txt",
+                    bulk_fingerprint=bulk.fingerprint,
+                    staged_bulk=bulk,
                 )
                 if dataset.gene_list != bulk.gene_list or dataset.cell_types != bulk.cell_types:
                     raise ValueError("Reconstruction inputs do not match the stage-one gene or cell-type order")
@@ -1868,21 +2017,55 @@ class VAEDeconTrainer:
                 marker and marker.is_file()
                 and json.loads(marker.read_text(encoding="utf-8")).get("model_kind") == "cell_prop_only"
             )
+            bulk = None
             if predictor_only:
                 saved_types = (stage_dir / "cell_type_list.txt").read_text(encoding="utf-8").splitlines()
                 self.config.model = self.config.model.model_copy(
                     deep=True, update={"n_cell_types": len(saved_types)}
                 )
+                marker_data = json.loads(marker.read_text(encoding="utf-8"))
+                fingerprint = marker_data.get("bulk_cache_fingerprint")
+                if (
+                    not fingerprint or marker_data.get("variance_space") != "linear_tpm"
+                    or marker_data.get("input_contract") != "staged_tpm_v1"
+                ):
+                    raise ValueError(
+                        "This predictor checkpoint predates linear TPM filtering and cannot "
+                        "be resumed under the corrected preprocessing; retrain stage one."
+                    )
+                saved_model = ModelConfig.from_json_file(stage_dir / "model_config.json")
+                saved_data = DataConfig.model_validate(
+                    DataConfig._dict_from_json(stage_dir / "data_config.json"),
+                    context={"defer_sct_requirements": True},
+                )
+                self._validate_predictor_configuration(
+                    saved_model, saved_data, self.config.model, self.config.data
+                )
+                bulk_config = self.config.data.model_copy(deep=True, update={"force_reprocess": False})
+                bulk = BulkOnlyDataset(
+                    bulk_config, self.config.model, expected_fingerprint=fingerprint
+                )
+                self._staged_tpm_contract = True
+                saved_genes = (stage_dir / "input_gene_list.txt").read_text(encoding="utf-8").splitlines()
+                if bulk.gene_list != saved_genes or bulk.cell_types != saved_types:
+                    raise ValueError("Stage-one checkpoint gene or cell-type order does not match its bulk inputs")
+                if bulk.cell_types != bulk.source_cell_types:
+                    raise ValueError(
+                        "Reconstruction currently requires ungrouped stage-one cell types "
+                        "in the same order as the bulk input."
+                    )
             require_targets = _stages_require_matched_targets(
                 self.config.model, trainer_config, selected_stages
             )
             dataset, train_set, val_set = self._prepare_data(
-                bulk_stage_transition=True, require_matched_targets=require_targets
+                bulk_stage_transition=True, require_matched_targets=require_targets,
+                stage_gene_list_fp=stage_dir / "input_gene_list.txt" if predictor_only else None,
+                stage_cell_type_fp=stage_dir / "cell_type_list.txt" if predictor_only else None,
+                bulk_fingerprint=bulk.fingerprint if bulk is not None else None,
+                staged_bulk=bulk,
             )
             if predictor_only:
                 train_set, val_set = _restore_bulk_split(dataset, stage_dir, trainer_config)
-                bulk_config = self.config.data.model_copy(deep=True, update={"force_reprocess": False})
-                bulk = BulkOnlyDataset(bulk_config, self.config.model)
                 if dataset.gene_list != bulk.gene_list or dataset.cell_types != bulk.cell_types:
                     raise ValueError("Reconstruction inputs do not match the predictor's bulk input order")
                 aligned = BulkAlignedDataset(dataset, bulk)

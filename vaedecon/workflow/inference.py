@@ -3,16 +3,20 @@ Inference pipeline for VAEDecon
 """
 import os
 import gc
+import json
 import logging
+import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 import pandas as pd
+import anndata
+import numpy as np
 import torch
 
 from ..data import GEPDataset, find_sct_gep_of_bulk_sample
 from ..models.cell_prop_only import CellPropOnlyModel
-from .bulk_prediction import predict_bulk_csv, predict_bulk_h5ad
+from .bulk_prediction import predict_bulk_csv, predict_bulk_h5ad, prepare_staged_expression
 from ..utility import check_dir
 from .workflow import (
     load_trained_model,
@@ -23,6 +27,78 @@ from .workflow import (
 from ..configs.default_config import VAEDeconConfig, GEPDatasetConfig, TestSetConfig, TrainingConfig
 
 logger = logging.getLogger(__name__)
+
+
+class _StagedInferenceDataset(GEPDataset):
+    """Construct model-ordered input features in bounded, disk-backed batches."""
+
+    uses_staged_tpm_contract = True
+
+    def __init__(self, config, output_dir):
+        self.config = config
+        self.cache = None
+        self.use_memmap = True
+        self.gene_list = Path(config.gene_list_file).read_text(encoding="utf-8").splitlines()
+        if not self.gene_list or len(set(self.gene_list)) != len(self.gene_list):
+            raise ValueError("Invalid saved model gene list")
+        self._temp = tempfile.TemporaryDirectory(prefix="vaedecon_inference_")
+        data_path = Path(self._temp.name) / "features.bin"
+        path = Path(config.file_paths[0])
+        self.sample_ids, excluded = [], []
+        self.cell_types = []
+        labels = []
+        scale = config.scaling_factor if config.scaling_by_constant else None
+        seen = set()
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        def write_block(handle, values, genes, ids, obs=None):
+            ids = [str(value) for value in ids]
+            if len(ids) != len(set(ids)) or seen.intersection(ids):
+                raise ValueError("Prediction input contains duplicate sample IDs")
+            seen.update(ids)
+            data, valid = prepare_staged_expression(values, genes, self.gene_list, scale)
+            data[valid].tofile(handle)
+            self.sample_ids.extend(name for name, keep in zip(ids, valid) if keep)
+            excluded.extend({"source": path.stem, "sample_id": name,
+                             "reason": "zero_selected_expression"}
+                            for name, keep in zip(ids, valid) if not keep)
+            if obs is not None and len(self.cell_types):
+                labels.append(obs.iloc[valid].to_numpy(dtype=np.float32))
+
+        with data_path.open("wb") as output:
+            if path.suffix.lower() == ".h5ad":
+                source = anndata.read_h5ad(path, backed="r")
+                try:
+                    self.cell_types = source.obs.columns.astype(str).tolist()
+                    source_genes = source.var_names.astype(str).tolist()
+                    for start in range(0, source.n_obs, config.chunk_size):
+                        block = source.X[start:start + config.chunk_size]
+                        if hasattr(block, "toarray"):
+                            block = block.toarray()
+                        write_block(output, block, source_genes,
+                                    source.obs_names[start:start + len(block)],
+                                    source.obs.iloc[start:start + len(block)])
+                finally:
+                    source.file.close()
+            elif path.suffix.lower() == ".csv":
+                for frame in pd.read_csv(path, index_col=0, chunksize=config.chunk_size):
+                    write_block(output, frame.to_numpy(), frame.columns.astype(str).tolist(), frame.index)
+            else:
+                raise ValueError(f"Unsupported prediction input format: {path}")
+        pd.DataFrame(excluded, columns=["source", "sample_id", "reason"]).to_csv(
+            output_dir / "excluded_samples.csv", index=False
+        )
+        if not self.sample_ids:
+            raise ValueError("No prediction samples have nonzero expression in the model genes")
+        self._n_samples = len(self.sample_ids)
+        self._n_genes = len(self.gene_list)
+        self._n_cell_types = len(self.cell_types)
+        self._data = np.memmap(data_path, dtype=np.float32, mode="c",
+                               shape=(self._n_samples, self._n_genes))
+        self._labels = np.concatenate(labels, axis=0) if labels else np.array([], dtype=np.float32)
+        self._true_sct_gep = np.array([], dtype=np.float32)
+        self._true_sct_gep_present_mask = np.array([], dtype=bool)
 
 
 def _selected_sc_gep_cache_complete(
@@ -464,19 +540,37 @@ class VAEDeconPredictor:
         logger.info(f"Inference result subfolder: {result_set_name}")
 
         self._ensure_model_loaded()
+        contract_path = Path(self.model_dir) / "input_contract.json"
+        staged_contract = (
+            contract_path.is_file()
+            and json.loads(contract_path.read_text(encoding="utf-8")).get("input_contract") == "staged_tpm_v1"
+        )
+        if staged_contract:
+            self.config.model.input_gene_list_fp = Path(self.model_dir) / "input_gene_list.txt"
+            self.config.model.cell_type_fp = Path(self.model_dir) / "cell_type_list.txt"
         if isinstance(self.model, CellPropOnlyModel):
             predict_bulk = predict_bulk_csv if Path(data_file_path).suffix.lower() == ".csv" else predict_bulk_h5ad
             return predict_bulk(
                 self.model, data_file_path, Path(output_dir) / result_set_name,
                 self.device, self.config.evaluation.val_batch_size,
+                staged_contract=staged_contract,
             )
 
         gep_dataset_config = self._build_gepdataset_config(
             data_file_path=data_file_path,
             dataset_type=dataset_type,
             require_model_artifacts=True,
+            staged_contract=staged_contract,
         )
-        dataset = GEPDataset(config=gep_dataset_config)
+        if staged_contract:
+            gep_dataset_config = gep_dataset_config.model_copy(update={
+                "scaling_by_constant": self.model.data_config.scaling_by_constant,
+                "scaling_factor": self.model.data_config.scaling_factor,
+            })
+        dataset = (
+            _StagedInferenceDataset(gep_dataset_config, Path(output_dir) / result_set_name)
+            if staged_contract else GEPDataset(config=gep_dataset_config)
+        )
 
         logger.info(f"Dataset shape: {dataset.data.shape}")
 
@@ -506,6 +600,7 @@ class VAEDeconPredictor:
         data_file_path: str | Path,
         dataset_type: str = 'test',
         require_model_artifacts: bool = False,
+        staged_contract: bool = False,
     ) -> GEPDatasetConfig:
         """
         Build a config dict for GEPDataset from self.config.data
@@ -559,9 +654,9 @@ class VAEDeconPredictor:
         dataset_kwargs.update(
             {field_name: field_value for field_name, field_value in optional_path_fields.items() if field_value is not None}
         )
-        return GEPDatasetConfig(
-            **dataset_kwargs,
-        )
+        if staged_contract:
+            return GEPDatasetConfig.model_validate(dataset_kwargs, context={"defer_sct_requirements": True})
+        return GEPDatasetConfig(**dataset_kwargs)
 
     def predict_and_visualize(
             self,

@@ -783,6 +783,9 @@ class PLTrainer(L.LightningModule):
     def forward(self, inputs: Dict[str, Any], **kwargs) -> Any:
         """Forward pass of the model."""
         base_model = _unwrap_stage_model(self.model)
+        if self.optimize_stage_inputs and getattr(base_model, "model_name", None) == "CellPropOnly":
+            tensor_inputs = {key: value for key, value in inputs.items() if torch.is_tensor(value)}
+            return self.model(tensor_inputs, **kwargs)
         if not self.optimize_stage_inputs or not isinstance(base_model, VAE):
             return self.model(inputs, **kwargs)
 

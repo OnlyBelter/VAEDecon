@@ -4,6 +4,24 @@ This changelog records notable user-facing changes in `VAEDecon`. It focuses
 on behavior, configuration, and workflow updates that affect training,
 inference, and evaluation.
 
+## November 11, 2026
+
+### Staged filtering and evaluation
+
+- Normalize selected genes to TPM before log transformation and optional
+  scaling for newly trained staged models and their inference inputs.
+- Reuse staged bulk features in reconstruction and record zero-expression
+  exclusions; do not filter model genes by test-set variance.
+- Filter bulk stage-one genes by variance in linear, million-normalized
+  expression space, and reuse the ordered list for reconstruction.
+- Version bulk caches and check source identity before resuming a
+  predictor-only checkpoint.
+- Honor CUDA `torch_compile` for stage one and evaluate its best checkpoint
+  on configured test sets before reconstruction.
+- Preserve cell-proportion precision across all stages, including matched
+  and additional SCT rows.
+- Accept named or unnamed sample-index columns in matched-target mappings.
+
 ## November 10, 2026
 
 ### Training precision and reproducibility
