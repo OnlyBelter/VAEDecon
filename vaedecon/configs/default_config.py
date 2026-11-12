@@ -1047,6 +1047,15 @@ class ModelConfig(BaseModelConfig):
         default_factory=lambda: [0.0, 0.1, 0.1, 0.0],
         description="Dropout rates for encoder layers"
     )
+    encoder_normalization_layer: Optional[List[int]] = Field(
+        default=None,
+        description=(
+            "Per-layer LayerNorm mask for EncoderMLP and EncoderResMLP. The first "
+            "entry controls the flattened input and each following entry controls "
+            "one hidden stage. Defaults to input normalization off and all hidden "
+            "normalization on."
+        ),
+    )
     decoder_dropout_rate: List[float] = Field(
         default_factory=lambda: [0.0, 0.1, 0.1, 0.0],
         description="Dropout rates for decoder layers"
@@ -1483,6 +1492,18 @@ class ModelConfig(BaseModelConfig):
             raise ValueError(f"Dropout rates must be in [0, 1], got {v}")
         return v
 
+    @field_validator('encoder_normalization_layer', mode='before')
+    @classmethod
+    def validate_encoder_normalization_layer(cls, v: Optional[List[int]]) -> Optional[List[int]]:
+        """Require a binary integer mask without silently coercing values."""
+        if v is None:
+            return None
+        if not isinstance(v, (list, tuple)):
+            raise ValueError("encoder_normalization_layer must be a list containing only 0 and 1")
+        if any(type(value) is not int or value not in (0, 1) for value in v):
+            raise ValueError("encoder_normalization_layer entries must be integers 0 or 1")
+        return list(v)
+
     @field_validator('fusion_dropout_rate')
     @classmethod
     def validate_fusion_dropout(cls, v: Tuple[float, ...]) -> Tuple[float, ...]:
@@ -1567,6 +1588,15 @@ class ModelConfig(BaseModelConfig):
                 f"encoder_hidden_dims (len={len(self.encoder_hidden_dims)}) and "
                 f"encoder_dropout_rate (len={len(self.encoder_dropout_rate)}) "
                 f"must have the same length"
+            )
+        if self.encoder_normalization_layer is None:
+            self.encoder_normalization_layer = [0] + [1] * len(self.encoder_hidden_dims)
+        if len(self.encoder_normalization_layer) != len(self.encoder_hidden_dims) + 1:
+            raise ValueError(
+                "encoder_normalization_layer length must equal "
+                "len(encoder_hidden_dims) + 1 "
+                f"(expected {len(self.encoder_hidden_dims) + 1}, "
+                f"got {len(self.encoder_normalization_layer)})"
             )
 
         # Check decoder dimensions and dropout rates match

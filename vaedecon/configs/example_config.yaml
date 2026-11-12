@@ -160,6 +160,7 @@ model:
   latent_dim: 10
   n_cell_types: 16
   encoder_hidden_dims: [2048, 1024, 1024, 512]
+  encoder_normalization_layer: [0, 1, 1, 1, 1]
   decoder_hidden_dims: [512, 1024, 1024, 2048]
   encoder_dropout_rate: [0, 0.1, 0.1, 0]
   decoder_dropout_rate: [0, 0.1, 0.1, 0]

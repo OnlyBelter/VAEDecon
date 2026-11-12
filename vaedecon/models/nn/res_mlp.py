@@ -65,16 +65,28 @@ class EncoderResMLP(BaseEncoder):
         # Suggestion: Make hidden dims deeper, e.g., [1024, 1024, 512, 512]
         self.hidden_dims: List[int] = getattr(args, 'encoder_hidden_dims', [1024, 512, 512])
         self.dropout_rate = args.encoder_dropout_rate
+        self.normalization_layer = getattr(
+            args,
+            "encoder_normalization_layer",
+            [0] + [1] * len(self.hidden_dims),
+        )
 
         self.layers = nn.ModuleList()
         current_input_size = np.prod(self.input_dim)
+        self.input_normalization = (
+            nn.LayerNorm(current_input_size, eps=EPS)
+            if self.normalization_layer[0]
+            else nn.Identity()
+        )
 
         # Build Residual Layers
         for i, hidden_dim_size in enumerate(self.hidden_dims):
             # 1. Dimensionality Reduction / Projection Step
             projector = nn.Sequential(
                 nn.Linear(current_input_size, hidden_dim_size),
-                nn.LayerNorm(hidden_dim_size, eps=EPS),
+                nn.LayerNorm(hidden_dim_size, eps=EPS)
+                if self.normalization_layer[i + 1]
+                else nn.Identity(),
                 nn.GELU(),
                 nn.Dropout(p=self.dropout_rate[i]) if self.dropout_rate[i] > 0 else nn.Identity(),
             )
@@ -82,6 +94,9 @@ class EncoderResMLP(BaseEncoder):
             # 2. Residual Step (Deepening the representation)
             # We add a residual block at this dimension level to increase capacity
             res_block = ResidualBlock(hidden_dim_size, dropout_rate=self.dropout_rate[i])
+            if not self.normalization_layer[i + 1]:
+                res_block.block[1] = nn.Identity()
+                res_block.block[5] = nn.Identity()
 
             self.layers.append(nn.Sequential(projector, res_block))
             current_input_size = hidden_dim_size
@@ -124,6 +139,7 @@ class EncoderResMLP(BaseEncoder):
                 output_layer_levels: Optional[List[int]] = None, eps: float = EPS) -> ModelOutput:
 
         out = x.view(x.size(0), -1)
+        out = self.input_normalization(out)
 
         output = ModelOutput()
         for i, layer_block in enumerate(self.layers):

@@ -38,6 +38,11 @@ class EncoderMLP(BaseEncoder):
         self.input_dim = args.input_dim
         self.hidden_dims: List[int] = getattr(args, 'encoder_hidden_dims', [1024, 512, 512])
         self.dropout_rate = args.encoder_dropout_rate
+        self.normalization_layer = getattr(
+            args,
+            "encoder_normalization_layer",
+            [0] + [1] * len(self.hidden_dims),
+        )
 
         # Positional Encoding
         if self.using_positional_encoding:
@@ -53,11 +58,18 @@ class EncoderMLP(BaseEncoder):
         """Build MLP body layers from self.input_dim, self.hidden_dims, self.dropout_rate."""
         self.layers = nn.ModuleList()
         current_input_size = np.prod(self.input_dim)
+        self.input_normalization = (
+            nn.LayerNorm(current_input_size, eps=EPS)
+            if self.normalization_layer[0]
+            else nn.Identity()
+        )
 
         for i, hidden_dim_size in enumerate(self.hidden_dims):
             block = nn.Sequential(
                 nn.Linear(current_input_size, hidden_dim_size),
-                nn.LayerNorm(hidden_dim_size, eps=EPS),
+                nn.LayerNorm(hidden_dim_size, eps=EPS)
+                if self.normalization_layer[i + 1]
+                else nn.Identity(),
                 nn.GELU(),
                 nn.Dropout(p=self.dropout_rate[i]) if self.dropout_rate[i] > 0 else nn.Identity(),
             )
@@ -97,6 +109,7 @@ class EncoderMLP(BaseEncoder):
         # Flatten input: (B, Genes)
         x = self._preprocess_input(x)
         out = x.reshape(x.size(0), -1)
+        out = self.input_normalization(out)
 
         # --- Feature Extraction (MLP Body) ---
         output = ModelOutput()
@@ -185,6 +198,7 @@ class EncoderMLP(BaseEncoder):
 
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
         out = x.view(x.size(0), -1)
+        out = self.input_normalization(out)
         for layer_block in self.layers:
             out = layer_block(out)
         return out

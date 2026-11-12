@@ -397,9 +397,18 @@ The most common architecture fields are:
 - `model.encoders`
 - `model.decoders`
 - `model.encoder_hidden_dims`
+- `model.encoder_normalization_layer`
 - `model.decoder_hidden_dims`
 - `model.encoder_dropout_rate`
 - `model.decoder_dropout_rate`
+
+`model.encoder_normalization_layer` controls LayerNorm independently for the
+flattened encoder input and each hidden stage in `EncoderMLP` and
+`EncoderResMLP`. Its length must be `len(encoder_hidden_dims) + 1`; use `0`
+to disable normalization and `1` to enable it. When omitted, the mask defaults
+to `[0] + [1] * len(encoder_hidden_dims)`, preserving the existing encoder
+architecture while leaving raw-input normalization disabled. This setting does
+not affect the DeSide predictor or either decoder.
 
 The codebase currently supports multiple encoder backbones, including MLP,
 ResMLP, Transformer, pathway-based, GNN, and hybrid variants.
