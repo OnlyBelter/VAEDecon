@@ -86,17 +86,36 @@ class LossCoefficient(BaseModel):
         return self
 
 
+class TCGAComparisonConfig(BaseModel):
+    """Optional input files for TCGA reference comparisons."""
+
+    deside_proportion_file_path: str | Path = ""
+    cancer_purity_file_path: str | Path = ""
+    cancer_type_mapping_file_path: str | Path = ""
+    deside_cpe_ccc_file_path: str | Path = ""
+
+
 class TestSetConfig(BaseModel):
     """Per-test-set file bundle used during inference and visualization."""
 
     test_set_file_path: str | Path = ''
     test_set_sample2cell_id_file_path: str | Path = ''
     sct_gep_file_path: str | Path = ''
+    dataset_type: Literal["test", "tcga"] = "test"
+    tcga_comparisons: TCGAComparisonConfig = Field(default_factory=TCGAComparisonConfig)
 
     @model_validator(mode="after")
     def validate_required_test_file(self):
         if not self.test_set_file_path or str(self.test_set_file_path).strip() == "":
             raise ValueError("test_set_file_path must be set for each configured test set")
+        if self.dataset_type == "tcga":
+            if Path(str(self.test_set_file_path)).suffix.lower() != ".csv":
+                raise ValueError("TCGA test_set_file_path must be a linear TPM CSV")
+            if any(
+                path and str(path).strip()
+                for path in (self.test_set_sample2cell_id_file_path, self.sct_gep_file_path)
+            ):
+                raise ValueError("TCGA test sets cannot specify SCT reference or sample mapping files")
         return self
 
 

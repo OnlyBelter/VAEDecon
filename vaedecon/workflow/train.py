@@ -138,6 +138,11 @@ def _preflight_training_outputs(
     inputs = _validate_stage_checkpoints(config)
     if config_file is not None:
         inputs.append(Path(config_file).expanduser().resolve())
+    for test_set in config.data.test_sets.values():
+        if test_set.dataset_type == "tcga":
+            for value in (test_set.test_set_file_path, *test_set.tcga_comparisons.model_dump().values()):
+                if value and str(value).strip():
+                    inputs.append(Path(value).expanduser().resolve())
     root = model_dir.parent
     staged = config.training.staged_training
     paths = [model_dir, root / "staged_training_summary.csv",

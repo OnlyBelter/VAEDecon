@@ -35,6 +35,35 @@ def prepare_staged_expression(values, source_genes, genes, scaling_factor=None):
     return aligned, valid
 
 
+def prepare_linear_tpm(values, source_genes, genes, scaling_factor=None, legacy_round=False):
+    """Normalize linear TPM on present model genes and restore the model order."""
+    positions = {gene: index for index, gene in enumerate(source_genes)}
+    if len(positions) != len(source_genes):
+        raise ValueError("Prediction input contains duplicate genes")
+    if not genes or len(set(genes)) != len(genes):
+        raise ValueError("Invalid saved model gene list")
+    present = [(i, positions[gene]) for i, gene in enumerate(genes) if gene in positions]
+    if not present:
+        raise ValueError("Prediction input has no genes in common with the model")
+    values = np.asarray(values, dtype=np.float32)
+    if not np.isfinite(values).all() or (values < 0).any():
+        raise ValueError("TCGA TPM input must contain finite nonnegative expression")
+    selected = values[:, [source for _, source in present]]
+    totals = selected.sum(axis=1, keepdims=True)
+    if not np.isfinite(totals).all():
+        raise ValueError("TCGA input has non-finite expression totals")
+    valid = totals[:, 0] > 0
+    normalized = np.divide(selected, np.where(valid[:, None], totals, 1.0)) * 1e6
+    selected = np.log2(normalized + 1.0)
+    if legacy_round:
+        selected = np.round(selected, 3)
+    aligned = np.zeros((len(selected), len(genes)), dtype=np.float32)
+    aligned[:, [target for target, _ in present]] = selected
+    if scaling_factor is not None:
+        aligned /= float(scaling_factor)
+    return aligned, valid
+
+
 def _predict_expression_batch(model, values, source_genes, genes, device):
     scale = model.data_config.scaling_factor if model.data_config.scaling_by_constant else None
     aligned, _ = prepare_staged_expression(values, source_genes, genes, scale)

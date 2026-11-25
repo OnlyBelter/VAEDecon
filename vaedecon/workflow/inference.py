@@ -1,6 +1,7 @@
 """
 Inference pipeline for VAEDecon
 """
+import csv
 import os
 import gc
 import json
@@ -16,7 +17,12 @@ import torch
 
 from ..data import GEPDataset, find_sct_gep_of_bulk_sample
 from ..models.cell_prop_only import CellPropOnlyModel
-from .bulk_prediction import predict_bulk_csv, predict_bulk_h5ad, prepare_staged_expression
+from .bulk_prediction import (
+    predict_bulk_csv,
+    predict_bulk_h5ad,
+    prepare_linear_tpm,
+    prepare_staged_expression,
+)
 from ..utility import check_dir
 from .workflow import (
     load_trained_model,
@@ -34,7 +40,7 @@ class _StagedInferenceDataset(GEPDataset):
 
     uses_staged_tpm_contract = True
 
-    def __init__(self, config, output_dir):
+    def __init__(self, config, output_dir, *, linear_tpm=False, legacy_round=False):
         self.config = config
         self.cache = None
         self.use_memmap = True
@@ -53,11 +59,20 @@ class _StagedInferenceDataset(GEPDataset):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         def write_block(handle, values, genes, ids, obs=None):
+            if linear_tpm and (pd.isna(ids).any() or any(not str(v).strip() for v in ids)):
+                raise ValueError("TCGA sample IDs must be present and nonempty")
             ids = [str(value) for value in ids]
             if len(ids) != len(set(ids)) or seen.intersection(ids):
                 raise ValueError("Prediction input contains duplicate sample IDs")
             seen.update(ids)
-            data, valid = prepare_staged_expression(values, genes, self.gene_list, scale)
+            if linear_tpm:
+                data, valid = prepare_linear_tpm(
+                    values, genes, self.gene_list, scale, legacy_round=legacy_round
+                )
+                if legacy_round:
+                    valid = np.ones(len(ids), dtype=bool)
+            else:
+                data, valid = prepare_staged_expression(values, genes, self.gene_list, scale)
             data[valid].tofile(handle)
             self.sample_ids.extend(name for name, keep in zip(ids, valid) if keep)
             excluded.extend({"source": path.stem, "sample_id": name,
@@ -82,7 +97,17 @@ class _StagedInferenceDataset(GEPDataset):
                 finally:
                     source.file.close()
             elif path.suffix.lower() == ".csv":
-                for frame in pd.read_csv(path, index_col=0, chunksize=config.chunk_size):
+                if linear_tpm:
+                    with path.open(newline="", encoding="utf-8-sig") as source:
+                        header = next(csv.reader(source), [])
+                    if len(header) < 2 or any(not gene.strip() for gene in header[1:]):
+                        raise ValueError("TCGA input must contain nonempty gene names")
+                    if len(header[1:]) != len(set(header[1:])):
+                        raise ValueError("TCGA input contains duplicate genes")
+                csv_options = {"converters": {0: str}} if linear_tpm else {"index_col": 0}
+                for frame in pd.read_csv(path, chunksize=config.chunk_size, **csv_options):
+                    if linear_tpm:
+                        frame = frame.set_index(frame.columns[0])
                     write_block(output, frame.to_numpy(), frame.columns.astype(str).tolist(), frame.index)
             else:
                 raise ValueError(f"Unsupported prediction input format: {path}")
@@ -749,7 +774,14 @@ class VAEDeconPredictor:
         all_results: Dict[str, Dict[str, Any]] = {}
         for test_name, test_cfg in configured_sets.items():
             logger.info("Running inference for configured test set: %s", test_name)
-            if visualize:
+            if test_cfg.dataset_type == "tcga":
+                from .tcga import predict_tcga_test_set
+
+                root = output_dir or os.path.join(
+                    os.path.dirname(self.model_dir), f"{dataset_type}_results"
+                )
+                result = predict_tcga_test_set(self, test_cfg, root)
+            elif visualize:
                 result = self.predict_and_visualize(
                     data_file_path=str(test_cfg.test_set_file_path),
                     output_dir=output_dir,

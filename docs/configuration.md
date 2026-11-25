@@ -173,9 +173,24 @@ config. Each named entry can include:
 - `test_set_file_path`
 - `sct_gep_file_path`
 - `test_set_sample2cell_id_file_path`
+- `dataset_type`: `test` by default, or `tcga` for a linear TPM CSV.
+- `tcga_comparisons`: optional reference paths for TCGA comparisons.
 
 This is useful when you want one trained model to run across several
 benchmark or ablation datasets without rewriting the config each time.
+
+For TCGA, provide a sample-by-gene CSV with sample IDs in the first column.
+Don't provide SCT or sample-to-cell mapping files for a TCGA entry. The
+optional comparison paths are:
+
+- `deside_proportion_file_path`: enables the DeSide comparison.
+- `cancer_purity_file_path`, `cancer_type_mapping_file_path`, and
+  `deside_cpe_ccc_file_path`: together enable the CPE comparison.
+
+The last file contains precomputed DeSide-versus-CPE CCC values, not the
+output from the current model. Missing comparison inputs skip the affected
+comparison without skipping prediction. A malformed input records a failed
+comparison in the run manifest.
 
 For end-to-end training and inference steps, see the
 [usage guide](usage.md).

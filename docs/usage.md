@@ -43,6 +43,27 @@ Real bulk datasets can omit `sct_gep_file_path` and
 `test_set_sample2cell_id_file_path`. Keep data paths relative to the working
 directory used to launch the command, or provide absolute paths.
 
+To evaluate raw TCGA TPM automatically after training, add a TCGA entry:
+
+```yaml
+data:
+  test_sets:
+    TCGA:
+      dataset_type: tcga
+      test_set_file_path: "./datasets/TCGA/tpm/merged_tpm.csv"
+      tcga_comparisons:
+        deside_proportion_file_path: "./datasets/predicted_cell_proportion_by_DeSide/Table_S3.csv"
+        cancer_purity_file_path: "./datasets/cancer_purity.csv"
+        cancer_type_mapping_file_path: "./datasets/TCGA/tpm/tcga_sample_id2cancer_type.csv"
+        deside_cpe_ccc_file_path: "./applications/DeSide/cancer_cell_vs_cpe_ccc_diff_DNN_models.csv"
+```
+
+The CSV contains linear TPM, with samples as rows and genes as columns.
+You can omit `tcga_comparisons` or individual paths. DeSide comparison needs
+the DeSide proportions file; CPE comparison needs the other three files.
+Unavailable references skip only their comparison. Don't specify an SCT
+reference or mapping for this entry.
+
 ## Configure email notifications
 
 Email notifications are optional. You can provide a local YAML file with
@@ -217,6 +238,11 @@ For simulated test sets with matched ground truth, outputs include cell
 proportion predictions, reconstructed sample-specific cell-type GEPs, and
 ground-truth comparison results. The exact outputs depend on the configured
 evaluation options.
+
+TCGA results are written under `test_results/<input_file_stem>/tcga/`.
+The folder contains predictions, exclusions, a run manifest, and available
+comparisons. Full VAE checkpoints also export purified cell-type GEPs;
+these files can be large. Predictor-only checkpoints export proportions only.
 
 ## Troubleshoot test-set paths
 

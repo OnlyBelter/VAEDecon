@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -97,3 +98,57 @@ def test_cpe_figure_orders_cancer_types_by_descending_vaedecon_ccc(tmp_path, mon
     tcga_prediction.compare_cancer_cell_cpe(result)
     svg = (result / "compare_with_CPE/cancer_cell_cpe_ccc_comparison.svg").read_text(encoding="utf-8")
     assert svg.index("<!-- ACC -->") < svg.index("<!-- AAA -->")
+
+
+def test_cpe_scatter_uses_finite_exact_pairs_and_handles_missing_types(tmp_path, monkeypatch):
+    from matplotlib.axes import Axes
+
+    result, cpe = _inputs(tmp_path, monkeypatch)
+    prediction_path = result / "merged_tpm/predicted_cell_prop.csv"
+    pd.DataFrame(
+        {"Cancer Cells": [0.2, 0.8, 0.4, 0.6, 0.3]},
+        index=["s1", "s2", "s3", "s4", "s5"],
+    ).to_csv(prediction_path)
+    pd.DataFrame(
+        {"cancer_type": ["LIHC", "LIHC", "LIHC", "BLCA", "HNSC"]},
+        index=["s1", "s2", "s3", "s4", "s5"],
+    ).to_csv(tcga_prediction.TCGA_CANCER_TYPES_FILE)
+    pd.DataFrame(
+        {
+            "Sample ID": ["s2", "s1", "s3", "s5", "extra"],
+            "Cancer type": ["LIHC", "LIHC", "LIHC", "HNSC", "BLCA"],
+            "CPE": [0.8, 0.2, np.nan, 0.4, 0.6],
+        }
+    ).to_csv(cpe, index=False)
+
+    calls = []
+    original_scatter = Axes.scatter
+
+    def record_scatter(axis, x, y, *args, **kwargs):
+        calls.append((np.asarray(x), np.asarray(y)))
+        return original_scatter(axis, x, y, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "scatter", record_scatter)
+    summary = tcga_prediction.compare_cancer_cell_cpe(result)
+
+    assert summary["matched_sample_count"] == 4
+    assert summary["valid_pair_count"] == 3
+    np.testing.assert_allclose(calls[0][0], [0.2, 0.8])
+    np.testing.assert_allclose(calls[0][1], [0.2, 0.8])
+    assert calls[1][0].size == 0
+    assert calls[2][0].size == 0
+    np.testing.assert_allclose(calls[3][0], [0.4])
+    np.testing.assert_allclose(calls[3][1], [0.3])
+
+    png = Path(summary["scatter_figure_file"])
+    svg = png.with_suffix(".svg")
+    assert png.is_file()
+    text = svg.read_text(encoding="utf-8")
+    assert text.index("<!-- LIHC -->") < text.index("<!-- BLCA -->")
+    assert text.index("<!-- BLCA -->") < text.index("<!-- CESC -->")
+    assert text.index("<!-- CESC -->") < text.index("<!-- HNSC -->")
+    assert "<!-- n = 2 -->" in text
+    assert "<!-- CCC = 1.000 -->" in text
+    assert "<!-- Pearson r = 1.000 -->" in text
+    assert "<!-- RMSE = 0.000 -->" in text
+    assert "<!-- CCC = NA -->" in text

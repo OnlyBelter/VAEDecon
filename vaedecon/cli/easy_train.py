@@ -347,6 +347,11 @@ def _run_prediction(
             path = getattr(test_config, field, None)
             if path and str(path).strip():
                 protected.append(Path(path))
+        if test_config.dataset_type == "tcga":
+            protected.extend(
+                Path(path) for path in test_config.tcga_comparisons.model_dump().values()
+                if path and str(path).strip()
+            )
     if not configured_sets:
         for field in (
             "test_set_file_path",

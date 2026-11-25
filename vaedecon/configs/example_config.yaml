@@ -41,6 +41,14 @@ data:
       test_set_file_path: './datasets/simulated_bulk_cell_dataset_subtypes_all_range/segment_12ds_alt_test/simu_bulk_exp_Test_set2_log2cpm1p.h5ad'
       sct_gep_file_path: './datasets/generated_sc_dataset_12ds_n_base100_all_subtypes/simu_bulk_exp_SCT_POS_N10K_log2cpm1p_25sct.h5ad'
       test_set_sample2cell_id_file_path: './datasets/simulated_bulk_cell_dataset_subtypes_all_range/segment_12ds_alt_test/simu_bulk_exp_Test_set2_sampled_sc_cell_id.csv'
+    # TCGA:
+    #   dataset_type: tcga
+    #   test_set_file_path: './datasets/TCGA/tpm/merged_tpm.csv'  # Linear TPM
+    #   tcga_comparisons:  # Optional references; omitted comparisons are skipped.
+    #     deside_proportion_file_path: './datasets/predicted_cell_proportion_by_DeSide/Table_S3.csv'
+    #     cancer_purity_file_path: './datasets/cancer_purity.csv'
+    #     cancer_type_mapping_file_path: './datasets/TCGA/tpm/tcga_sample_id2cancer_type.csv'
+    #     deside_cpe_ccc_file_path: './applications/DeSide/cancer_cell_vs_cpe_ccc_diff_DNN_models.csv'
 
 
 training:
